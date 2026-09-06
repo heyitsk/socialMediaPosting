@@ -1,0 +1,589 @@
+{
+  "name": "Master Social Media Poster",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "e44d37c3-3b1a-464a-9f4a-8d1e1f727b2f",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "status",
+              "lookupValue": "Ready"
+            }
+          ]
+        }
+      },
+      "id": "1",
+      "name": "Get Ready Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "2",
+      "name": "Row Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst platforms = item.platform.split(',').map(p => p.trim());\n\n// Add a results tracker to the row\nitem.platform_results = [];\nitem.pending_platforms = platforms;\n\nreturn { json: item };"
+      },
+      "id": "3",
+      "name": "Initialize Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "4",
+      "name": "Platform Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [800, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $node['Initialize Row'].json;\nif (row.pending_platforms.length === 0) return [];\n\nconst currentPlatform = row.pending_platforms.shift();\nreturn { json: { ...row, current_platform: currentPlatform } };"
+      },
+      "id": "5",
+      "name": "Get Next Platform",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 300]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.current_platform.toLowerCase() }}",
+        "rules": {
+          "rules": [
+            {
+              "value2": "facebook",
+              "output": 0
+            },
+            {
+              "value2": "instagram",
+              "output": 1
+            },
+            {
+              "value2": "threads",
+              "output": 2
+            },
+            {
+              "value2": "youtube",
+              "output": 3
+            }
+          ]
+        }
+      },
+      "id": "6",
+      "name": "Route Platform",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "node": "YOUR_FB_PAGE_ID",
+        "edge": "feed",
+        "options": {}
+      },
+      "id": "fb1",
+      "name": "Facebook Post",
+      "type": "n8n-nodes-base.facebookGraphApi",
+      "typeVersion": 1,
+      "position": [1500, 100],
+      "notesInFlow": true,
+      "notes": "Ensure you map 'feed', 'photos', or 'videos' based on media_type"
+    },
+    {
+      "parameters": {
+        "node": "YOUR_IG_BUSINESS_ID",
+        "edge": "media",
+        "options": {}
+      },
+      "id": "ig1",
+      "name": "IG Create Container",
+      "type": "n8n-nodes-base.facebookGraphApi",
+      "typeVersion": 1,
+      "position": [1500, 300]
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "id": "ig2",
+      "name": "Wait (IG)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1700, 300]
+    },
+    {
+      "parameters": {
+        "node": "YOUR_IG_BUSINESS_ID",
+        "edge": "media_publish",
+        "options": {}
+      },
+      "id": "ig3",
+      "name": "IG Publish",
+      "type": "n8n-nodes-base.facebookGraphApi",
+      "typeVersion": 1,
+      "position": [1900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.threads.net/v1.0/me/threads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "media_type",
+              "value": "={{ $json.media_type }}"
+            }
+          ]
+        }
+      },
+      "id": "th1",
+      "name": "Threads Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1500, 500]
+    },
+    {
+      "parameters": {
+        "amount": 45
+      },
+      "id": "th2",
+      "name": "Wait (Threads Video)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1700, 500],
+      "notesInFlow": true,
+      "notes": "Acts as polling delay for video"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.threads.net/v1.0/me/threads_publish"
+      },
+      "id": "th3",
+      "name": "Threads Publish",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1900, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "const url = $json.drive_url;\nconst match = url.match(/\\/d\\/([a-zA-Z0-9-_]+)/);\n$json.drive_file_id = match ? match[1] : '';\nreturn $json;"
+      },
+      "id": "yt1",
+      "name": "Extract Drive ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 700]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": "={{ $json.drive_file_id }}"
+      },
+      "id": "yt2",
+      "name": "Google Drive Download",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1700, 700]
+    },
+    {
+      "parameters": {
+        "resource": "video",
+        "operation": "upload",
+        "title": "={{ $json.yt_title }}",
+        "description": "={{ $json.yt_description }}"
+      },
+      "id": "yt3",
+      "name": "YouTube Upload",
+      "type": "n8n-nodes-base.youTube",
+      "typeVersion": 1,
+      "position": [1900, 700]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $node['Initialize Row'].json;\nrow.platform_results.push({\n  platform: $node['Get Next Platform'].json.current_platform,\n  status: 'SUCCESS',\n  id: $json.id || $json.creation_id || 'Uploaded'\n});\nreturn [{ json: row }];"
+      },
+      "id": "merge_success",
+      "name": "Record Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $node['Initialize Row'].json;\nrow.platform_results.push({\n  platform: $node['Get Next Platform'].json.current_platform,\n  status: 'ERROR',\n  error: $json.message || 'Unknown error'\n});\nreturn [{ json: row }];"
+      },
+      "id": "merge_error",
+      "name": "Record Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "const row = $node['Initialize Row'].json;\nif (row.pending_platforms.length > 0) {\n  return [ { json: row } ]; // Loop again\n}\nreturn [ null, { json: row } ]; // Done with platforms"
+      },
+      "id": "7",
+      "name": "Check Platforms Done",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = $json.platform_results;\nconst allSuccess = results.every(r => r.status === 'SUCCESS');\nconst allFailed = results.every(r => r.status === 'ERROR');\n\n$json.final_status = allSuccess ? 'Posted' : (allFailed ? 'Error' : 'Partial Success');\n$json.final_post_id = results.map(r => `${r.platform}: ${r.id || 'N/A'}`).join(' | ');\n$json.final_error = results.map(r => `${r.platform}: ${r.error || 'None'}`).join(' | ');\n\nreturn $json;"
+      },
+      "id": "8",
+      "name": "Aggregate Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 500]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID_HERE",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sheet1",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.final_status }}",
+            "post_id": "={{ $json.final_post_id }}",
+            "error_message": "={{ $json.final_error }}",
+            "posted_at": "={{ new Date().toISOString() }}"
+          }
+        }
+      },
+      "id": "9",
+      "name": "Update Row in Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.1,
+      "position": [2800, 500]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get Ready Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Ready Rows": {
+      "main": [
+        [
+          {
+            "node": "Row Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Row Loop": {
+      "main": [
+        [
+          {
+            "node": "Initialize Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize Row": {
+      "main": [
+        [
+          {
+            "node": "Platform Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Platform Loop": {
+      "main": [
+        [
+          {
+            "node": "Get Next Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Next Platform": {
+      "main": [
+        [
+          {
+            "node": "Route Platform",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Platform": {
+      "main": [
+        [
+          {
+            "node": "Facebook Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IG Create Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Threads Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Drive ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Facebook Post": {
+      "main": [
+        [
+          {
+            "node": "Record Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG Create Container": {
+      "main": [
+        [
+          {
+            "node": "Wait (IG)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait (IG)": {
+      "main": [
+        [
+          {
+            "node": "IG Publish",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IG Publish": {
+      "main": [
+        [
+          {
+            "node": "Record Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Threads Container": {
+      "main": [
+        [
+          {
+            "node": "Wait (Threads Video)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait (Threads Video)": {
+      "main": [
+        [
+          {
+            "node": "Threads Publish",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Threads Publish": {
+      "main": [
+        [
+          {
+            "node": "Record Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Drive ID": {
+      "main": [
+        [
+          {
+            "node": "Google Drive Download",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Drive Download": {
+      "main": [
+        [
+          {
+            "node": "YouTube Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YouTube Upload": {
+      "main": [
+        [
+          {
+            "node": "Record Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Success": {
+      "main": [
+        [
+          {
+            "node": "Check Platforms Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Error": {
+      "main": [
+        [
+          {
+            "node": "Check Platforms Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Platforms Done": {
+      "main": [
+        [
+          {
+            "node": "Platform Loop",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Aggregate Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Results": {
+      "main": [
+        [
+          {
+            "node": "Update Row in Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Row in Sheet": {
+      "main": [
+        [
+          {
+            "node": "Row Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

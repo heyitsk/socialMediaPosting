@@ -1,0 +1,191 @@
+{
+  "name": "Instagram Posting Test (HTTP vs Native)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "e6459344-938b-49ea-bc47-f50e82c2d921",
+      "name": "When clicking \"Test workflow\"",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        220,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "instagram_business_account_id",
+              "value": "YOUR_INSTAGRAM_BUSINESS_ACCOUNT_ID"
+            },
+            {
+              "name": "page_access_token",
+              "value": "YOUR_PAGE_ACCESS_TOKEN"
+            },
+            {
+              "name": "image_url",
+              "value": "https://images.unsplash.com/photo-1579546929518-9e396f3cc809?w=800"
+            },
+            {
+              "name": "caption",
+              "value": "Hello from n8n test workflow!"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c1f721d6-d08b-4171-aa3a-5cf73a5a1f2f",
+      "name": "Set Test Parameters",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        420,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v19.0/{{ $json.instagram_business_account_id }}/media",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"image_url\": \"{{ $json.image_url }}\", \"caption\": \"{{ $json.caption }}\", \"access_token\": \"{{ $json.page_access_token }}\"}",
+        "options": {
+          "redirect": {
+            "redirect": {}
+          }
+        }
+      },
+      "id": "060d4b24-9b16-43b9-bb85-0be157ecff9c",
+      "name": "HTTP: Create Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        660,
+        60
+      ],
+      "notesInFlow": true,
+      "notes": "Step 1: Uploads the image and caption to Meta. Returns a container ID."
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "787c8052-a63e-48a9-9524-74c0b490f845",
+      "name": "Wait 5s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        860,
+        60
+      ],
+      "notesInFlow": true,
+      "notes": "Meta needs a few seconds to process the image container before it can be published."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v19.0/{{ $('Set Test Parameters').item.json.instagram_business_account_id }}/media_publish",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"creation_id\": \"{{ $json.id }}\", \"access_token\": \"{{ $('Set Test Parameters').item.json.page_access_token }}\"}",
+        "options": {}
+      },
+      "id": "673f40f3-8b77-4402-95f7-41804d9c79fa",
+      "name": "HTTP: Publish Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1060,
+        60
+      ],
+      "notesInFlow": true,
+      "notes": "Step 2: Publishes the uploaded container to Instagram. Returns a post ID."
+    },
+    {
+      "parameters": {
+        "resource": "media",
+        "instagramAccountId": "={{ $json.instagram_business_account_id }}",
+        "imageUrl": "={{ $json.image_url }}",
+        "caption": "={{ $json.caption }}"
+      },
+      "id": "4020a597-9e79-42b7-86f3-1383792019b8",
+      "name": "Instagram Node: Post Image",
+      "type": "n8n-nodes-base.instagram",
+      "typeVersion": 1,
+      "position": [
+        660,
+        260
+      ],
+      "notesInFlow": true,
+      "notes": "Uses native n8n Instagram/Meta integration (needs credential config).",
+      "credentials": {
+        "instagram": {
+          "id": "new-credential",
+          "name": "Instagram Account Connection"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When clicking \"Test workflow\"": {
+      "main": [
+        [
+          {
+            "node": "Set Test Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Test Parameters": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Create Container",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Instagram Node: Post Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP: Create Container": {
+      "main": [
+        [
+          {
+            "node": "Wait 5s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 5s": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Publish Media",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "e305e7e3-0cfa-4cf7-9a03-7cf5e40e6c1e",
+  "id": "ig-posting-test"
+}
