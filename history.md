@@ -10,7 +10,7 @@
 
 | Item | Value |
 |------|-------|
-| **Current Phase** | Phase 1 — Foundation (in progress) — YouTube ✅ done |
+| **Current Phase** | Phase 1 — Foundation (in progress) — `instagram-poster`/`threads-poster`/`youtube-poster` ✅ tested; `facebook-poster` blocked by cooldown |
 | **Active Platforms** | Facebook, Instagram, Reddit, YouTube, Pinterest |
 | **Excluded (V1)** | Quora (no API), X/Twitter (deferred to V2) |
 | **Credential Scope** | Single user (your own accounts) |
@@ -33,7 +33,7 @@
 | `setup.md` | Step-by-step account setup guide for all platforms | 2026-08-11 |
 | `history.md` | This file — running session log | 2026-08-11 |
 | `docker-compose.yml` | n8n Docker configuration with all required env variables | 2026-08-11 |
-| `workflows/` | n8n workflow JSON exports (importable into n8n) | — |
+| `workflows/` | n8n workflow JSON exports (importable into n8n) | 2026-09-07 |
 | `websitePlan.md` | V2 SaaS product & technical spec (architecture, OAuth, DB schema, roadmap) | 2026-09-06 |
 
 ---
@@ -352,16 +352,80 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 
 ---
 
+### Session 13 — 2026-09-07
+
+**What we did:**
+- Corrected `websitePlan.md` §5: `facebook-poster` is documented as an `HTTP Request` node, not the typed `Facebook Graph API` node — its `Credential` field is bound to an n8n-stored credential at design time and has no expression/`fx` option, so it can't take a per-call dynamic token. Same limitation confirmed for the community Instagram node and the built-in Google Drive node. Standing pattern going forward: every platform-calling node in these workflows is a plain `HTTP Request` with `authentication: none`, token injected via expression from the webhook payload — never an n8n-stored credential.
+- Built and **tested successfully** `workflows/instagram-poster.json`: webhook → routes on `media_type` (`IMAGE`/`CAROUSEL`/`REELS`/`STORIES`) → per-type container→wait→publish `HTTP Request` chains → `Build Success/Error Result` → `Send Callback`, plus an `Error Trigger` island that recovers `post_id`/`callback_url` from the failed run's `Parse Request` output via `$json.execution.data.executionData.resultData.runData`. Confirmed working for photo, story, and reel.
+- Built `workflows/facebook-poster.json` (same shape, routes on `TEXT`/`PHOTO`/`MULTI_PHOTO`/`VIDEO`). `MULTI_PHOTO` mirrors Instagram's carousel pattern: upload each photo unpublished → aggregate returned IDs → one `/feed` call with `attached_media`. Facebook Reels deferred — needs the structurally different chunked `video_reels` resumable-upload API, not a quick addition. **Not yet tested.**
+- Built and **tested successfully** `workflows/threads-poster.json` (routes on `TEXT`/`IMAGE`/`VIDEO`). Confirmed `graph.threads.net` is a fully separate host/app/token/quota pool from Facebook/Instagram's `graph.facebook.com` before building — relevant since we'd just hit a Facebook-side block and needed to know it wouldn't carry over. No Page/Business ID needed; posts via `/me/threads`, tied directly to the user's own token.
+- Built `workflows/youtube-poster.json` — structurally different from the other three since YouTube Data API v3 needs actual uploaded bytes, not a URL Graph API can fetch server-side. `Download Video` and `Initiate Resumable Upload` run in parallel (they don't depend on each other) and recombine via a `Merge` node, since an `HTTP Request` node's output replaces the item it received — a sequential chain would drop the downloaded binary before the final `Upload Video Binary` PUT to the session URL from the init call's `Location` header. Replaces the old Google Drive node (same per-call-credential problem as Facebook/Instagram's typed nodes) with a generic HTTP GET on `media_urls[0]` — any public URL works; used a Drive "anyone with the link" direct-download URL as a stand-in for S3 during testing. **Not yet tested** — blocked by the quota issue below before the `Merge`/binary-body wiring could be confirmed live.
+- Hit two real platform errors during testing, both written into `websitePlan.md` §5/§6:
+  - **Meta error `368` / subcode `1390008`** ("spam prevention") on Instagram's `Publish Photo Post` — an abuse heuristic, not a countable rate limit; doesn't respond to retry/backoff, can block for minutes to ~24h.
+  - **YouTube `quotaExceeded` (429)** on `Initiate Resumable Upload` — checked Cloud Console's Quotas dashboard directly: `Video Uploads per day` shows limit 100, usage 0%, confirming **the number shown in Console is not what's actually enforced.** YouTube gates the upload feature behind a separate, undocumented restriction for any project that hasn't completed Google's **Audit and Quota Extension** process — project-wide (shared across every future SaaS user), not per-user, and not something a rate limiter can route around.
+
+**Key findings (carry into next session):**
+- Facebook Page is likely still cooling down from the code-368 block — `facebook-poster.json` is built but untested; check whether the block has lifted, then test `TEXT` first.
+- YouTube uploads are hard-blocked project-wide until the Audit and Quota Extension request is filed and approved (realistic lead time: days to weeks). This is a **pre-launch dependency for the whole SaaS**, not just today's problem — worth filing soon given the lead time, even before the backend exists. Also check OAuth consent screen "Publishing status" (Testing vs. In Production) while in Cloud Console — a related but separate gate.
+- General pattern now proven across three platforms: n8n's typed, credential-bound nodes (Facebook Graph API, Instagram community node, Google Drive) cannot take a per-call dynamic token under any configuration — plain `HTTP Request` + payload-injected token is the only way to make per-user credentials work in a multi-tenant n8n workflow.
+
+**Decisions made:**
+- `websitePlan.md` §5 corrected: `facebook-poster` uses `HTTP Request`, not the typed node — matches what was actually built.
+- `websitePlan.md` §5/§6 updated with the rate-limit-vs-abuse-block distinction (measured quota throttling via `X-App-Usage`/`X-Page-Usage` headers vs. a circuit breaker for Meta code 368) and new callback schema fields (`error_type`, `usage`).
+- Next session picks up: (1) confirm Facebook Page cooldown has lifted, test `facebook-poster.json`; (2) file the YouTube Audit and Quota Extension request; (3) retest `youtube-poster.json` once approved (or find another way to sanity-check the `Merge`/binary-body wiring in the meantime, since the quota gate blocked confirmation this session).
+
+**Files modified this session:**
+- `workflows/instagram-poster.json` — new, tested (photo/story/reel)
+- `workflows/facebook-poster.json` — new, untested
+- `workflows/threads-poster.json` — new, tested
+- `workflows/youtube-poster.json` — new, untested (blocked by YouTube's upload-audit gate)
+- `websitePlan.md` — §5 `facebook-poster` node type corrected; §5/§6 rate-limit vs. abuse-block distinction and callback schema fields (`error_type`, `usage`) added
+- `history.md` — this entry, File Index, Platform Credential Reference, and Key Technical Decisions updated
+
+---
+
+### Session 14 — 2026-09-08
+
+**What we did:**
+- Confirmed the Facebook code-368 block from Session 13 was **still active a full day later** — retried `facebook-poster.json`'s `Publish Photo Post` and got the identical `code: 368` / `error_subcode: 1390008` response. Checked Meta Business Suite's Account Quality page as a possible status source; it showed nothing actionable, confirming there's no reliable way to check remaining cooldown time for this error — it's silent until it lifts.
+- Flagged that the pasted n8n execution log contained a live Facebook access token in plaintext (`qs.access_token`) — same class of exposure as the `cred.txt` issue from Session 1; token should be rotated before further use since it's now sitting in conversation history.
+- Verified via Cloud Console's Quotas & System Limits page that `Queries per day`/`Queries per minute`/`Search Queries` all show 0% usage — reconfirmed this dashboard is disconnected from the actual upload-audit gate and can't be used to check block status either.
+- Got a fresh OAuth token via OAuth Playground (had to add `https://developers.google.com/oauthplayground` as an authorized redirect URI on the `SMPosting V1` OAuth client first) and isolate-tested the **`Initiate Resumable Upload`** node alone (pinned mock data on `Parse Request`, bypassing the Webhook trigger's listen-mode hang that "Execute previous nodes" caused). Got back a clean `200 OK` with a valid resumable-upload `Location` URL — **the YouTube upload-audit gate has lifted.**
+- Ran the full `youtube-poster.json` workflow end-to-end and found the `Validate Payload` → `Initiate Resumable Upload` connection was actually missing on canvas (the `true` output was only wired to `Download Video`) — items silently never reached the second parallel branch. Reconnected it manually; full flow (`Download Video` ∥ `Initiate Resumable Upload` → `Merge` → `Upload Video Binary`) then ran successfully end-to-end for the first time.
+- Sourced a verified public 9:16, 10s, CC0 test clip (`https://cdn.truefilesize.com/mp4/sample-portrait.mp4`) to test Shorts via Google Drive, since the original test video had issues. Confirmed regular video upload and Shorts upload (via `#Shorts` in title/description, no workflow changes needed — same as the old native-node behavior) both work through the new HTTP-based flow.
+- Discussed what S3 actually changes vs. the Drive stand-in: **nothing in the workflow** — `Download Video` already does a generic `GET` on `media_urls[0]`, so Drive vs. S3 is transparent to n8n. The only real design implication is that S3 objects aren't public by default, so the backend must either use a public-read bucket or generate presigned GET URLs with a TTL that survives Redis queue delays + download time.
+- Identified a scaling gap in `youtube-poster.json`: `Download Video` fully buffers the video into n8n binary storage before `Upload Video Binary` sends anything to YouTube — total time is download + upload, not overlapped. Initially thought this also risked an OOM crash and "patched" it by adding `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` to `~/.zshrc` — **turned out to be a misdiagnosis**: that env var was already set on the actual n8n instance (the Docker container `n8n`, part of the `internapplier` docker-compose project, which is what's really behind the ngrok tunnel), confirmed via `docker inspect n8n`. The host-level `node /usr/local/bin/n8n start` process I'd checked instead is an unrelated stray/orphaned instance, not what's actually serving `localhost:5678`/the tunnel. Reverted the unnecessary `~/.zshrc` edit.
+
+**Key findings (carry into next session):**
+- Meta code-368 blocks have no queryable status/countdown anywhere (not Business Suite, not the API) — the only mitigation is not retrying repeatedly (may prolong it) and building the backend circuit breaker from `websitePlan.md` §5 rather than relying on manual checking.
+- YouTube's upload-audit gate (Session 13) has lifted for this project — resumable-upload init calls now succeed. Unclear whether this was the actual audit resolving or something else; worth noting if it's still fine in future sessions.
+- `youtube-poster.json` is now **fully tested and working** for standard video, Shorts, and the previously-unverified `Merge`/binary-body wiring — the missing `Validate Payload → Initiate Resumable Upload` connection was the only real bug, not the merge logic itself.
+- The true fix for the YouTube download→upload bottleneck is a streaming relay (Code node piping the S3 GET stream directly into the YouTube PUT stream), not just the memory-mode patch — documented in `websitePlan.md` §3 as a pre-production to-do, not yet built.
+
+**Decisions made:**
+- No action needed on binary mode — already correctly configured on the real n8n Docker container. `~/.zshrc` edit reverted since it targeted the wrong (unused) n8n instance.
+- `websitePlan.md` §3 updated with a callout on the download-then-upload bottleneck and the streaming-relay fix, flagged as a pre-launch to-do for when the real (non-test) YouTube workflow is built — this part still stands regardless of the binary-mode mixup, since streaming vs. buffering is a speed/architecture issue, not a memory-config one.
+- Rotate the Facebook access token pasted in this session's chat before reusing it — treat it as compromised.
+- Confirmed n8n setup is Docker-based (`docker-compose` project `internapplier`, container `n8n`, volume `n8n_data` → `/home/node/.n8n`) — matches `history.md`'s existing Quick State Snapshot. The stray host-level `n8n start` process (PID 3498) was confirmed unrelated/orphaned and **killed** — no impact on the real (Dockerized) instance or the ngrok tunnel, since it wasn't the thing actually serving `localhost:5678`.
+
+**Files modified this session:**
+- `websitePlan.md` — §3 streaming-relay/download-bottleneck callout added
+- `history.md` — this entry, Quick State Snapshot, Platform Credential Reference, and Key Technical Decisions updated
+- Killed orphaned host process `node /usr/local/bin/n8n start` (PID 3498) — no file changed, config cleanup only
+
+---
+
 ## Platform Credential Reference
 
 > Fill this in as you complete setup.md steps. Keep actual secrets in a password manager — only record IDs here.
 
 | Platform | App/Project Name | App ID / Client ID | Notes |
 |----------|-----------------|-------------------|-------|
-| Facebook + Instagram | SMPosting App | *Configured* | Instagram Business Account ID retrieved |
-| Threads | SMPosting App | *Configured* | Long-lived token generated via curl; HTTP Request node setup |
+| Facebook | SMPosting App | *Configured* | `facebook-poster.json` built, still untested — code-368 block confirmed still active a day later (Sep 8); no way to check remaining cooldown, just wait and retest `TEXT` first. **Access token pasted in chat Sep 8 — treat as compromised, rotate before reuse.** |
+| Instagram | SMPosting App | *Configured* | Instagram Business Account ID retrieved; `instagram-poster.json` tested successfully for photo/story/reel (Sep 7) |
+| Threads | SMPosting App | *Configured* | Long-lived token generated via curl; `threads-poster.json` tested successfully for TEXT (Sep 7) |
 | Reddit | — | — | *Deferred* (Pending API Access Request) |
-| YouTube | SMPosting V1 | *Configured* | OAuth2 credentials generated |
+| YouTube | SMPosting V1 | *Configured* | Upload-audit gate has **lifted** — `youtube-poster.json` tested successfully end-to-end for standard video and Shorts (Sep 8), after fixing a missing `Validate Payload → Initiate Resumable Upload` canvas connection |
 | Pinterest | SMPosting V1 | *Configured* | Sandbox Developer Access Token generated |
 
 ---
@@ -386,6 +450,13 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | Content queue | Google Sheets, polled every 15 min by Schedule trigger |
 | Error handling | `Error Trigger` node → log to Sheets + email alert |
 | Pinterest access | Trial mode for testing; apply for Standard Access for live |
+| Per-call credentials (V2) | Every typed/credential-bound n8n node (Facebook Graph API, Instagram community node, Google Drive) replaced with plain `HTTP Request` + `authentication: none`; token injected via expression from the webhook payload |
+| YouTube upload source (V2) | Plain HTTP GET on `media_urls[0]` (any public URL — S3 in production) instead of the Google Drive node, for the same per-call-credential reason above |
+| YouTube upload mechanism (V2) | `Download Video` + `Initiate Resumable Upload` run in parallel → `Merge` node recombines binary + session `Location` header → `Upload Video Binary` PUTs bytes |
+| Meta error 368 (abuse block) | Spam heuristic, not a quota — retry/backoff doesn't help; can block minutes–24h; needs circuit-breaker handling in backend, not a retry queue |
+| YouTube upload quota gate | Cloud Console's `Video Uploads per day` figure is not what's enforced — separate undocumented ceiling for unaudited projects; fixed only via Google's Audit and Quota Extension request. **Gate lifted Sep 8** — resumable-upload init now succeeds. |
+| YouTube download→upload bottleneck | `Download Video` fully buffers video in n8n binary storage before `Upload Video Binary` sends anything — real fix is a streaming Code-node relay (S3 GET stream piped directly into YouTube PUT stream), not yet built; see `websitePlan.md` §3 |
+| Meta code-368 status checking | No queryable status/countdown exists anywhere (not Business Suite, not the API) — confirmed by testing the same block twice, a day apart |
 
 ---
 

@@ -1,0 +1,644 @@
+{
+  "name": "facebook-poster",
+  "nodes": [
+    {
+      "id": "sticky-readme",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -460
+      ],
+      "parameters": {
+        "width": 660,
+        "height": 440,
+        "content": "## facebook-poster\nWebhook-triggered, per-platform posting workflow for a Facebook Page. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\n**After importing:** activate the workflow, then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/facebook-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test002\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"facebook\",\n    \"content\": \"Test post #smposting\",\n    \"media_type\": \"TEXT\",\n    \"media_urls\": [],\n    \"token\": {\n      \"page_id\": \"YOUR_FB_PAGE_ID\",\n      \"access_token\": \"YOUR_PAGE_ACCESS_TOKEN\"\n    },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `TEXT | PHOTO | MULTI_PHOTO | VIDEO`. `TEXT` ignores `media_urls`. `PHOTO` needs 1 entry, `MULTI_PHOTO` needs 2+, `VIDEO` needs 1 (a direct hosted video URL \u2014 Graph API pulls it server-side, same as IG).\n\n**Not covered yet:** Facebook Reels (needs the chunked `video_reels` resumable upload API \u2014 a different mechanism from every other node here, since it uploads raw bytes instead of handing Graph API a URL) and link previews on TEXT posts. Both deferred as fast-follows."
+      }
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        0
+      ],
+      "webhookId": "facebook-poster",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "facebook-poster",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-request",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'facebook',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    page_id: body.token && body.token.page_id,\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "route-media-type",
+      "name": "Route by Media Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        180,
+        0
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "outputKey": "TEXT",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-text",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "TEXT"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "PHOTO",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-photo",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "PHOTO"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "MULTI_PHOTO",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-multiphoto",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "MULTI_PHOTO"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "VIDEO",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-video",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "VIDEO"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      }
+    },
+    {
+      "id": "fb-publish-text",
+      "name": "Publish Feed Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.page_id + '/feed' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "message",
+              "value": "={{ $('Parse Request').first().json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fb-publish-photo",
+      "name": "Publish Photo Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.page_id + '/photos' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "url",
+              "value": "={{ $('Parse Request').first().json.media_urls[0] }}"
+            },
+            {
+              "name": "caption",
+              "value": "={{ $('Parse Request').first().json.content }}"
+            },
+            {
+              "name": "published",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fb-split-urls",
+      "name": "Split Media URLs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        420,
+        120
+      ],
+      "parameters": {
+        "fieldToSplitOut": "media_urls",
+        "options": {}
+      }
+    },
+    {
+      "id": "fb-upload-unpublished",
+      "name": "Upload Unpublished Photo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        120
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.page_id + '/photos' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "url",
+              "value": "={{ $json.media_urls }}"
+            },
+            {
+              "name": "published",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fb-aggregate-photo-ids",
+      "name": "Aggregate Photo IDs",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        900,
+        120
+      ],
+      "parameters": {
+        "aggregate": "aggregateIndividualFields",
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {
+              "fieldToAggregate": "id",
+              "renameField": false
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fb-publish-multiphoto",
+      "name": "Publish Multi-Photo Feed Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        120
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.page_id + '/feed' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            }
+          ]
+        },
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $('Parse Request').first().json.content, attached_media: $json.id.map(pid => ({ media_fbid: pid })) }) }}"
+      }
+    },
+    {
+      "id": "fb-publish-video",
+      "name": "Publish Video Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        320
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.page_id + '/videos' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "file_url",
+              "value": "={{ $('Parse Request').first().json.media_urls[0] }}"
+            },
+            {
+              "name": "description",
+              "value": "={{ $('Parse Request').first().json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Hosted-video-by-URL upload. Large/long videos may need the resumable upload API instead \u2014 revisit if this times out in practice."
+    },
+    {
+      "id": "build-error-unsupported",
+      "name": "Build Error Result (Unsupported Type)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        520
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'facebook',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: `Unsupported media_type: ${req.media_type}`,\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "build-success-result",
+      "name": "Build Success Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'facebook',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-callback",
+      "name": "Send Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1640,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        700
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "build-error-from-trigger",
+      "name": "Build Error Result (From Trigger)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        700
+      ],
+      "parameters": {
+        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'facebook',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-error-callback",
+      "name": "Send Error Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        700
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Request": {
+      "main": [
+        [
+          {
+            "node": "Route by Media Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Media Type": {
+      "main": [
+        [
+          {
+            "node": "Publish Feed Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Publish Photo Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split Media URLs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Publish Video Post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Unsupported Type)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Feed Post": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Photo Post": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Media URLs": {
+      "main": [
+        [
+          {
+            "node": "Upload Unpublished Photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Unpublished Photo": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Photo IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Photo IDs": {
+      "main": [
+        [
+          {
+            "node": "Publish Multi-Photo Feed Post",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Multi-Photo Feed Post": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Video Post": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (Unsupported Type)": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Success Result": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Error Result (From Trigger)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (From Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Send Error Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "smposting-facebook-poster-v1"
+  }
+}

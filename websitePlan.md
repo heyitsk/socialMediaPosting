@@ -112,6 +112,8 @@ All images and videos uploaded by users are stored in an **AWS S3 Bucket** (or S
 | **Facebook / Instagram / Threads** | Publicly accessible URL | Backend generates direct public/presigned S3 URL (`https://bucket.s3.amazonaws.com/media/file.mp4`). Meta downloads directly from S3. |
 | **YouTube Data API** | Binary File Stream (`data` field) | Inside n8n, the **AWS S3 Node** (or `HTTP Request` node set to *File* format) downloads the S3 video into n8n binary memory/disk, then passes it directly into the `YouTube` upload node. |
 
+> ⚠️ **Known scaling gap — confirmed by real testing (Sep 2026), not yet fixed:** `youtube-poster`'s current `Download Video` → `Merge` → `Upload Video Binary` pattern fully downloads the video into n8n binary storage *before* a single byte is sent to YouTube — total time ≈ download time + upload time, not overlapped. Fine for small test clips, but for large user videos this adds real wall-clock latency and (until `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` is set — patched Sep 8 in the dev env) risked OOM-crashing the worker, since n8n holds binary data in memory by default. **The real fix is a streaming relay**, not a bigger box: replace the two `HTTP Request` nodes with a single **Code node that pipes the S3 GET response stream directly into the YouTube PUT request stream** (Node.js raw `http`/`https`, not the built-in HTTP Request node, which can't start its output until the full response lands) — bytes move S3→YouTube without ever being fully buffered in n8n, cutting transfer time roughly in half and removing the memory ceiling entirely. **Do this before launch supports real (non-test) video sizes** — revisit when building out Phase 3's YouTube workflow for production.
+
 ---
 
 ## 4. Post Composer & Pre-Posting Validation Rules
@@ -148,6 +150,12 @@ const results = await Promise.allSettled(
 
 Rate limiting happens **here**, before dispatch — a token-bucket limiter per `(user, platform)` pair, sized to each platform's documented API quota (Graph API, YouTube Data API v3 units, etc.). A call that would exceed quota is queued/delayed by the backend rather than sent to n8n.
 
+**Two distinct failure modes, confirmed by real testing (Sep 2026) — must be handled differently:**
+
+1. **Measured quota throttling** — Graph API returns an `X-App-Usage` / `X-Page-Usage` header on *every* response with `call_count` / `total_time` / `total_cputime` percentages. Each n8n callback (Section 6) should pass these through so the backend's token bucket can throttle proactively as a Page approaches ~80-90% usage, instead of only reacting after a 400. This is what the token-bucket limiter above was designed for.
+2. **Abuse/spam block (Meta error code `368`, e.g. subcode `1390008`)** — not a quota counter at all; it's Meta's trust-score heuristic reacting to a suspicious pattern (rapid repeat posts, identical content, unverified/dev-mode app). Retrying — even with backoff — does not reliably help and may prolong the block, which can last minutes to ~24h. The backend must treat this as a **circuit breaker**, not a queue-and-retry case: on `code: 368` / `type: OAuthException`, immediately pause further dispatch for that `(user, platform)` for a cooldown window and surface it in the Error Center as an actionable alert, rather than silently re-attempting.
+3. **YouTube's upload-audit gate (pre-launch blocker, not a runtime case)** — confirmed by real testing (Sep 2026) that a `quotaExceeded` 429 on YouTube's resumable-upload init call can fire even while Cloud Console's own `Video Uploads per day` metric shows 0% usage. Google enforces a **separate, undocumented ceiling on the video-upload feature** for any project that hasn't completed their **Audit and Quota Extension** review — it doesn't appear anywhere in the standard quota dashboard, isn't adjustable by requesting a higher number there, and is **project-wide** (shared across every user of the SaaS), not per-user like everything else in this section. Unlike cases 1-2, there's no backend logic that works around this — it's a hard external dependency that must be resolved (audit request filed and approved, realistic lead time days-to-weeks) **before** the YouTube integration can support more than a handful of test uploads total, regardless of how many users the product has.
+
 ### Webhook Payload Schema (Sent from Backend to n8n) — one call per platform
 
 ```json
@@ -173,7 +181,7 @@ Rate limiting happens **here**, before dispatch — a token-bucket limiter per `
 > Only the `token` block relevant to `platform` is ever included — credentials are passed per-call and never stored inside n8n itself.
 
 ### Per-Platform n8n Workflow (same shape as before, just no longer branched together)
-* **`facebook-poster`**: `HTTP Request` node (`/feed`, `/photos`, or `/videos`) — not the typed `Facebook Graph API` node, since its `Credential` field can't take a per-call dynamic token; access token is passed as a query param from the webhook payload instead.
+* **`facebook-poster`**: `HTTP Request` node (`/feed`, `/photos`, `/videos`, or the split-upload+`/feed` flow for `MULTI_PHOTO`) — not the typed `Facebook Graph API` node, since its `Credential` field can't take a per-call dynamic token; access token is passed as a query param from the webhook payload instead. Testing status (Sep 2026): `TEXT`, `PHOTO`, `VIDEO` all confirmed working end-to-end after token rotation; `MULTI_PHOTO` (carousel) is still **untested** — hit the Graph API rate limit before a run could complete, so its multi-upload-then-attach flow needs re-verification once the limit clears.
 * **`instagram-poster`**: 2-Step Flow — `POST /media` (create container) ➔ **Wait Node** (5-10s) ➔ `POST /media_publish`.
 * **`threads-poster`**: 2-Step Flow — `POST /me/threads` (create container) ➔ **Wait Node** (30-60s for video transcoding) ➔ `POST /me/threads_publish`.
 * **`youtube-poster`**: `AWS S3` Download Node (fetches binary stream into `data` field) ➔ `YouTube` Upload Node.
@@ -201,9 +209,26 @@ Since each platform now runs as its own workflow triggered by its own webhook ca
   "platform": "instagram",
   "status": "SUCCESS", // SUCCESS | FAILED
   "platform_post_id": "179001122334455",
-  "error": null
+  "error": null,
+  "error_type": null, // null | RATE_LIMIT | ABUSE_BLOCK | AUTH_ERROR | OTHER — drives which failure-mode handling in §5 applies
+  "usage": { "call_count": 12, "total_time": 4, "total_cputime": 3 } // parsed from Graph API's X-App-Usage/X-Page-Usage header, if present; null for platforms without an equivalent header
 }
 ```
+
+`error_type: ABUSE_BLOCK` (Meta code `368`) triggers the circuit breaker described in §5, not the retry/backoff path — the Error Center (below) should present it as "Meta temporarily blocked this account for suspicious activity" rather than a generic failure.
+
+### Async Media Processing Poller (Video)
+
+Confirmed by testing (Sep 2026): a `SUCCESS` callback for `media_type: VIDEO` on Facebook only means `POST /{page_id}/videos` **accepted** the upload — Graph API hands back a video `id` immediately, but the video is transcoded asynchronously and does not appear on the Page (Feed or Video Library) until processing finishes, sometimes several minutes later. The n8n callback's `platform_post_id` cannot be treated as "now live" for video the way it can for TEXT/PHOTO.
+
+- On a `VIDEO` `SUCCESS` callback, the backend enqueues a **status poller** job (BullMQ repeatable job — not another n8n workflow) keyed on `platform_post_id` + the account's token.
+- Poller calls `GET /{video_id}?fields=status` every **30 seconds**.
+- `status.video_status`:
+  - `"processing"` → reschedule for another 30s.
+  - `"ready"` → mark the `PostLogs` row finalized/confirmed, fire the completion notification (Web Push + in-app pop-up — see Dual Notification Engine below).
+  - `"error"` → mark `FAILED` with `error_type: PROCESSING_FAILED`, surface in the Error Center like any other failure.
+- Hard timeout after ~15 minutes (30 polls): if still unresolved, mark `UNKNOWN` rather than polling forever, and flag for manual check.
+- Only confirmed necessary for Facebook video so far; worth verifying whether Threads/Instagram video containers need the same treatment once those are load-tested with larger files.
 
 ### Backend-Side Aggregation
 
@@ -218,6 +243,7 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 
 ### Dual Notification Engine
 * **In-App Realtime Updates**: Web App receives WebSocket / Server-Sent Events (SSE) from backend to update status pills (`Published` 🟢, `Partial Failure` 🟡, `Failed` 🔴) instantly without page refresh.
+* **Push Notifications / Pop-up**: For completions that resolve later than the initial callback — currently just the Video Processing Poller above — the backend fires a Web Push notification (and an in-app pop-up if the tab is open) once polling confirms `"ready"` or `"error"`, since the user may have navigated away during the multi-minute transcode wait.
 * **Email Alerts (Resend / SendGrid)**: On completion (or if errors occurred), the backend dispatches an HTML email report summarizing the published posts and highlighting any failed platforms with direct resolution links.
 
 ### Error Center & Retry Mechanism

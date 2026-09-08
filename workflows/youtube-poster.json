@@ -1,0 +1,432 @@
+{
+  "name": "youtube-poster",
+  "nodes": [
+    {
+      "id": "sticky-readme",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -520
+      ],
+      "parameters": {
+        "width": 700,
+        "height": 480,
+        "content": "## youtube-poster\nWebhook-triggered posting workflow for YouTube. Unlike Graph API/Threads, YouTube Data API v3 can't just be handed a URL \u2014 it needs the actual video bytes uploaded via a **resumable upload session** (init call \u2192 PUT the bytes to the returned Location URL).\n\n**OAuth is entirely the backend's job.** n8n only ever receives an already-valid `access_token` in the payload \u2014 refresh_token/client_id/secret never touch n8n, matching the per-call-token rule from websitePlan.md \u00a75.\n\nBecause the video bytes (Download Video) and the upload session URL (Initiate Resumable Upload) come from two independent HTTP calls that don't depend on each other, they run in parallel and a **Merge** node combines them before the final binary PUT \u2014 an HTTP Request node's output replaces the item it received, so this is the standard n8n pattern for keeping binary data alive alongside a second API response.\n\n**After importing:** activate the workflow, then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/youtube-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test004\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"youtube\",\n    \"media_urls\": [\"https://.../video.mp4\"],\n    \"youtube_metadata\": {\n      \"title\": \"Test upload #smposting\",\n      \"description\": \"Testing youtube-poster\",\n      \"privacy\": \"private\"\n    },\n    \"token\": { \"access_token\": \"YOUR_VALID_OAUTH_ACCESS_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`privacy` defaults to `private` if omitted \u2014 deliberately, so a test upload never accidentally goes public. For Shorts: same endpoint, just add `#Shorts` to the title/description and use a \u226460s 9:16 source video.\n\n**Verify after import:** the 'Upload Video Binary' node's Body Content Type should be 'n8n Binary File' pointing at field `data` \u2014 double-check this specific dropdown, it's the one part of this workflow I couldn't test against a live n8n instance before handing it to you."
+      }
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        0
+      ],
+      "webhookId": "youtube-poster",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "youtube-poster",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-request",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst meta = body.youtube_metadata || {};\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'youtube',\n    media_urls: body.media_urls || [],\n    title: meta.title || '',\n    description: meta.description || '',\n    privacy: meta.privacy || 'private',\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "validate-payload",
+      "name": "Validate Payload",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        180,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "valid-payload",
+              "leftValue": "={{ ($json.media_urls && $json.media_urls.length > 0) && !!$json.title }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "download-video",
+      "name": "Download Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -160
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.media_urls[0] }}",
+        "authentication": "none",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "initiate-upload",
+      "name": "Initiate Resumable Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        160
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/upload/youtube/v3/videos",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "part",
+              "value": "snippet,status"
+            },
+            {
+              "name": "uploadType",
+              "value": "resumable"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $json.access_token }}"
+            },
+            {
+              "name": "X-Upload-Content-Type",
+              "value": "video/*"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ snippet: { title: $json.title, description: $json.description, categoryId: '22' }, status: { privacyStatus: $json.privacy, selfDeclaredMadeForKids: false } }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "build-error-invalid",
+      "name": "Build Error Result (Invalid Payload)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        420
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: 'Invalid payload: media_urls and youtube_metadata.title are required',\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "merge-video-and-session",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "upload-binary",
+      "name": "Upload Video Binary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        0
+      ],
+      "notes": "Verify Body Content Type = 'n8n Binary File', field name 'data' after import.",
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.headers.location || $json.headers.Location }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "={{ $binary.data.mimeType || 'video/*' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      }
+    },
+    {
+      "id": "build-success-result",
+      "name": "Build Success Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-callback",
+      "name": "Send Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        700
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "build-error-from-trigger",
+      "name": "Build Error Result (From Trigger)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        700
+      ],
+      "parameters": {
+        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'youtube',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-error-callback",
+      "name": "Send Error Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        700
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Request": {
+      "main": [
+        [
+          {
+            "node": "Validate Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Payload": {
+      "main": [
+        [
+          {
+            "node": "Download Video",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Initiate Resumable Upload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Invalid Payload)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Video": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initiate Resumable Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Upload Video Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Video Binary": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (Invalid Payload)": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Success Result": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Error Result (From Trigger)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (From Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Send Error Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "smposting-youtube-poster-v1"
+  }
+}

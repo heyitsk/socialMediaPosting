@@ -1,0 +1,678 @@
+{
+  "name": "threads-poster",
+  "nodes": [
+    {
+      "id": "sticky-readme",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -460
+      ],
+      "parameters": {
+        "width": 660,
+        "height": 440,
+        "content": "## threads-poster\nWebhook-triggered, per-platform posting workflow for Threads. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\nUnlike Facebook/Instagram, Threads posting is tied directly to the authenticated user's own token (`/me/threads`) \u2014 there's no separate Page/Business ID to pass.\n\n**After importing:** activate the workflow, then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/threads-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test003\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"threads\",\n    \"content\": \"Test thread #smposting\",\n    \"media_type\": \"TEXT\",\n    \"media_urls\": [],\n    \"token\": { \"access_token\": \"YOUR_THREADS_LONG_LIVED_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `TEXT | IMAGE | VIDEO`. `TEXT` ignores `media_urls`; `IMAGE`/`VIDEO` need exactly 1 entry.\n\n**Known limitation:** publish uses a blind Wait (5s / 10s / 60s) instead of polling the container's `status` field until `FINISHED` \u2014 matches the pattern already used for Instagram/the old Threads draft, but Meta's docs recommend polling, especially for video. Revisit if video publishes start failing with \"media not ready\" errors."
+      }
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        0
+      ],
+      "webhookId": "threads-poster",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "threads-poster",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-request",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'threads',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "route-media-type",
+      "name": "Route by Media Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        180,
+        0
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "outputKey": "TEXT",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-text",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "TEXT"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "IMAGE",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-image",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "IMAGE"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "VIDEO",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-video",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "VIDEO"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      }
+    },
+    {
+      "id": "th-create-text",
+      "name": "Create Text Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "media_type",
+              "value": "TEXT"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Parse Request').first().json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "th-wait-text",
+      "name": "Wait 5s (Text)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        -280
+      ],
+      "parameters": {
+        "amount": 5,
+        "resume": "timeInterval",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "th-publish-text",
+      "name": "Publish Text",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        -280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads_publish' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "creation_id",
+              "value": "={{ $json.id }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "th-create-image",
+      "name": "Create Image Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "media_type",
+              "value": "IMAGE"
+            },
+            {
+              "name": "image_url",
+              "value": "={{ $('Parse Request').first().json.media_urls[0] }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Parse Request').first().json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "th-wait-image",
+      "name": "Wait 10s (Image)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "amount": 10,
+        "resume": "timeInterval",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "th-publish-image",
+      "name": "Publish Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads_publish' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "creation_id",
+              "value": "={{ $json.id }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "th-create-video",
+      "name": "Create Video Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "media_type",
+              "value": "VIDEO"
+            },
+            {
+              "name": "video_url",
+              "value": "={{ $('Parse Request').first().json.media_urls[0] }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Parse Request').first().json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Video needs transcoding on Meta's side \u2014 60s blind wait before publish. Bump higher if longer clips start failing."
+    },
+    {
+      "id": "th-wait-video",
+      "name": "Wait 60s (Video)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        280
+      ],
+      "parameters": {
+        "amount": 60,
+        "resume": "timeInterval",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "th-publish-video",
+      "name": "Publish Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads_publish' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "creation_id",
+              "value": "={{ $json.id }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "build-error-unsupported",
+      "name": "Build Error Result (Unsupported Type)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        480
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'threads',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: `Unsupported media_type: ${req.media_type}`,\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "build-success-result",
+      "name": "Build Success Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1140,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'threads',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-callback",
+      "name": "Send Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1380,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        700
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "build-error-from-trigger",
+      "name": "Build Error Result (From Trigger)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        700
+      ],
+      "parameters": {
+        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'threads',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-error-callback",
+      "name": "Send Error Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        700
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {}
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Request": {
+      "main": [
+        [
+          {
+            "node": "Route by Media Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Media Type": {
+      "main": [
+        [
+          {
+            "node": "Create Text Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Image Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Video Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Unsupported Type)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Text Container": {
+      "main": [
+        [
+          {
+            "node": "Wait 5s (Text)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 5s (Text)": {
+      "main": [
+        [
+          {
+            "node": "Publish Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Text": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Image Container": {
+      "main": [
+        [
+          {
+            "node": "Wait 10s (Image)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 10s (Image)": {
+      "main": [
+        [
+          {
+            "node": "Publish Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Image": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Video Container": {
+      "main": [
+        [
+          {
+            "node": "Wait 60s (Video)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 60s (Video)": {
+      "main": [
+        [
+          {
+            "node": "Publish Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Video": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (Unsupported Type)": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Success Result": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Error Result (From Trigger)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (From Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Send Error Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "smposting-threads-poster-v1"
+  }
+}
