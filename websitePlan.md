@@ -1,11 +1,13 @@
 # 🚀 Social Media Auto-Poster SaaS — Product & Technical Specification (`websitePlan.md`)
 
 > **Product Vision**: A full-fledged multi-tenant SaaS application allowing users to publish and schedule text, photo, video, and carousel content across multiple social media platforms simultaneously.  
-> **Architecture**: Node/Express + React Backend/Frontend ("MERN-style" app) + **one independently-versioned n8n workflow per platform**, run in **n8n queue mode** (Main + autoscaled Workers behind Redis) for horizontal scale, + AWS S3 Media Storage.  
-> **Active V1 Target Platforms**: Facebook Pages, Instagram, Threads, YouTube (Shorts & Videos).  
-> **Deferred to V2**: Pinterest, Reddit, X (Twitter), LinkedIn, Tumblr, Blogger.
+> **Architecture**: Bun + Hono backend API + Vite/React frontend, PostgreSQL via Prisma (Docker-hosted) + **one independently-versioned n8n workflow per platform**, run in **n8n queue mode** (Main + autoscaled Workers behind Redis) for horizontal scale, + S3 Media Storage.  
+> **Active V1 Target Platforms**: Facebook Pages, Instagram, Threads, YouTube (Shorts & Videos), Pinterest.  
+> **Deferred to V2**: Reddit, X (Twitter), LinkedIn, Tumblr, Blogger.
 >
-> **Note on stack naming**: "MERN" is used loosely here for Node/Express + React — the schema in Section 7 is relational (PostgreSQL), not MongoDB. Flag this if a literal Mongo-based stack is actually intended; it would require redesigning Section 7.
+> **Note on Pinterest**: pulled forward from the original V2 deferral list (Sep 2026) — business account access and Developer app registration are in progress. Its Developer App is currently pending Pinterest's manual review (submitted Sep 2026); see §5 for why this blocks the integration the same way YouTube's audit gate does.
+>
+> **Note on stack (finalized Sep 10, 2026)**: earlier drafts of this doc called the stack "MERN" loosely (Node/Express + React); that's now superseded — see the **Backend Tech Stack** table in §1 for the actual finalized runtime/framework/DB/queue choices and the reasoning behind each. The Section 7 schema remains relational PostgreSQL either way.
 
 ---
 
@@ -24,7 +26,7 @@
 
 ## 1. High-Level System Architecture
 
-The application decouples the user-facing web interface and scheduling logic from the platform API execution logic. The Node/Express backend owns **all** orchestration — auth, credential storage, rate limiting, and fan-out. n8n holds **no orchestration logic of its own**: it is a fleet of thin, per-platform, stateless workflows triggered by webhook, running in **queue mode** so it can scale horizontally under Kubernetes.
+The application decouples the user-facing web interface and scheduling logic from the platform API execution logic. The Bun/Hono backend owns **all** orchestration — auth, credential storage, rate limiting, and fan-out. n8n holds **no orchestration logic of its own**: it is a fleet of thin, per-platform, stateless workflows triggered by webhook, running in **queue mode** so it can scale horizontally under Kubernetes.
 
 > Multi-platform parallelism is achieved by the **backend firing N parallel webhook calls** (one per selected platform, via `Promise.allSettled`) — not by branching inside a single n8n workflow. This keeps each platform's logic, versioning, retries, and rate limits isolated.
 
@@ -66,40 +68,111 @@ The application decouples the user-facing web interface and scheduling logic fro
 
 **The real ceiling is platform API rate limits** (Meta Graph API, YouTube quotas), not n8n/K8s compute — this is why the rate-limiter layer lives in the backend *before* dispatch, not inside n8n.
 
+### Backend Tech Stack (finalized Sep 10, 2026)
+
+| Layer | Choice | Why |
+|-------|--------|-----|
+| Runtime | **Bun** | Native S3 client, native (experimental) Redis client, fast startup; Prisma driver-adapter compatibility confirmed firsthand on a prior project. |
+| Web framework | **Hono** over Elysia/Encore | Elysia is Bun-only in spirit (Eden client, perf claims tied to Bun's engine); Hono gives the same modern DX (Zod validation, OpenAPI, native WS/SSE) while staying runtime-portable (Bun/Node/Deno/Workers) — a hedge given the backend also leans on Node-ecosystem packages (BullMQ, AWS-style SDKs) that are more battle-tested under Node than Bun. Encore ruled out outright — it wants to own infra provisioning (its own Postgres/Pub-Sub/cron abstractions), which conflicts with the self-managed Docker Postgres + Redis already chosen here. |
+| Database / ORM | **Docker-hosted PostgreSQL + Prisma**, via a driver adapter (`@prisma/adapter-pg`) rather than Prisma's default Rust query-engine binary | Confirmed working under Bun firsthand; the driver-adapter path avoids native-binary/Bun edge cases entirely by talking to Postgres through a pure-JS driver. |
+| Frontend | **Vite + React** | Plain SPA, calls the Hono API directly — no SSR/full-stack framework needed since the backend already owns real long-running processes (job queue, SSE server) that don't fit a serverless/edge-first framework's request model anyway. |
+| Background job queue | **BullMQ + ioredis** (confirmed primary, Sep 11 2026) | Drives the Threads/Pinterest sliding-window token-refresh scheduler and dispatch retries — a reliability-critical piece, best served by BullMQ's years of production hardening (stall recovery, crash-safe retries) rather than a ~1-year-old, single-maintainer alternative. **Spike test passed** — see "BullMQ/ioredis-under-Bun Spike Test Results" below; the risk flagged on Sep 10 is resolved. |
+| Job queue fallback | **`bunqueue`** (SQLite/Postgres-backed, BullMQ-compatible API, no Redis) — evaluated, **not needed**; the primary spike test passed cleanly, so this is kept only as a documented escape hatch (its BullMQ-compatible API keeps migration cost low) rather than an active contingency. |
+| Pub/Sub (live updates) | **Bun's native Redis client** | Good fit for the simple publish/subscribe traffic behind the SSE/WebSocket live-status layer (§6). Bun's own docs mark this feature **experimental** — wrap it behind a thin interface so it can be swapped for `ioredis`'s pub/sub (already in the dependency tree via BullMQ) with a one-file change if reliability issues show up, rather than hard-wiring it everywhere. |
+| Object storage | **S3**, via Bun's native S3 client (Zig-based, no `@aws-sdk/client-s3` dependency needed) | Covers the backend's own media handling (composer uploads, presigned URLs). **Evaluated and rejected UploadThing** as an alternative — it's a DX wrapper built *on top of* S3, not a replacement (no BYO-bucket, closed-source backend, weaker compliance posture), and it offers no capability the S3→YouTube streaming-relay fix (§3) actually needs — that fix is a plain Node.js streaming Code node running *inside n8n's own process* (not Bun, not our backend), so it only needs a URL it can issue a streaming GET against — which a presigned S3 URL already provides regardless of which client generated it. |
+
+### BullMQ/ioredis-under-Bun Spike Test Results (Sep 11, 2026)
+
+A standalone Bun scaffold (`trialBun/`) exercised the exact reliability properties BullMQ was chosen for (§1 table above), against a local Redis. All scenarios passed:
+
+| Scenario | Result |
+|----------|--------|
+| Round-trip (add job → worker processes → `job.waitUntilFinished` resolves) | ✅ |
+| Crash recovery (`SIGKILL` a worker mid-job; a second worker's stall detection picks it up and completes it) | ✅ |
+| Repeatable jobs (`upsertJobScheduler`/`removeJobScheduler` — the mechanism behind the §6 video-status poller) | ✅ |
+| Retry + exponential backoff (fail twice, succeed on 3rd, increasing delay between attempts) | ✅ |
+| Concurrency (`concurrency: 5`, 20 jobs, no cross-job data contamination) | ✅ |
+| Graceful shutdown (`worker.close()` mid-job lets the in-flight job finish rather than dropping it) | ✅ |
+| `QueueEvents` (`completed`/`failed`/`progress` delivered correctly) | ✅ |
+
+**Implementation pattern to carry into the real backend**: pass a plain `{ host, port }` options object to each `Queue`/`Worker`/`QueueEvents` instance rather than one shared `ioredis` instance — BullMQ then sets `maxRetriesPerRequest` correctly per client type on its own, and this is also BullMQ's own recommendation (don't share one blocking connection across multiple Worker/QueueEvents instances).
+
+**Conclusion**: `ioredis` under Bun behaves correctly for every property the job-queue layer depends on (§5's video poller, §7's token-refresh scheduler, dispatch retries). No further verification needed before scaffolding the real backend; `bunqueue` fallback is not being activated.
+
 ---
 
 ## 2. OAuth 2.0 Integration Strategy (User Experience)
 
-Users **never** manually copy/paste Developer App IDs, Secrets, or Access Tokens. The SaaS app uses standard OAuth 2.0 flows to authenticate users.
+Users **never** manually copy/paste Developer App IDs, Secrets, or Access Tokens. The SaaS app uses standard OAuth 2.0 flows to authenticate users, one flow per platform.
 
 ### User Flow: "Connect Account"
-1. In the SaaS Dashboard under **Integrations**, the user clicks `[Connect Facebook / Instagram]`, `[Connect Threads]`, or `[Connect YouTube]`.
-2. The web app opens the platform's official OAuth consent screen.
+1. In the SaaS Dashboard under **Integrations**, the user clicks `[Connect Facebook / Instagram]`, `[Connect Threads]`, `[Connect YouTube]`, or `[Connect Pinterest]`.
+2. The web app redirects (or opens a popup) to the platform's official OAuth consent screen.
 3. The user authorizes the SaaS application to manage their accounts.
 4. The platform redirects back to the SaaS backend callback URL (`/api/auth/{platform}/callback`) with an authorization `code`.
 
-### Backend OAuth Exchange & Token Harvesting Flow
+### Backend OAuth Exchange & Token Harvesting Flow (general shape, all platforms)
 
 ```
 User Click ──> OAuth Consent ──> Backend Callback (with Code) ──> Exchange Code for Token ──> Fetch IDs ──> Save Encrypted to DB
 ```
 
-#### Step-by-Step Backend API Operations (Example: Meta / Facebook & Instagram)
-1. **Code Exchange**: Backend sends a request to Meta's `/oauth/access_token` endpoint to get a User Access Token.
-2. **Long-Lived Token Exchange**: Backend exchanges short-lived token for a 60-day renewable User Access Token.
-3. **Account Harvesting (`GET /me/accounts`)**:
-   * Queries Meta Graph API: `GET /me/accounts?fields=id,name,access_token,instagram_business_account{id,name}`
-   * **Returns**:
-     * Facebook Page ID & Permanent Page Access Token
-     * Instagram Business Account ID
-4. **Encryption & Storage**: The backend encrypts the tokens and saves the IDs to the database under the User's ID.
-5. **Dashboard UI**: Popup closes; UI displays `✅ Connected: My Facebook Page & @my_instagram`.
+**What runs where** (same split for every platform below): steps 1-3 above happen entirely on the platform's own servers — we never see the user's password, and there's no code to write for the consent screen itself, just the URL that opens it and a callback route to catch the redirect. Everything from "Exchange Code for Token" onward is our backend calling the platform's API **server-to-server** (no browser involved) — code exchange, long-lived/refresh-token handling, ID harvesting, encryption, and storage are all backend work.
+
+### 2.1 Facebook (Meta Graph API)
+
+- **Authorization URL**: `https://www.facebook.com/v21.0/dialog/oauth`
+- **Scopes**: `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `pages_manage_engagement`, `business_management`
+- **Code → short-lived token**: `GET https://graph.facebook.com/v21.0/oauth/access_token?client_id&redirect_uri&client_secret&code`
+- **Short-lived → long-lived (60-day) exchange**: `GET /oauth/access_token?grant_type=fb_exchange_token&client_id&client_secret&fb_exchange_token={short_token}`
+- **Account harvesting**: `GET /me/accounts?fields=id,name,access_token,instagram_business_account{id,name}` using the long-lived **user** token — returns the Facebook Page ID + Page access token, and the linked Instagram Business Account ID (see §2.2).
+- **Refresh shape**: `NONE` — the returned Page access token is effectively non-expiring as long as the user token/session stays valid; no background refresh job needed (§7).
+- **Gotcha**: `pages_manage_posts` etc. are restricted permissions — requires Meta **App Review** before working for any account beyond added testers/admins.
+
+### 2.2 Instagram (Instagram Graph API — same Meta app as Facebook)
+
+- Rides entirely on the Facebook OAuth dialog above — **no separate consent screen**. Requires the user's Instagram account to be a Business/Creator account linked to a Facebook Page.
+- **Additional scopes**: `instagram_basic`, `instagram_content_publish`, `instagram_manage_comments` (optional, for later comment moderation)
+- **Harvesting**: same `/me/accounts` call as §2.1, using its `instagram_business_account{id,name}` field — no separate token, uses the Page access token.
+- **Refresh shape**: `NONE`, same as Facebook.
+- **Gotcha**: `instagram_content_publish` is a restricted permission requiring **App Review + Business Verification** — file this alongside the Pinterest/YouTube review dependencies already tracked in §5.
+
+### 2.3 Threads (Threads API — separate Meta surface from Graph API)
+
+- **Authorization URL**: `https://threads.net/oauth/authorize`
+- **App config**: requires adding the "Threads API" use case to the Meta app — separate from the "Facebook Login for Business" use case used in §2.1/§2.2.
+- **Scopes**: `threads_basic`, `threads_content_publish`, `threads_manage_insights` (optional), `threads_manage_replies` (optional), `threads_read_replies` (optional)
+- **Code → short-lived token**: `POST https://graph.threads.net/oauth/access_token` (`client_id`, `client_secret`, `grant_type=authorization_code`, `redirect_uri`, `code`) — valid ~1 hour.
+- **Short-lived → long-lived (60-day) exchange**: `GET https://graph.threads.net/access_token?grant_type=th_exchange_token&client_secret&access_token={short_token}`
+- **Refresh before expiry**: `GET https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token={long_token}` — extends another 60 days; token must be ≥24h old to refresh.
+- **Refresh shape**: `SLIDING_WINDOW` — renews the *same* access token in place (no separate `encrypted_refresh_token`); a scheduled backend job must call this proactively before the 60-day window closes (§7).
+- **Gotcha**: this is its own token, not reused from §2.1/§2.2 — a distinct `ConnectedAccounts` row/refresh cycle from the Meta Page-token model.
+
+### 2.4 YouTube (Google OAuth 2.0 / YouTube Data API v3)
+
+- **Authorization URL**: `https://accounts.google.com/o/oauth2/v2/auth`
+- **Scopes**: `https://www.googleapis.com/auth/youtube.upload` (minimum for posting)
+- **Required consent-request params**: `access_type=offline` (or no refresh token is issued at all) + `prompt=consent` (forces Google to re-issue a refresh token even on repeat consent — otherwise only granted on the very first authorization, which silently breaks reconnect flows).
+- **Code → tokens**: `POST https://oauth2.googleapis.com/token` (`code`, `client_id`, `client_secret`, `redirect_uri`, `grant_type=authorization_code`) → `access_token` (~1hr) + `refresh_token` (long-lived, no fixed expiry).
+- **Refresh**: `POST /token` with `grant_type=refresh_token&refresh_token={token}` — no re-consent needed, called right before use.
+- **Refresh shape**: `ON_DEMAND` — no background job; backend exchanges `encrypted_refresh_token` for a fresh access token immediately before each upload call (§7).
+- **Gotcha**: OAuth itself works fine in dev/testing regardless of the separate **upload-audit gate** already documented in §5 case 3 — that gate caps upload *volume*, not the OAuth connect flow.
+
+### 2.5 Pinterest (API v5)
+
+- **Authorization URL**: `https://www.pinterest.com/oauth/`
+- **Scopes**: `boards:read`, `boards:write`, `pins:read`, `pins:write`, `user_accounts:read`
+- **Code → tokens**: `POST https://api.pinterest.com/v5/oauth/token`, HTTP Basic Auth (`app_id:app_secret`, base64), form body `grant_type=authorization_code&code&redirect_uri` → `access_token` (30-day expiry) + `refresh_token` (~365-day validity — verify at implementation time, Pinterest has changed this window before).
+- **Refresh**: same endpoint, `grant_type=refresh_token&refresh_token={token}`.
+- **Board resolution**: no auto-harvest step like Meta's `/me/accounts` — after connect, call `GET /v5/boards` and have the user pick a destination board (or default to their main board); Pinterest has no single "primary account" concept the way a Facebook Page does.
+- **Refresh shape**: `SLIDING_WINDOW` — but unlike Threads, this one *consumes* `encrypted_refresh_token` to mint a brand-new access token (closer to Google's model) rather than renewing in place; same proactive scheduled job as Threads, different call shape inside it (§7).
+- **Gotcha**: gated by the Developer App review + Trial-vs-Standard access split already documented in §5 case 4 — Trial access has materially lower rate limits even once OAuth is fully wired up.
 
 ---
 
 ## 3. Media Management & S3 Storage Strategy
 
-All images and videos uploaded by users are stored in an **AWS S3 Bucket** (or S3-compatible storage like Cloudflare R2).
+All images and videos uploaded by users are stored in an **S3 Bucket**, accessed from the backend via **Bun's native S3 client** (see the Backend Tech Stack table in §1 — no `@aws-sdk/client-s3` dependency needed).
 
 ### In-App Cropper & Editor
 * **Images**: Integrated frontend JS library (`Cropper.js`) allows users to crop/resize images to standard social aspect ratios (1:1 Square, 4:5 Portrait, 9:16 Vertical Story/Reel, 16:9 Landscape) before uploading.
@@ -113,6 +186,8 @@ All images and videos uploaded by users are stored in an **AWS S3 Bucket** (or S
 | **YouTube Data API** | Binary File Stream (`data` field) | Inside n8n, the **AWS S3 Node** (or `HTTP Request` node set to *File* format) downloads the S3 video into n8n binary memory/disk, then passes it directly into the `YouTube` upload node. |
 
 > ⚠️ **Known scaling gap — confirmed by real testing (Sep 2026), not yet fixed:** `youtube-poster`'s current `Download Video` → `Merge` → `Upload Video Binary` pattern fully downloads the video into n8n binary storage *before* a single byte is sent to YouTube — total time ≈ download time + upload time, not overlapped. Fine for small test clips, but for large user videos this adds real wall-clock latency and (until `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` is set — patched Sep 8 in the dev env) risked OOM-crashing the worker, since n8n holds binary data in memory by default. **The real fix is a streaming relay**, not a bigger box: replace the two `HTTP Request` nodes with a single **Code node that pipes the S3 GET response stream directly into the YouTube PUT request stream** (Node.js raw `http`/`https`, not the built-in HTTP Request node, which can't start its output until the full response lands) — bytes move S3→YouTube without ever being fully buffered in n8n, cutting transfer time roughly in half and removing the memory ceiling entirely. **Do this before launch supports real (non-test) video sizes** — revisit when building out Phase 3's YouTube workflow for production.
+>
+> **Note (Sep 10, 2026):** this fix is entirely independent of which storage client the *backend* uses (Bun's native S3 client, raw AWS SDK, or otherwise) — it's a Code node running *inside n8n's own Node.js process*, which only needs a URL it can issue a streaming GET against. A presigned S3 URL already satisfies that. UploadThing was evaluated as a possible object-storage alternative and rejected for this reason among others: it's a DX layer built on top of S3 (not a replacement), offers no capability this fix needs, and adds real downsides (no BYO-bucket, closed-source backend, weaker compliance posture) for zero gain here.
 
 ---
 
@@ -137,7 +212,7 @@ If a user selects an invalid combination (e.g. attempting to upload a 3-minute v
 
 n8n holds **one workflow per platform** (`facebook-poster`, `instagram-poster`, `threads-poster`, `youtube-poster`), each independently versioned and each triggered by its own webhook. A post targeting multiple platforms results in **multiple parallel webhook calls from the backend**, not one call with a `platforms` array — this is a deliberate change from the earlier single-workflow design, made to keep per-platform logic, retries, and rate limits isolated.
 
-### Backend Dispatch Logic (Node/Express)
+### Backend Dispatch Logic (Bun/Hono)
 
 ```js
 const results = await Promise.allSettled(
@@ -155,6 +230,7 @@ Rate limiting happens **here**, before dispatch — a token-bucket limiter per `
 1. **Measured quota throttling** — Graph API returns an `X-App-Usage` / `X-Page-Usage` header on *every* response with `call_count` / `total_time` / `total_cputime` percentages. Each n8n callback (Section 6) should pass these through so the backend's token bucket can throttle proactively as a Page approaches ~80-90% usage, instead of only reacting after a 400. This is what the token-bucket limiter above was designed for.
 2. **Abuse/spam block (Meta error code `368`, e.g. subcode `1390008`)** — not a quota counter at all; it's Meta's trust-score heuristic reacting to a suspicious pattern (rapid repeat posts, identical content, unverified/dev-mode app). Retrying — even with backoff — does not reliably help and may prolong the block, which can last minutes to ~24h. The backend must treat this as a **circuit breaker**, not a queue-and-retry case: on `code: 368` / `type: OAuthException`, immediately pause further dispatch for that `(user, platform)` for a cooldown window and surface it in the Error Center as an actionable alert, rather than silently re-attempting.
 3. **YouTube's upload-audit gate (pre-launch blocker, not a runtime case)** — confirmed by real testing (Sep 2026) that a `quotaExceeded` 429 on YouTube's resumable-upload init call can fire even while Cloud Console's own `Video Uploads per day` metric shows 0% usage. Google enforces a **separate, undocumented ceiling on the video-upload feature** for any project that hasn't completed their **Audit and Quota Extension** review — it doesn't appear anywhere in the standard quota dashboard, isn't adjustable by requesting a higher number there, and is **project-wide** (shared across every user of the SaaS), not per-user like everything else in this section. Unlike cases 1-2, there's no backend logic that works around this — it's a hard external dependency that must be resolved (audit request filed and approved, realistic lead time days-to-weeks) **before** the YouTube integration can support more than a handful of test uploads total, regardless of how many users the product has.
+4. **Pinterest's Developer App review (pre-launch blocker, same shape as case 3)** — submitting the app (Sep 2026) required a live company/app URL and privacy policy link before Pinterest would even accept the form, then places the app in manual review ("your request is still being reviewed") with no in-dashboard status/ETA — confirmation only arrives by email. New apps default to **Trial access** (limited scopes/rate limits) regardless of outcome; reaching **Standard Access** for production traffic needs a separate review after that. Same implication as the YouTube gate: this is an external dependency with unknown lead time, not something the backend can work around, and it blocks `pinterest-poster` beyond a handful of test posts until it clears.
 
 ### Webhook Payload Schema (Sent from Backend to n8n) — one call per platform
 
@@ -181,10 +257,11 @@ Rate limiting happens **here**, before dispatch — a token-bucket limiter per `
 > Only the `token` block relevant to `platform` is ever included — credentials are passed per-call and never stored inside n8n itself.
 
 ### Per-Platform n8n Workflow (same shape as before, just no longer branched together)
-* **`facebook-poster`**: `HTTP Request` node (`/feed`, `/photos`, `/videos`, or the split-upload+`/feed` flow for `MULTI_PHOTO`) — not the typed `Facebook Graph API` node, since its `Credential` field can't take a per-call dynamic token; access token is passed as a query param from the webhook payload instead. Testing status (Sep 2026): `TEXT`, `PHOTO`, `VIDEO` all confirmed working end-to-end after token rotation; `MULTI_PHOTO` (carousel) is still **untested** — hit the Graph API rate limit before a run could complete, so its multi-upload-then-attach flow needs re-verification once the limit clears.
+* **`facebook-poster`**: `HTTP Request` node (`/feed`, `/photos`, `/videos`, or the split-upload+`/feed` flow for `MULTI_PHOTO`) — not the typed `Facebook Graph API` node, since its `Credential` field can't take a per-call dynamic token; access token is passed as a query param from the webhook payload instead. Testing status (Sep 2026): `TEXT`, `PHOTO`, `VIDEO`, and `MULTI_PHOTO` (carousel) all confirmed working end-to-end after token rotation — carousel's multi-upload-then-attach flow was re-verified once the earlier rate limit cleared and posts correctly.
 * **`instagram-poster`**: 2-Step Flow — `POST /media` (create container) ➔ **Wait Node** (5-10s) ➔ `POST /media_publish`.
 * **`threads-poster`**: 2-Step Flow — `POST /me/threads` (create container) ➔ **Wait Node** (30-60s for video transcoding) ➔ `POST /me/threads_publish`.
 * **`youtube-poster`**: `AWS S3` Download Node (fetches binary stream into `data` field) ➔ `YouTube` Upload Node.
+* **`pinterest-poster`** *(planned, blocked on Developer App review — see §5 case 4)*: `HTTP Request` node(s) against Pinterest API v5 — `GET /v5/boards` to resolve `board_id`, then `POST /v5/pins` with `media_source` + `board_id`, same per-call dynamic-token pattern as the other HTTP-Request-based workflows.
 
 Each workflow ends with a single **Callback HTTP Request node** POSTing its own result back to `/api/webhooks/n8n-callback` — it does not know about, or wait for, the other platforms' workflows.
 
@@ -254,7 +331,7 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 
 ## 7. Database Schema Design
 
-### Core Tables (PostgreSQL / Prisma / TypeORM)
+### Core Tables (PostgreSQL, via Prisma)
 
 #### `Users` Table
 * `id` (UUID, Primary Key)
@@ -265,11 +342,30 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 #### `ConnectedAccounts` Table
 * `id` (UUID, Primary Key)
 * `user_id` (Foreign Key -> Users.id)
-* `platform` (Enum: `FACEBOOK`, `INSTAGRAM`, `THREADS`, `YOUTUBE`)
+* `platform` (Enum: `FACEBOOK`, `INSTAGRAM`, `THREADS`, `YOUTUBE`, `PINTEREST`)
 * `account_name` (String)
-* `platform_account_id` (String — Page ID, IG Business ID, Channel ID)
-* `encrypted_access_token` (Text — AES-256 encrypted)
-* `token_expires_at` (Timestamp)
+* `platform_account_id` (String — Page ID, IG Business ID, Channel ID, Pinterest Board ID)
+* `encrypted_access_token` (Text — AES-256-GCM encrypted; see **Token Encryption Scheme** below for the exact byte format)
+* `encrypted_refresh_token` (Text, Nullable — AES-256-GCM encrypted; `NULL` for platforms with no separate refresh token, e.g. Facebook/Instagram)
+* `key_version` (Integer — which encryption key encrypted this row's tokens; see **Token Encryption Scheme** below for why this exists)
+* `token_expires_at` (Timestamp, Nullable — `NULL` where meaningless for that platform's refresh_strategy)
+* `refresh_strategy` (Enum: `NONE`, `SLIDING_WINDOW`, `ON_DEMAND`)
+* `last_refreshed_at` (Timestamp, Nullable — for debugging/auditing refresh jobs)
+
+> **Refresh shapes by platform** (drives the `refresh_strategy` switch, not per-platform `if` branches scattered through the codebase):
+> * **`NONE`** — Facebook / Instagram. Page token has no fixed expiry in practice; no background job acts on it, user just re-connects if it ever stops working.
+> * **`SLIDING_WINDOW`** — Threads (60-day) and Pinterest (30-day access / ~1yr refresh). A scheduled job scans for rows nearing `token_expires_at` and proactively refreshes. Not one uniform call shape though: Threads renews the *same* access token in place (no `encrypted_refresh_token` involved), while Pinterest consumes `encrypted_refresh_token` to mint a brand-new access token — same schedule, different per-platform refresh-call logic inside that one job.
+> * **`ON_DEMAND`** — YouTube. `encrypted_refresh_token` never expires on its own; no background job needed — backend just exchanges it for a fresh access token right before each upload call.
+
+### Token Encryption Scheme (finalized Sep 11, 2026)
+
+Tokens must be **reversibly encrypted, not hashed** — unlike a password, the backend needs the literal plaintext value back at dispatch time to inject into the n8n webhook payload (§5). A leak of this column is equivalent to handing an attacker write access to a user's social accounts with no password/2FA needed, so encryption at rest here is a hard requirement, not a nice-to-have.
+
+- **Cipher/mode**: **AES-256-GCM**, via Bun's built-in `node:crypto` — no extra dependency. GCM is used specifically because it bakes in an authentication tag (tamper detection), unlike CBC which needs a separately bolted-on HMAC to get the same guarantee.
+- **Nonce/IV**: GCM requires a fresh, random 12-byte nonce for every encryption call — reusing one with the same key is a critical failure (can allow tag forgery or key recovery), not just "weaker" encryption. The nonce isn't secret, so it doesn't need its own column: `encrypt()` packs `nonce || ciphertext || authTag` into one buffer, base64-encodes it, and that's the entire value stored in `encrypted_access_token` / `encrypted_refresh_token`. `decrypt()` slices the three pieces back apart by fixed byte length before calling the AES-GCM primitive.
+- **Key storage (now, proportionate to current scale)**: a single master key as an environment variable (`TOKEN_ENCRYPTION_KEY_V1`, 32 random bytes, base64), injected via the hosting platform's/Docker's secrets mechanism — never committed, never logged, and never stored alongside the Postgres credentials (the whole point is that a DB-only leak — backup theft, SQL injection — doesn't also hand over the key). Not standing up Vault/KMS infrastructure before there's a paying user to justify it.
+- **`key_version` column and rotation**: each row records which key encrypted it. Rotating to a new key (`KEY_V2`) doesn't require downtime or a blocking migration: add `KEY_V2` to the app's key lookup alongside `KEY_V1` (both held at once, indexed by version), flip new writes to stamp `key_version = 2`, and existing rows keep decrypting correctly via `KEY_V1` since `decrypt()` looks up `keys[row.key_version]` instead of assuming one global key. A low-priority background job then walks rows still on `key_version = 1`, decrypts with `KEY_V1`, re-encrypts with `KEY_V2`, and updates them — spread over hours/days with zero outage. Once no rows reference `key_version = 1` anymore, that key is safe to delete from the secrets store.
+- **Implementation shape**: one backend utility module — `encrypt(plaintext, keyVersion) → { ciphertext, keyVersion }` and the matching `decrypt(ciphertext, keyVersion)`. Called only from two places: the OAuth callback routes (encrypt, on connect/refresh) and the dispatch layer (decrypt, immediately before injecting the token into the n8n webhook payload). Never touches the frontend, never touches n8n — consistent with §5/§7's existing rule that n8n never stores or reads credentials itself.
 
 #### `Posts` Table
 * `id` (UUID, Primary Key)
@@ -297,9 +393,10 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 ## 8. Implementation Roadmap
 
 ### Phase 1 — SaaS Core & OAuth Infrastructure
-- [ ] Set up Web App Framework (Next.js / Node.js API).
-- [ ] Configure database schema (PostgreSQL) with AES-256 token encryption.
-- [ ] Implement OAuth 2.0 handlers for Meta (FB & IG), Threads, and Google (YouTube).
+- [x] Spike-test `ioredis`/BullMQ under Bun (see §1 "BullMQ/ioredis-under-Bun Spike Test Results" — all 7 scenarios passed, Sep 11 2026). `@prisma/adapter-pg` and Bun's native S3/Redis clients already confirmed working (Sep 10).
+- [ ] Set up Web App Framework: Bun + Hono backend API, Vite + React frontend.
+- [ ] Configure database schema (PostgreSQL, Docker-hosted) via Prisma (driver adapter) with AES-256-GCM token encryption (versioned keys, per §7 Token Encryption Scheme).
+- [ ] Implement OAuth 2.0 handlers for Meta (FB & IG), Threads, Google (YouTube), and Pinterest — one callback route per platform, per §2.
 - [ ] Build Integration Dashboard with "Connect / Disconnect" buttons.
 
 ### Phase 2 — Media Engine & Post Composer
@@ -324,4 +421,7 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
-*Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*
+*Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
+*Updated: 2026-09-10 | Facebook `MULTI_PHOTO` (carousel) confirmed tested/working (§5). Full §2 OAuth detail added for all 5 platforms. `ConnectedAccounts` schema (§7) revised for the three token refresh shapes (`NONE`/`SLIDING_WINDOW`/`ON_DEMAND`). Backend tech stack finalized (§1): Bun + Hono, Docker Postgres + Prisma (driver adapter), Vite + React, BullMQ + ioredis (bunqueue as fallback), Bun native Redis client for pub/sub, Bun native S3 client for object storage. UploadThing evaluated and rejected.*  
+*Updated: 2026-09-11 | Token encryption scheme finalized (§7): AES-256-GCM via Bun's `node:crypto`, nonce packed into the ciphertext blob (no separate column), single env-var master key for now, and a `key_version` column added to `ConnectedAccounts` enabling zero-downtime key rotation (old rows decrypt on their original key while a background job re-encrypts them onto the new one).*  
+*Updated: 2026-09-11 | BullMQ/ioredis-under-Bun spike test passed (§1) — all 7 reliability scenarios (round-trip, crash recovery, repeatable jobs, retry/backoff, concurrency, graceful shutdown, QueueEvents) confirmed working. Stack risk resolved: BullMQ + ioredis is confirmed primary, `bunqueue` fallback not activated. Phase 1 roadmap item checked off.*

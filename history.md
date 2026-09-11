@@ -10,7 +10,7 @@
 
 | Item | Value |
 |------|-------|
-| **Current Phase** | Phase 1 — Foundation (in progress) — `instagram-poster`/`threads-poster`/`youtube-poster` ✅ tested; `facebook-poster` blocked by cooldown |
+| **Current Phase** | V1 n8n workflows ✅ all tested (`facebook-poster`/`instagram-poster`/`threads-poster`/`youtube-poster`); Pinterest pending Developer App review. V2 SaaS (`websitePlan.md`) in Phase 1 — stack finalized Sep 10, BullMQ/ioredis-under-Bun spike test passed Sep 11, real backend scaffold not yet started |
 | **Active Platforms** | Facebook, Instagram, Reddit, YouTube, Pinterest |
 | **Excluded (V1)** | Quora (no API), X/Twitter (deferred to V2) |
 | **Credential Scope** | Single user (your own accounts) |
@@ -34,7 +34,8 @@
 | `history.md` | This file — running session log | 2026-08-11 |
 | `docker-compose.yml` | n8n Docker configuration with all required env variables | 2026-08-11 |
 | `workflows/` | n8n workflow JSON exports (importable into n8n) | 2026-09-07 |
-| `websitePlan.md` | V2 SaaS product & technical spec (architecture, OAuth, DB schema, roadmap) | 2026-09-06 |
+| `websitePlan.md` | V2 SaaS product & technical spec (architecture, OAuth, DB schema, roadmap) | 2026-09-11 |
+| `trialBun/` *(external, `/home/kushagra/Desktop/trialBun`)* | BullMQ/ioredis-under-Bun spike test scaffold — not part of this repo | 2026-09-11 |
 
 ---
 
@@ -415,13 +416,79 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 
 ---
 
+### Session 15 — 2026-09-10
+
+**What we did:**
+- Confirmed `facebook-poster.json`'s `MULTI_PHOTO` (carousel) flow tested successfully end-to-end once the earlier Graph API rate limit cleared — closes out the last "untested" post type from Session 13. Pinterest remains pending (Developer App still in manual review, per §5 case 4).
+- Compiled full OAuth 2.0 implementation details for all 5 V1 platforms (Facebook, Instagram, Threads, YouTube, Pinterest) — authorization URLs, scopes, code/token-exchange endpoints, long-lived/refresh-token handling — and wrote them into `websitePlan.md` §2 as five per-platform subsections, plus a "what runs where" split (platform's servers own the consent screen; our backend owns everything from code-exchange onward, server-to-server).
+- Identified that the three refresh-token shapes across those 5 platforms aren't uniform: Facebook/Instagram tokens are effectively non-expiring (`NONE`), Threads/Pinterest need a proactive scheduled refresh before a sliding expiry window closes (`SLIDING_WINDOW` — though Threads renews in place while Pinterest consumes a separate refresh token to mint a new one, different call shapes under the same schedule), and YouTube's refresh token never expires and is just exchanged on-demand right before each upload (`ON_DEMAND`). Revised `websitePlan.md` §7 `ConnectedAccounts` schema accordingly: added `PINTEREST` to the platform enum, added `encrypted_refresh_token` and `refresh_strategy` columns, made `token_expires_at` nullable.
+- Locked in the backend tech stack after evaluating alternatives:
+  - **Runtime/framework**: Bun + Hono (not Elysia — too Bun-coupled for a backend that also leans on Node-ecosystem packages like BullMQ; not Encore — its infra-provisioning opinions conflict with the already-chosen self-managed Postgres/Redis).
+  - **DB/ORM**: Docker-hosted PostgreSQL + Prisma via driver adapter (`@prisma/adapter-pg`), confirmed compatible with Bun firsthand on a prior project — avoids Prisma's native Rust-binary engine and its rougher edges under Bun.
+  - **Frontend**: Vite + React (plain SPA), calling the Hono API directly.
+  - **Job queue**: BullMQ + `ioredis` for the reliability-critical refresh scheduler and dispatch retries — evaluated `bunqueue` (SQLite/Postgres-backed, BullMQ-compatible API, no Redis) as an alternative but kept it as a named fallback only, given it's a ~1-year-old, single-maintainer project versus BullMQ's years of production hardening. Flagged that `ioredis` under Bun is the one genuinely unverified compatibility risk in the stack — needs a spike test (queue + worker, kill mid-job, confirm recovery) before scaffolding.
+  - **Pub/Sub**: Bun's native Redis client for the SSE/live-update layer — noted it's explicitly labeled experimental in Bun's own docs, so it should sit behind a thin swappable interface rather than be hard-wired everywhere.
+  - **Object storage**: confirmed S3 (via Bun's native Zig-based S3 client, no `@aws-sdk/client-s3` needed) for the backend's own media handling. Evaluated **UploadThing** as a possible alternative and rejected it — it's a DX wrapper built on top of S3, not a replacement (no BYO-bucket, closed-source backend, weaker compliance posture), and it offers no capability the YouTube streaming-relay fix (§3) actually needs, since that fix is a Code node running inside n8n's own Node.js process (not our Bun backend) that just needs a URL to issue a streaming GET against — a presigned S3 URL already does that regardless of which client generated it.
+- Wrote all of the above into `websitePlan.md`: header architecture line, new "Backend Tech Stack" table in §1, full §2 OAuth rewrite, §3 S3-client + UploadThing-rejection notes, §7 `ConnectedAccounts` schema, Phase 1 roadmap line, and footer changelog. Also swept and fixed stale "Node/Express"/"TypeORM"/"Next.js" references left over from the pre-Bun draft.
+
+**Decisions made:**
+- Facebook `MULTI_PHOTO` (carousel) is confirmed working — no longer a testing gap.
+- `websitePlan.md` §2 is now the source of truth for per-platform OAuth implementation (endpoints/scopes/refresh handling), not just the general flow.
+- `ConnectedAccounts.refresh_strategy` (`NONE` / `SLIDING_WINDOW` / `ON_DEMAND`) is the mechanism that drives refresh-job logic per platform, replacing scattered per-platform `if` branches.
+- Backend stack finalized: Bun + Hono, Docker Postgres + Prisma (driver adapter), Vite + React, BullMQ + ioredis (bunqueue as fallback only), Bun native Redis client for pub/sub (behind a swappable interface), Bun native S3 client for object storage. UploadThing rejected.
+- Next session must run the `ioredis`/BullMQ-under-Bun spike test before scaffolding the real backend — this is the one unverified assumption in the finalized stack.
+
+**Files modified this session:**
+- `websitePlan.md` — header/architecture line, new §1 "Backend Tech Stack" table, §2 fully rewritten with per-platform OAuth detail, §3 S3-client + UploadThing notes, §5 Facebook carousel status + heading fix, §7 `ConnectedAccounts` schema revised, §8 Phase 1 roadmap line, footer changelog; stale Node/Express/TypeORM references fixed
+- `history.md` — this entry
+
+---
+
+### Session 16 — 2026-09-11
+
+**What we did:**
+- Worked through the token-encryption approach flagged as an open gap at the end of Session 15 (`websitePlan.md` §7 only said "AES-256," no mode/key-storage/rotation plan) — walked through why this is a hard requirement (tokens must be *reversibly* encrypted, not hashed like a password, since the backend needs the plaintext back to inject into the n8n webhook payload; a leak is equivalent to handing an attacker write-access to a user's social accounts with no password/2FA needed).
+- Explained AES-GCM's nonce requirement in detail: a fresh random 12-byte nonce per encryption call is mandatory (reuse under the same key is a critical failure, not just weaker security), but the nonce itself isn't secret — resolved the "does this need its own column" question by packing `nonce || ciphertext || authTag` into one base64 blob stored in the existing `encrypted_access_token`/`encrypted_refresh_token` columns, no schema change needed for that part.
+- Explained the key-rotation mechanics behind the `key_version` column proposed in Session 15: keeping both old and new keys in the app's lookup simultaneously decouples "start using the new key" (instant) from "finish re-encrypting old rows" (gradual, via a background job) — avoiding the downtime/one-time-migration problem a single global key would force.
+- Locked in and wrote the full token encryption scheme into `websitePlan.md` §7 as a new **Token Encryption Scheme** subsection: AES-256-GCM via Bun's built-in `node:crypto`; nonce packed into the stored ciphertext blob; a single master key for now via env var (`TOKEN_ENCRYPTION_KEY_V1`), stored separately from Postgres, no Vault/KMS infra until there's a paying user to justify it; `key_version` column added to `ConnectedAccounts`; rotation procedure documented (add new key to lookup → flip new writes to new version → background job re-encrypts old rows → delete old key once unused); `encrypt()`/`decrypt()` utility called only from OAuth callback routes and the dispatch layer, never from the frontend or n8n.
+
+**Decisions made:**
+- Token encryption: AES-256-GCM (not just "AES-256"), nonce packed into the ciphertext blob (no new column), `key_version` column added to `ConnectedAccounts` for zero-downtime key rotation, master key starts as a single env var and graduates to cloud KMS envelope encryption only once scale/compliance actually demands it.
+- `encrypt()`/`decrypt()` is backend-only, called from exactly two places (OAuth callback on connect/refresh; dispatch layer right before injecting into the n8n payload) — never touches the frontend or n8n, consistent with the existing rule that n8n never stores or reads credentials.
+
+**Files modified this session:**
+- `websitePlan.md` — §7 `ConnectedAccounts` schema: added `key_version` column, updated `encrypted_access_token`/`encrypted_refresh_token` descriptions; new "Token Encryption Scheme" subsection; §8 Phase 1 roadmap line updated; footer changelog
+- `history.md` — this entry, Key Technical Decisions updated
+
+---
+
+### Session 17 — 2026-09-11
+
+**What we did:**
+- Ran the `ioredis`/BullMQ-under-Bun spike test flagged as the one unverified risk at the end of Session 15 — built a standalone Bun scaffold (`trialBun/`) with 7 test files against a local Redis, covering every reliability property BullMQ was chosen for: round-trip processing, crash recovery (`SIGKILL` a worker mid-job, confirm a second worker's stall detection completes it), repeatable jobs (`upsertJobScheduler`/`removeJobScheduler` — the mechanism behind the §6 video-status poller), retry/exponential backoff, concurrency (no cross-job data contamination), graceful shutdown (in-flight job finishes rather than being dropped), and `QueueEvents` delivery. All 7 passed.
+- Along the way, clarified two conceptual points worth keeping straight for anyone else touching this layer later: (1) Bun's native `RedisClient` pub/sub (already tested separately) and BullMQ are not competing options — pub/sub is fire-and-forget messaging with no persistence/retry/state, while BullMQ is a full job-queue state machine built on Redis primitives (sorted sets, blocking list ops, Lua scripts) that pub/sub doesn't provide; the plan already scopes native `RedisClient` for the SSE broadcast layer and `ioredis`+BullMQ for the queue layer, and both coexist in the same app. (2) `ioredis` is just the Redis wire-protocol client; BullMQ is a framework built on top of it (declared as a dependency) that implements queue semantics — so the spike really tested two layered risks at once (does `ioredis` behave under Bun; does BullMQ's logic, which assumes `ioredis`'s exact API, hold up on top of it).
+- Key implementation detail confirmed during testing: pass a plain `{ host, port }` object to each `Queue`/`Worker`/`QueueEvents` instance instead of a shared `ioredis` instance — avoids `maxRetriesPerRequest` config bugs and matches BullMQ's own recommendation against sharing one blocking connection across multiple Worker/QueueEvents instances.
+- Wrote the full results into `websitePlan.md` §1 as a new "BullMQ/ioredis-under-Bun Spike Test Results" subsection, updated the Backend Tech Stack table rows (job queue risk → confirmed primary, `bunqueue` fallback → not needed), checked off the Phase 1 roadmap spike-test item, and added a footer changelog entry.
+
+**Decisions made:**
+- BullMQ + `ioredis` is now the **confirmed** primary job queue under Bun — the last unverified assumption in the finalized backend stack is resolved. `bunqueue` stays documented as an escape hatch only, not an active contingency.
+- Connection pattern for the real backend: separate plain `{ host, port }` configs per `Queue`/`Worker`/`QueueEvents` instance, not one shared `ioredis` connection.
+- Testing/scaffolding phase for the job-queue layer is done; nothing blocks starting the real Phase 1 backend scaffold (Bun + Hono, Postgres/Prisma, OAuth handlers) on this front anymore.
+
+**Files modified this session:**
+- `websitePlan.md` — §1 Backend Tech Stack table rows updated, new "BullMQ/ioredis-under-Bun Spike Test Results" subsection added, §8 Phase 1 roadmap item checked off, footer changelog entry added
+- `history.md` — this entry, Key Technical Decisions updated
+- `trialBun/` (outside this repo, at `/home/kushagra/Desktop/trialBun`) — spike-test scaffold, not part of `smPosting`'s tracked files
+
+---
+
 ## Platform Credential Reference
 
 > Fill this in as you complete setup.md steps. Keep actual secrets in a password manager — only record IDs here.
 
 | Platform | App/Project Name | App ID / Client ID | Notes |
 |----------|-----------------|-------------------|-------|
-| Facebook | SMPosting App | *Configured* | `facebook-poster.json` built, still untested — code-368 block confirmed still active a day later (Sep 8); no way to check remaining cooldown, just wait and retest `TEXT` first. **Access token pasted in chat Sep 8 — treat as compromised, rotate before reuse.** |
+| Facebook | SMPosting App | *Configured* | `facebook-poster.json` fully tested — `TEXT`, `PHOTO`, `VIDEO`, and `MULTI_PHOTO` (carousel) all confirmed working end-to-end (Sep 10) once the code-368 block cleared. **Access token pasted in chat Sep 8 — treat as compromised, rotate before reuse.** |
 | Instagram | SMPosting App | *Configured* | Instagram Business Account ID retrieved; `instagram-poster.json` tested successfully for photo/story/reel (Sep 7) |
 | Threads | SMPosting App | *Configured* | Long-lived token generated via curl; `threads-poster.json` tested successfully for TEXT (Sep 7) |
 | Reddit | — | — | *Deferred* (Pending API Access Request) |
@@ -457,6 +524,19 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | YouTube upload quota gate | Cloud Console's `Video Uploads per day` figure is not what's enforced — separate undocumented ceiling for unaudited projects; fixed only via Google's Audit and Quota Extension request. **Gate lifted Sep 8** — resumable-upload init now succeeds. |
 | YouTube download→upload bottleneck | `Download Video` fully buffers video in n8n binary storage before `Upload Video Binary` sends anything — real fix is a streaming Code-node relay (S3 GET stream piped directly into YouTube PUT stream), not yet built; see `websitePlan.md` §3 |
 | Meta code-368 status checking | No queryable status/countdown exists anywhere (not Business Suite, not the API) — confirmed by testing the same block twice, a day apart |
+| Facebook carousel (V2) | `MULTI_PHOTO` confirmed tested/working end-to-end (Sep 10) — upload each photo unpublished, aggregate IDs, one `/feed` call with `attached_media` |
+| Backend runtime/framework (V2) | Bun + Hono — Hono chosen over Elysia (too Bun-coupled) and Encore (infra-provisioning opinions conflict with self-managed Postgres/Redis) |
+| Database/ORM (V2) | Docker-hosted PostgreSQL + Prisma via driver adapter (`@prisma/adapter-pg`) — avoids Prisma's native Rust-binary engine; confirmed compatible with Bun firsthand |
+| Frontend (V2) | Vite + React SPA, calling the Hono API directly — no Next.js/SSR, since the backend already needs real long-running processes (job queue, SSE server) |
+| Job queue (V2) | BullMQ + `ioredis` — **confirmed primary** (spike test passed Sep 11: round-trip, crash recovery, repeatable jobs, retry/backoff, concurrency, graceful shutdown, QueueEvents all ✅). Connect via plain `{ host, port }` per `Queue`/`Worker`/`QueueEvents` instance, not a shared `ioredis` instance. `bunqueue` remains a documented fallback only, not active. |
+| Pub/Sub for live updates (V2) | Bun's native Redis client — explicitly experimental per Bun's own docs, so wrapped behind a thin swappable interface rather than hard-wired |
+| Object storage (V2) | S3 via Bun's native Zig-based S3 client (no `@aws-sdk/client-s3` needed) — UploadThing evaluated and rejected (DX wrapper on top of S3, not a replacement; offers nothing the YouTube streaming-relay fix needs, since that fix runs inside n8n's own Node process, not the Bun backend) |
+| `ConnectedAccounts` refresh shapes (V2) | Three shapes drive a `refresh_strategy` column instead of per-platform `if` branches: `NONE` (Facebook/Instagram, non-expiring Page token), `SLIDING_WINDOW` (Threads renews in place, Pinterest consumes a refresh token — same schedule, different call shape), `ON_DEMAND` (YouTube, refresh token never expires, exchanged right before each use) |
+| Token encryption cipher (V2) | AES-256-GCM via Bun's built-in `node:crypto` — reversible (not hashed), since the backend must recover the plaintext token to inject into the n8n webhook payload; a leak is equivalent to handing over write-access to a user's connected accounts |
+| Token nonce/IV handling (V2) | No new column — GCM's mandatory fresh 12-byte nonce per encryption is packed as `nonce \|\| ciphertext \|\| authTag` into one base64 blob, stored in the existing `encrypted_access_token`/`encrypted_refresh_token` columns |
+| Token encryption key storage (V2) | Single master key via env var (`TOKEN_ENCRYPTION_KEY_V1`), stored separately from Postgres — no Vault/KMS until scale/compliance justifies it |
+| `key_version` column & rotation (V2) | Added to `ConnectedAccounts`; rotation is zero-downtime — add new key to the app's lookup, flip new writes to the new version, background job re-encrypts old rows onto it, delete the old key once unused |
+| Encrypt/decrypt utility scope (V2) | One backend module (`encrypt(plaintext, keyVersion)` / `decrypt(ciphertext, keyVersion)`) called only from OAuth callback routes (encrypt, on connect/refresh) and the dispatch layer (decrypt, right before injecting into the n8n payload) — never touches the frontend or n8n |
 
 ---
 
