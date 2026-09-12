@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:18
+    container_name: smposting-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: smposting
+      POSTGRES_PASSWORD: smposting
+      POSTGRES_DB: smposting
+    ports:
+      - "5433:5432"
+    volumes:
+      - smposting_postgres_data:/var/lib/postgresql
+
+  redis:
+    image: redis:8.0
+    container_name: smposting-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - smposting_redis_data:/data
+
+volumes:
+  smposting_postgres_data:
+  smposting_redis_data:

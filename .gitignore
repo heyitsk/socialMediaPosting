@@ -1,1 +1,24 @@
 cred.txt
+
+# dependencies
+node_modules/
+
+# env
+backend/.env
+frontend/.env
+.env
+.env.local
+
+# build output
+frontend/dist/
+backend/dist/
+
+# prisma
+backend/src/generated/
+backend/prisma/generated/
+
+# docker
+backend/postgres_data/
+
+# editor/OS
+.DS_Store

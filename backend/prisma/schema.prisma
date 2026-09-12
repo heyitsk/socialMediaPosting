@@ -1,0 +1,110 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Platform {
+  FACEBOOK
+  INSTAGRAM
+  THREADS
+  YOUTUBE
+  PINTEREST
+}
+
+// Drives refresh-job branching instead of scattering per-platform `if`s
+// through the codebase — see websitePlan.md §7.
+enum RefreshStrategy {
+  NONE // Facebook/Instagram — Page token effectively non-expiring
+  SLIDING_WINDOW // Threads/Pinterest — proactively refreshed before expiry
+  ON_DEMAND // YouTube — refresh token exchanged right before each use
+}
+
+enum MediaType {
+  TEXT
+  IMAGE
+  VIDEO
+  CAROUSEL
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PROCESSING
+  PUBLISHED
+  PARTIAL_FAILURE
+  FAILED
+}
+
+enum PostLogStatus {
+  SUCCESS
+  FAILED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  connectedAccounts ConnectedAccount[]
+  posts             Post[]
+
+  @@map("users")
+}
+
+model ConnectedAccount {
+  id                    String          @id @default(uuid())
+  userId                String          @map("user_id")
+  user                  User            @relation(fields: [userId], references: [id])
+  platform              Platform
+  accountName           String          @map("account_name")
+  platformAccountId     String          @map("platform_account_id")
+
+  // AES-256-GCM encrypted (nonce || ciphertext || authTag, base64) — see
+  // websitePlan.md §7 "Token Encryption Scheme". Never touches the frontend or n8n.
+  encryptedAccessToken  String          @map("encrypted_access_token")
+  encryptedRefreshToken String?         @map("encrypted_refresh_token")
+
+  // Which key encrypted this row's tokens — enables zero-downtime key rotation.
+  keyVersion            Int             @map("key_version")
+
+  tokenExpiresAt         DateTime?      @map("token_expires_at")
+  refreshStrategy         RefreshStrategy @map("refresh_strategy")
+  lastRefreshedAt         DateTime?      @map("last_refreshed_at")
+
+  @@unique([userId, platform, platformAccountId])
+  @@map("connected_accounts")
+}
+
+model Post {
+  id            String     @id @default(uuid())
+  userId        String     @map("user_id")
+  user          User       @relation(fields: [userId], references: [id])
+  caption       String
+  mediaType     MediaType  @map("media_type")
+  mediaUrls     Json       @map("media_urls")
+  status        PostStatus @default(DRAFT)
+  scheduledFor  DateTime?  @map("scheduled_for")
+  createdAt     DateTime   @default(now()) @map("created_at")
+
+  logs PostLog[]
+
+  @@map("posts")
+}
+
+model PostLog {
+  id             String        @id @default(uuid())
+  postId         String        @map("post_id")
+  post           Post          @relation(fields: [postId], references: [id])
+  platform       Platform
+  status         PostLogStatus
+  platformPostId String?       @map("platform_post_id")
+  errorMessage   String?       @map("error_message")
+  executedAt     DateTime      @default(now()) @map("executed_at")
+
+  @@map("post_logs")
+}

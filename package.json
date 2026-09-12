@@ -1,0 +1,14 @@
+{
+  "name": "smposting",
+  "private": true,
+  "workspaces": ["backend", "frontend"],
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,magenta \"bun run --cwd backend dev\" \"bun run --cwd frontend dev\"",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.0",
+    "concurrently": "^9.1.0"
+  }
+}
