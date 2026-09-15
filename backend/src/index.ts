@@ -4,7 +4,9 @@ import { logger } from "hono/logger";
 import { env } from "./lib/env";
 import { corsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/error-handler";
+import { facebookAuthRoute } from "./routes/auth/facebook";
 import { healthRoute } from "./routes/health";
+import { integrationsRoute } from "./routes/integrations";
 
 const app = new OpenAPIHono();
 
@@ -13,6 +15,8 @@ app.use(corsMiddleware);
 app.onError(errorHandler);
 
 app.route("/health", healthRoute);
+app.route("/api/auth/facebook", facebookAuthRoute);
+app.route("/api/integrations", integrationsRoute);
 
 app.doc("/openapi.json", {
   openapi: "3.1.0",
