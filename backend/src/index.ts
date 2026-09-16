@@ -9,6 +9,7 @@ import { healthRoute } from "./routes/health";
 import { integrationsRoute } from "./routes/integrations";
 import { postsRoute } from "./routes/posts";
 import { webhooksRoute } from "./routes/webhooks";
+import { startVideoStatusWorker } from "./queue/video-status-worker";
 
 const app = new OpenAPIHono();
 
@@ -32,6 +33,10 @@ const server = Bun.serve({
   port: env.PORT,
   fetch: app.fetch,
 });
+
+// Same process as the API for now (no separate worker deployment yet — see
+// websitePlan.md Phase 3 queue-mode/K8s roadmap item).
+startVideoStatusWorker();
 
 console.log(`smPosting backend listening on ${server.url}`);
 console.log(`API docs available at ${server.url}docs`);

@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -15,7 +16,9 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 
-type MediaType = "TEXT" | "IMAGE" | "VIDEO";
+type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL";
+
+const MIN_CAROUSEL_PHOTOS = 2;
 
 export function ComposerPage() {
   const queryClient = useQueryClient();
@@ -35,6 +38,9 @@ export function ComposerPage() {
   const [caption, setCaption] = useState("");
   const [mediaType, setMediaType] = useState<MediaType>("TEXT");
   const [mediaUrl, setMediaUrl] = useState("");
+  const [carouselUrls, setCarouselUrls] = useState<string[]>(["", ""]);
+
+  const trimmedCarouselUrls = carouselUrls.map((url) => url.trim()).filter((url) => url !== "");
 
   const createPost = useMutation({
     mutationFn: async () => {
@@ -43,7 +49,12 @@ export function ComposerPage() {
           connectedAccountId,
           caption,
           mediaType,
-          mediaUrls: mediaType === "TEXT" ? [] : [mediaUrl],
+          mediaUrls:
+            mediaType === "TEXT"
+              ? []
+              : mediaType === "CAROUSEL"
+                ? trimmedCarouselUrls
+                : [mediaUrl],
         },
       });
       if (error) throw error;
@@ -58,6 +69,7 @@ export function ComposerPage() {
       }
       setCaption("");
       setMediaUrl("");
+      setCarouselUrls(["", ""]);
     },
     onError: () => toast.error("Failed to create post."),
   });
@@ -65,7 +77,10 @@ export function ComposerPage() {
   const canSubmit =
     connectedAccountId !== "" &&
     caption.trim() !== "" &&
-    (mediaType === "TEXT" || mediaUrl.trim() !== "") &&
+    (mediaType === "TEXT" ||
+      (mediaType === "CAROUSEL"
+        ? trimmedCarouselUrls.length >= MIN_CAROUSEL_PHOTOS
+        : mediaUrl.trim() !== "")) &&
     !createPost.isPending;
 
   return (
@@ -129,11 +144,12 @@ export function ComposerPage() {
                     <SelectItem value="TEXT">Text only</SelectItem>
                     <SelectItem value="IMAGE">Image</SelectItem>
                     <SelectItem value="VIDEO">Video</SelectItem>
+                    <SelectItem value="CAROUSEL">Carousel (multiple photos)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
-              {mediaType !== "TEXT" && (
+              {(mediaType === "IMAGE" || mediaType === "VIDEO") && (
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="media-url">Media URL (Cloudinary)</Label>
                   <Input
@@ -142,6 +158,46 @@ export function ComposerPage() {
                     onChange={(e) => setMediaUrl(e.target.value)}
                     placeholder="https://res.cloudinary.com/..."
                   />
+                </div>
+              )}
+
+              {mediaType === "CAROUSEL" && (
+                <div className="flex flex-col gap-2">
+                  <Label>Photo URLs (Cloudinary, min {MIN_CAROUSEL_PHOTOS})</Label>
+                  {carouselUrls.map((url, index) => (
+                    <div key={index} className="flex gap-2">
+                      <Input
+                        value={url}
+                        onChange={(e) =>
+                          setCarouselUrls((urls) =>
+                            urls.map((u, i) => (i === index ? e.target.value : u)),
+                          )
+                        }
+                        placeholder="https://res.cloudinary.com/..."
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        disabled={carouselUrls.length <= MIN_CAROUSEL_PHOTOS}
+                        onClick={() =>
+                          setCarouselUrls((urls) => urls.filter((_, i) => i !== index))
+                        }
+                      >
+                        <X className="size-4" />
+                      </Button>
+                    </div>
+                  ))}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="self-start"
+                    onClick={() => setCarouselUrls((urls) => [...urls, ""])}
+                  >
+                    <Plus className="size-4" />
+                    Add photo
+                  </Button>
                 </div>
               )}
 

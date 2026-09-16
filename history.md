@@ -537,6 +537,41 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 
 ---
 
+### Session 19 — 2026-09-16
+
+**What we did:**
+- Diagnosed a real correctness gap surfaced by the user while testing video posts: `facebook-poster.json`'s video branch calls `POST /{page_id}/videos`, which accepts the upload and returns a video `id` immediately, but the video is still transcoding on Facebook's side — the workflow's "Build Success Result" node fires the callback right away regardless, so `routes/webhooks.ts` was writing `Post.status = PUBLISHED` well before the video was actually live. This is exactly the gap `websitePlan.md` §6 ("Async Media Processing Poller") had already designed for but never built.
+- Weighed two fixes: (A) add a poll-before-callback wait loop inside the n8n video branch itself, vs. (B) poll from the backend after the existing callback lands, matching §6's original design. **Chose (B)** — n8n workflows are meant to stay fast/stateless/single-shot per `websitePlan.md` §1 ("n8n holds no orchestration logic of its own"), and a multi-minute poll loop inside the workflow would tie up an n8n execution slot per video post, working against the queue-mode/KEDA-autoscaled direction the architecture is headed. Facebook's existing callback already carries everything needed (`platform_post_id` = the video id), so **no `facebook-poster.json` changes were required at all** — this was resolved entirely backend-side.
+- Implemented the poller as the backend's first real BullMQ usage (previously only spike-tested in `trialBun/`, never instantiated in the actual backend):
+  - `lib/facebook.ts` — added `getVideoStatus(pageToken, videoId)`, reusing the existing `graphGet<T>` helper to call `GET /{video_id}?fields=status`.
+  - `queue/video-status-queue.ts` (new) — a `video-status-poll` `Queue` + `enqueueVideoStatusPoll(postId, platformPostId)`, using the existing `redisConnection()` from `queue/connection.ts`. Uses BullMQ's native `attempts: 30` + `backoff: { type: "fixed", delay: 30_000 }` (instead of hand-rolled re-enqueueing) — directly reuses the retry/backoff mechanism already validated in the Sep 11 spike test, giving the same "30s interval, ~15min hard timeout" §6 already documented.
+  - `queue/video-status-worker.ts` (new) — the `Worker`: looks up the `Post` + `connectedAccount` fresh from the DB on every attempt (not from job data) and decrypts the token right before use, consistent with §7's Token Encryption Scheme rule of decrypting only immediately before use. Resolves `PUBLISHED` on `video_status: "ready"`, `FAILED` (with a specific error message) on `"error"`, retries (via `throw`) while `"processing"`, and writes a timeout `FAILED` `PostLog` on the last of the 30 attempts instead of polling forever.
+  - `routes/webhooks.ts` — the only behavioral change to the existing callback route: a `FACEBOOK` + `SUCCESS` callback for a `VIDEO` post now looks up the post's `mediaType`, and if it's `VIDEO`, enqueues the poller and returns `204` **without** writing the immediate `PostLog`/`Post.status = PUBLISHED` — leaves the post at `PROCESSING` until the poller confirms it. All other cases (`TEXT`/`IMAGE`/`CAROUSEL`, or an outright `FAILED` from n8n itself) keep the exact prior immediate-write behavior.
+  - `index.ts` — starts the `Worker` in the same process as the API via `startVideoStatusWorker()`, since there's no separate worker deployment yet (still queue-mode/K8s future work per Phase 3).
+- No frontend changes needed — `history.tsx` already polls every 5s and already renders `PROCESSING` as a badge; a `VIDEO` post now simply stays on that badge for longer (up to ~15 min) before flipping to `PUBLISHED`/`FAILED`, which is the actual fix.
+- Verified: `tsc --noEmit` clean on both backend and frontend; confirmed via `bun --watch`'s auto-reload that the backend didn't crash on the new code; confirmed the `Worker` registered correctly by checking for `bull:video-status-poll:*` keys in Redis (`docker exec smposting-redis redis-cli keys ...`). Real end-to-end confirmation (submit an actual video post, watch it stay `PROCESSING` past the n8n callback and flip to `PUBLISHED` only once Facebook's `video_status` reports `"ready"`) is still pending live testing by the user.
+- Followed up in the same session by closing that gap: added `CAROUSEL` support to `composer.tsx`. Confirmed first that no backend changes were needed — `routes/posts.ts`'s `mediaUrlsSchema` already accepts an arbitrary-length `string[]`, `service/n8n.ts`'s `N8N_MEDIA_TYPE` map already translates Prisma's `CAROUSEL` to the workflow's `MULTI_PHOTO` string, and `facebook-poster.json`'s switch already has a `MULTI_PHOTO` branch — this was purely a missing UI affordance.
+  - Added `"CAROUSEL"` to the `MediaType` union and to the media-type `Select`.
+  - Replaced the single `mediaUrl` input with a `carouselUrls: string[]` array (seeded with 2 empty slots) that only renders when `mediaType === "CAROUSEL"`; the existing single-URL `Input` still handles `IMAGE`/`VIDEO` unchanged. Each row has a remove button (disabled once down to the `MIN_CAROUSEL_PHOTOS = 2` floor, since a 1-photo "carousel" isn't a real carousel on Facebook's side) and there's an "Add photo" button to append more.
+  - `canSubmit` and the submit payload both branch on `mediaType === "CAROUSEL"`: submission is blocked until at least 2 non-blank URLs are entered, and empty/whitespace rows are filtered out (via `trimmedCarouselUrls`) before being sent as `mediaUrls`.
+  - Verified with `bunx tsc --noEmit` and a full `bun run build` — both clean.
+
+**Decisions made:**
+- Video-processing-completion detection lives entirely in the backend (BullMQ poller calling Graph API directly), not inside the n8n workflow — keeps n8n workflows fast/stateless and centralizes the pattern so it can be reused if Instagram/Threads video containers turn out to need the same treatment later (an open question §6 already flagged).
+- The BullMQ `Worker` runs in the same process as the Hono API for now (no separate worker process/deployment) — acceptable until real queue-mode/K8s scaling work happens (Phase 3, still open).
+- Poller job data carries only `{ postId, platformPostId }`, never a decrypted token — the worker re-fetches the `ConnectedAccount` and decrypts on every attempt, matching the existing "decrypt only right before use" rule rather than persisting a plaintext token into a Redis job payload.
+
+**Files modified this session:**
+- `backend/src/lib/facebook.ts` — added `getVideoStatus`
+- `backend/src/queue/video-status-queue.ts` (new)
+- `backend/src/queue/video-status-worker.ts` (new)
+- `backend/src/routes/webhooks.ts` — video-aware callback handling
+- `backend/src/index.ts` — starts the video-status worker
+- `frontend/src/routes/composer.tsx` — added `CAROUSEL` media type + repeatable photo-URL input
+- `history.md` — this entry
+
+---
+
 ## Platform Credential Reference
 
 > Fill this in as you complete setup.md steps. Keep actual secrets in a password manager — only record IDs here.

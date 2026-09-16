@@ -3,6 +3,7 @@ import type { Platform } from "@prisma/client";
 import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
 import { env } from "../lib/env";
+import { enqueueVideoStatusPoll } from "../queue/video-status-queue";
 
 const PLATFORM_VALUES = ["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST"] as const;
 
@@ -40,6 +41,18 @@ export const webhooksRoute = new OpenAPIHono().openapi(n8nCallback, async (c) =>
   const platform = body.platform.toUpperCase();
   if (!PLATFORM_VALUES.includes(platform as (typeof PLATFORM_VALUES)[number])) {
     throw new HTTPException(400, { message: `Unknown platform: ${body.platform}` });
+  }
+
+  // Facebook video: POST /{page_id}/videos accepts the upload and returns an
+  // id immediately, but the video is still transcoding — don't mark PUBLISHED
+  // until a background poller confirms video_status is actually "ready"
+  // (websitePlan.md §6 "Async Media Processing Poller").
+  if (platform === "FACEBOOK" && body.status === "SUCCESS" && body.platform_post_id) {
+    const post = await prisma.post.findUniqueOrThrow({ where: { id: body.post_id } });
+    if (post.mediaType === "VIDEO") {
+      await enqueueVideoStatusPoll(body.post_id, body.platform_post_id);
+      return c.body(null, 204);
+    }
   }
 
   await prisma.postLog.create({

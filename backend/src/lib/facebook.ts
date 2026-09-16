@@ -70,6 +70,17 @@ export async function fetchPages(userToken: string): Promise<FacebookPage[]> {
   return data.data;
 }
 
+// "processing" | "ready" | "error" — the video isn't actually live until this
+// reports "ready", even though POST /{page_id}/videos returns an id immediately
+// (websitePlan.md §6 "Async Media Processing Poller").
+export async function getVideoStatus(pageToken: string, videoId: string): Promise<string> {
+  const data = await graphGet<{ status: { video_status: string } }>(`/${videoId}`, {
+    fields: "status",
+    access_token: pageToken,
+  });
+  return data.status.video_status;
+}
+
 export async function fetchInstagramBusinessAccount(
   pageId: string,
   pageToken: string,
