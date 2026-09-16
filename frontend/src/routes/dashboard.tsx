@@ -1,9 +1,53 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
+import { useSearchParams } from "react-router";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api, API_URL } from "@/lib/api";
 
+const CONNECT_ERROR_MESSAGES: Record<string, string> = {
+  facebook_connect_denied: "Facebook connection was cancelled.",
+  facebook_connect_invalid_state: "Facebook connection expired — please try again.",
+  facebook_connect_failed: "Failed to connect Facebook account.",
+};
+
+function useConnectStatusToast() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const handled = useRef(false);
+
+  useEffect(() => {
+    if (handled.current) return;
+
+    const connected = searchParams.get("connected");
+    const error = searchParams.get("error");
+    if (!connected && !error) return;
+
+    handled.current = true;
+
+    if (connected === "facebook") {
+      toast.success("Facebook account connected.");
+    } else if (error) {
+      toast.error(CONNECT_ERROR_MESSAGES[error] ?? "Failed to connect account.");
+    }
+
+    setSearchParams(
+      (prev) => {
+        prev.delete("connected");
+        prev.delete("error");
+        return prev;
+      },
+      { replace: true },
+    );
+    // Runs once per mount to consume the one-time OAuth redirect params — deliberately not
+    // re-running on every searchParams change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+
 export function DashboardPage() {
+  useConnectStatusToast();
+
   const { data, isPending, isError } = useQuery({
     queryKey: ["health"],
     queryFn: async () => {
@@ -50,8 +94,14 @@ function ConnectedAccountsCard() {
       const { error } = await api.DELETE("/api/integrations/{id}", { params: { path: { id } } });
       if (error) throw error;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["integrations"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      toast.success("Account disconnected.");
+    },
+    onError: () => toast.error("Failed to disconnect account."),
   });
+
+  const facebookConnected = accounts?.some((account) => account.platform === "FACEBOOK") ?? false;
 
   return (
     <Card className="max-w-sm">
@@ -83,11 +133,12 @@ function ConnectedAccountsCard() {
         <Button
           variant="outline"
           size="sm"
+          disabled={facebookConnected}
           onClick={() => {
             window.location.href = `${API_URL}/api/auth/facebook`;
           }}
         >
-          Connect Facebook
+          {facebookConnected ? "Facebook Connected" : "Connect Facebook"}
         </Button>
       </CardContent>
     </Card>

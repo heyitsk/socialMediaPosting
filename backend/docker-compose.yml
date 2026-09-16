@@ -21,6 +21,35 @@ services:
     volumes:
       - smposting_redis_data:/data
 
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: smposting-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      GENERIC_TIMEZONE: Asia/Kolkata
+      TZ: Asia/Kolkata
+      # Store binary files (images/videos) on disk instead of RAM — prevents
+      # n8n from crashing on large video uploads.
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      N8N_PAYLOAD_SIZE_MAX: 4000
+      # Auto-delete old execution logs + binary files to prevent disk filling up.
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 336
+      N8N_EDITOR_BASE_URL: http://localhost:5678
+      WEBHOOK_URL: http://localhost:5678
+      # Must match backend's N8N_CALLBACK_SECRET — referenced by the
+      # "Send Callback"/"Send Error Callback" nodes in each poster workflow.
+      CALLBACK_SECRET: 10eae92593ffa51821599943e5cc48f52a96a0666f39f6e46e1976321f12b1b2
+      # n8n blocks {{ $env.* }} access in node expressions by default (security
+      # hardening) — required here since our callback nodes read $env.CALLBACK_SECRET.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+    volumes:
+      - n8n_data:/home/node/.n8n
+
 volumes:
   smposting_postgres_data:
   smposting_redis_data:
+  n8n_data:
+    external: true

@@ -232,6 +232,8 @@ Rate limiting happens **here**, before dispatch — a token-bucket limiter per `
 3. **YouTube's upload-audit gate (pre-launch blocker, not a runtime case)** — confirmed by real testing (Sep 2026) that a `quotaExceeded` 429 on YouTube's resumable-upload init call can fire even while Cloud Console's own `Video Uploads per day` metric shows 0% usage. Google enforces a **separate, undocumented ceiling on the video-upload feature** for any project that hasn't completed their **Audit and Quota Extension** review — it doesn't appear anywhere in the standard quota dashboard, isn't adjustable by requesting a higher number there, and is **project-wide** (shared across every user of the SaaS), not per-user like everything else in this section. Unlike cases 1-2, there's no backend logic that works around this — it's a hard external dependency that must be resolved (audit request filed and approved, realistic lead time days-to-weeks) **before** the YouTube integration can support more than a handful of test uploads total, regardless of how many users the product has.
 4. **Pinterest's Developer App review (pre-launch blocker, same shape as case 3)** — submitting the app (Sep 2026) required a live company/app URL and privacy policy link before Pinterest would even accept the form, then places the app in manual review ("your request is still being reviewed") with no in-dashboard status/ETA — confirmation only arrives by email. New apps default to **Trial access** (limited scopes/rate limits) regardless of outcome; reaching **Standard Access** for production traffic needs a separate review after that. Same implication as the YouTube gate: this is an external dependency with unknown lead time, not something the backend can work around, and it blocks `pinterest-poster` beyond a handful of test posts until it clears.
 
+> **Note (Sep 16, 2026):** the schema below is the aspirational full design. The first real implementation (`backend/src/service/n8n.ts` dispatching to `facebook-poster.json`, confirmed working end-to-end) is deliberately simpler — no `youtube_metadata` block (Facebook-only so far) and `token` is shaped `{ page_id, access_token }` rather than the IG example below. A `callback_url` field (pointing at `${PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`) is also sent per-call rather than assumed, since it's what each workflow's callback node actually reads. This will converge back toward the full schema as more platforms get wired up.
+
 ### Webhook Payload Schema (Sent from Backend to n8n) — one call per platform
 
 ```json
@@ -279,6 +281,8 @@ Each workflow ends with a single **Callback HTTP Request node** POSTing its own 
 ### Return Webhook Response Schema (Sent from each per-platform n8n workflow to Backend)
 
 Since each platform now runs as its own workflow triggered by its own webhook call, each one calls back independently with **its own result only** — there is no bundled `results` array from n8n anymore.
+
+> **Note (Sep 16, 2026):** the real `POST /api/webhooks/n8n-callback` route (and what `facebook-poster.json`'s callback nodes actually send) implements a simpler subset of this — `{ post_id, platform, status, platform_post_id, error }` only, no `error_type`/`usage` fields yet, and auth is a plain `x-callback-secret` shared-secret header rather than anything richer. `error_type`/`usage`-driven handling (circuit breaker for `ABUSE_BLOCK`, proactive throttling from `usage`) is still aspirational — confirmed working today is just the `SUCCESS`/`FAILED` → `Post.status` update.
 
 ```json
 {
@@ -394,10 +398,10 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 
 ### Phase 1 — SaaS Core & OAuth Infrastructure
 - [x] Spike-test `ioredis`/BullMQ under Bun (see §1 "BullMQ/ioredis-under-Bun Spike Test Results" — all 7 scenarios passed, Sep 11 2026). `@prisma/adapter-pg` and Bun's native S3/Redis clients already confirmed working (Sep 10).
-- [ ] Set up Web App Framework: Bun + Hono backend API, Vite + React frontend.
-- [ ] Configure database schema (PostgreSQL, Docker-hosted) via Prisma (driver adapter) with AES-256-GCM token encryption (versioned keys, per §7 Token Encryption Scheme).
-- [ ] Implement OAuth 2.0 handlers for Meta (FB & IG), Threads, Google (YouTube), and Pinterest — one callback route per platform, per §2.
-- [ ] Build Integration Dashboard with "Connect / Disconnect" buttons.
+- [x] Set up Web App Framework: Bun + Hono backend API, Vite + React frontend.
+- [x] Configure database schema (PostgreSQL, Docker-hosted) via Prisma (driver adapter) with AES-256-GCM token encryption (versioned keys, per §7 Token Encryption Scheme).
+- [x] Implement OAuth 2.0 handler for Meta Facebook (Sep 16) — Instagram/Threads/Google/Pinterest callback routes still pending, per §2.
+- [x] Build Integration Dashboard with "Connect / Disconnect" buttons (Facebook only so far; duplicate-connect guard + disconnect toasts added Sep 16).
 
 ### Phase 2 — Media Engine & Post Composer
 - [ ] Set up AWS S3 bucket and presigned URL upload handler.
@@ -405,13 +409,13 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 - [ ] Build Post Composer UI with real-time platform validation rules.
 
 ### Phase 3 — n8n Webhook & Execution Workflow
-- [ ] Build one independent n8n workflow per platform (`facebook-poster`, `instagram-poster`, `threads-poster`, `youtube-poster`) — no shared "master" workflow with internal platform branching.
-- [ ] Configure platform nodes with dynamic expressions for tokens and IDs, sourced from the per-call webhook payload only.
-- [ ] Implement S3 binary download for YouTube node.
-- [ ] Stand up n8n in **queue mode**: Postgres for shared workflow storage, Redis for the job queue, `n8n-main` + `n8n-worker` roles.
+- [x] Build one independent n8n workflow per platform (`facebook-poster`, `instagram-poster`, `threads-poster`, `youtube-poster`) — no shared "master" workflow with internal platform branching. (`pinterest-poster` still pending Developer App review.)
+- [x] Configure platform nodes with dynamic expressions for tokens and IDs, sourced from the per-call webhook payload only — confirmed for `facebook-poster`, since it's the only one wired to the real backend so far.
+- [ ] Implement S3 binary download for YouTube node — `youtube-poster.json` currently uses a plain HTTP GET stand-in (Session 13/14); real S3 wiring and the streaming-relay fix (§3) not yet built, and YouTube isn't wired to the backend at all yet.
+- [ ] Stand up n8n in **queue mode**: Postgres for shared workflow storage, Redis for the job queue, `n8n-main` + `n8n-worker` roles. (Current dev setup, Sep 16, is a single non-queue-mode n8n container in `backend/docker-compose.yml` — fine for one platform/low volume, not yet the queue-mode architecture this section describes.)
 - [ ] Deploy n8n main/worker on Kubernetes; configure **KEDA** autoscaling of worker replicas on Redis queue depth.
-- [ ] Build the backend **fan-out dispatcher** (`Promise.allSettled` over selected platforms) and **per-`(user, platform)` rate limiter** (token bucket sized to each platform's quota).
-- [ ] Build Return Webhook Callback handler on backend; implement per-callback `PostLogs` insert + cross-callback aggregation into `Posts.status` (Section 6).
+- [ ] Build the backend **fan-out dispatcher** (`Promise.allSettled` over selected platforms) and **per-`(user, platform)` rate limiter** (token bucket sized to each platform's quota) — current dispatch (Sep 16) is a single synchronous call to one platform (Facebook), not the multi-platform fan-out this describes.
+- [x] Build Return Webhook Callback handler on backend (Sep 16) — implements per-callback `PostLogs` insert + direct `Posts.status` update for the single-platform case; cross-callback aggregation across multiple platforms (Section 6) still pending, since nothing dispatches to more than one platform yet.
 
 ### Phase 4 — History, Error Center & Notifications
 - [ ] Build History Dashboard & Error Center UI.
@@ -424,4 +428,5 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
 *Updated: 2026-09-10 | Facebook `MULTI_PHOTO` (carousel) confirmed tested/working (§5). Full §2 OAuth detail added for all 5 platforms. `ConnectedAccounts` schema (§7) revised for the three token refresh shapes (`NONE`/`SLIDING_WINDOW`/`ON_DEMAND`). Backend tech stack finalized (§1): Bun + Hono, Docker Postgres + Prisma (driver adapter), Vite + React, BullMQ + ioredis (bunqueue as fallback), Bun native Redis client for pub/sub, Bun native S3 client for object storage. UploadThing evaluated and rejected.*  
 *Updated: 2026-09-11 | Token encryption scheme finalized (§7): AES-256-GCM via Bun's `node:crypto`, nonce packed into the ciphertext blob (no separate column), single env-var master key for now, and a `key_version` column added to `ConnectedAccounts` enabling zero-downtime key rotation (old rows decrypt on their original key while a background job re-encrypts them onto the new one).*  
-*Updated: 2026-09-11 | BullMQ/ioredis-under-Bun spike test passed (§1) — all 7 reliability scenarios (round-trip, crash recovery, repeatable jobs, retry/backoff, concurrency, graceful shutdown, QueueEvents) confirmed working. Stack risk resolved: BullMQ + ioredis is confirmed primary, `bunqueue` fallback not activated. Phase 1 roadmap item checked off.*
+*Updated: 2026-09-11 | BullMQ/ioredis-under-Bun spike test passed (§1) — all 7 reliability scenarios (round-trip, crash recovery, repeatable jobs, retry/backoff, concurrency, graceful shutdown, QueueEvents) confirmed working. Stack risk resolved: BullMQ + ioredis is confirmed primary, `bunqueue` fallback not activated. Phase 1 roadmap item checked off.*  
+*Updated: 2026-09-16 | First real end-to-end dispatch loop confirmed working: Facebook OAuth connect (§2.1) → encrypted token storage (§7) → Composer submit → backend `POST /api/posts` → `facebook-poster` n8n workflow → Graph API → callback → `Post.status = PUBLISHED`. §5/§6 flagged with notes on where the actual (simpler, Facebook-only) payload/callback schema currently diverges from this doc's full aspirational design. Phase 1/3 roadmap items checked off for what's genuinely built (Bun+Hono, Prisma schema, Facebook OAuth handler, Integration Dashboard, per-platform n8n workflows, backend callback handler); fan-out dispatcher, rate limiter, queue mode, K8s/KEDA, and non-Facebook OAuth handlers remain open. n8n's dev deployment for the SaaS backend moved to its own project-scoped Docker service (`backend/docker-compose.yml`), separate from the shared container used to build/test the standalone V1 workflows.*

@@ -10,15 +10,16 @@
 
 | Item | Value |
 |------|-------|
-| **Current Phase** | V1 n8n workflows ✅ all tested (`facebook-poster`/`instagram-poster`/`threads-poster`/`youtube-poster`); Pinterest pending Developer App review. V2 SaaS (`websitePlan.md`) in Phase 1 — stack finalized Sep 10, BullMQ/ioredis-under-Bun spike test passed Sep 11, real backend scaffold not yet started |
+| **Current Phase** | V1 n8n workflows ✅ all tested (`facebook-poster`/`instagram-poster`/`threads-poster`/`youtube-poster`); Pinterest pending Developer App review. V2 SaaS (`websitePlan.md`) Phase 1 backend scaffold is live — Bun/Hono + Prisma + Facebook OAuth connect flow + first real end-to-end dispatch loop (Composer → backend → `facebook-poster` n8n workflow → Graph API → callback → `PUBLISHED`) confirmed working Sep 16. Other platforms (Instagram/Threads/YouTube/Pinterest) not yet wired to the backend — only their standalone n8n workflows are tested. |
 | **Active Platforms** | Facebook, Instagram, Reddit, YouTube, Pinterest |
 | **Excluded (V1)** | Quora (no API), X/Twitter (deferred to V2) |
 | **Credential Scope** | Single user (your own accounts) |
-| **n8n Setup** | Self-hosted Docker (container: `n8n`, project: InternApplier) |
+| **n8n Setup (V1 workflows)** | Self-hosted Docker (container: `n8n`, project: InternApplier) — used for building/testing the standalone platform workflows in `workflows/` |
+| **n8n Setup (V2 SaaS backend)** | Separate, project-scoped Docker container (`smposting-n8n`, part of `backend/docker-compose.yml`, own Postgres/Redis) — migrated off the shared InternApplier container Sep 16 so the SaaS backend doesn't depend on an unrelated project's n8n instance. Sets its own `CALLBACK_SECRET` and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` (see Session 18). |
 | **n8n URL (local)** | http://localhost:5678 |
 | **n8n Public URL (temp)** | https://breach-payer-sharpie.ngrok-free.dev |
 | **OAuth Callback URL** | https://breach-payer-sharpie.ngrok-free.dev/rest/oauth2-credential/callback |
-| **Tunnel** | ngrok (free static domain) ✅ Working |
+| **Tunnel** | ngrok (free static domain) ✅ Working — free plan only grants one static domain, so the SaaS backend uses it for `PUBLIC_BACKEND_URL`/OAuth callbacks while `N8N_BASE_URL` points at `http://localhost:5678` directly (same machine, no tunnel needed — see Session 18) |
 | **Tunnel log** | `ngrok status` / dashboard |
 | **Content Source** | Google Sheets (content calendar) |
 | **Media Hosting** | Cloudinary (free tier) |
@@ -482,13 +483,67 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 
 ---
 
+### Session 18 — 2026-09-16
+
+**What we did:**
+- **Facebook OAuth "Connect Account" flow wired up in the real backend** (`backend/src/routes/auth/facebook.ts`, `db/users.ts`, `lib/crypto.ts`), closing the gap between `websitePlan.md` §2.1 and actual code — token exchange confirmed completing successfully and `ConnectedAccounts` rows persisting with AES-256-GCM-encrypted tokens per the §7 scheme.
+- **Global error handler added** (`backend/src/middleware/error-handler.ts`): a single `onError` hook on the Hono app — `HTTPException`s serialize to `{ error: message }` with their status code, anything else logs server-side and returns a generic `500`, so routes just `throw new HTTPException(...)` instead of each hand-rolling error responses.
+- **Dashboard UX fixes** (`frontend/src/routes/dashboard.tsx`):
+  - Fixed a duplicate-toast bug where the "Facebook account connected" success toast fired twice on the post-OAuth redirect — the `useEffect` consuming the `?connected=facebook` query param was re-running on every `searchParams` change; fixed with a `useRef` guard + empty dependency array so it runs exactly once per mount.
+  - Added `sonner` success/error toasts on the **Disconnect** button (previously only the connect flow had toasts).
+  - Added a guard disabling the "Connect Facebook" button (and relabeling it "Facebook Connected") once an account of that platform already exists, preventing duplicate-connection attempts.
+- **Facebook → n8n dispatch loop built end-to-end** (per the `tidy-yawning-karp.md` plan — Facebook-only, one-`ConnectedAccount`-to-one-`Post`, immediate dispatch on create):
+  - `prisma/schema.prisma`: added `Post.connectedAccountId` FK to `ConnectedAccount` (migration `20260915201030_add_post_connected_account`).
+  - `lib/env.ts`: added `N8N_BASE_URL` and `N8N_CALLBACK_SECRET` (also added to `.env`/`.env.example`).
+  - `service/n8n.ts` (new): `buildFacebookPayload()` decrypts the account's token and shapes the exact payload `facebook-poster.json`'s "Parse Request" node expects (`token: { page_id, access_token }`, `callback_url` pointed at `PUBLIC_BACKEND_URL`); `dispatchToN8n()` does a plain `fetch` POST to `{N8N_BASE_URL}/webhook/facebook-poster` — no queue for this single-platform pass, since fan-out/rate-limiting (§1/§5) only earns its keep once multiple platforms dispatch in parallel.
+  - `routes/posts.ts` (new): `POST /api/posts` creates the `Post` as `PROCESSING` and dispatches immediately (no draft step); if the dispatch `fetch` itself throws (n8n unreachable), the post is immediately flipped to `FAILED` with a `PostLog` row instead of hanging in `PROCESSING` forever with no callback ever coming. `GET /api/posts` lists posts with their `PostLog`s for the History page.
+  - `routes/webhooks.ts` (new): `POST /api/webhooks/n8n-callback` checks an `x-callback-secret` header against `N8N_CALLBACK_SECRET` (`401` on mismatch/missing), then writes a `PostLog` row and sets `Post.status` to `PUBLISHED`/`FAILED` directly (no multi-platform aggregation yet — that's still §6's deferred concern).
+  - `workflows/facebook-poster.json`: added an `x-callback-secret: {{ $env.CALLBACK_SECRET }}` header to both the "Send Callback" and "Send Error Callback" `HTTP Request` nodes, referencing an n8n-side env var rather than hardcoding the secret in the exported workflow JSON.
+- **Debugged two real deployment issues while wiring the above, both resolved:**
+  1. **`ngrok` showing the same URL for both tunnels** — root cause: the free plan only grants one static domain. Resolved by keeping `PUBLIC_BACKEND_URL` on the ngrok domain (needed for Meta's OAuth callback, which rejects localhost) while pointing `N8N_BASE_URL` straight at `http://localhost:5678` — no tunnel needed since the backend and n8n run on the same machine.
+  2. **n8n's callback nodes threw "access to env vars denied"** when reading `$env.CALLBACK_SECRET` — root cause: n8n's `N8N_BLOCK_ENV_ACCESS_IN_NODE` security hardening defaults to blocking `{{ $env.* }}` in node expressions. Fixed by explicitly setting `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` on the n8n container (see next item) and re-testing — resolved.
+  - In the course of this, **migrated the SaaS backend's n8n off the shared InternApplier container onto its own project-scoped container**: added an `n8n` service to `backend/docker-compose.yml` (alongside the already-present Postgres/Redis), with its own `CALLBACK_SECRET` (matching `N8N_CALLBACK_SECRET`) and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` — keeps the SaaS backend's infra self-contained rather than depending on an unrelated project's n8n instance.
+- **Confirmed the full loop works end-to-end**: submitted a real post via the new Composer UI → `Post` created `PROCESSING` → `facebook-poster` workflow ran → Graph API accepted it → callback returned `204` → `Post.status` flipped to `PUBLISHED` with a matching `PostLog` row.
+- **Frontend Composer and History pages built out for real** (both were placeholders before):
+  - `routes/composer.tsx`: queries `/api/integrations`, filters to `FACEBOOK` accounts, lets the user pick a Page, enter a caption, choose media type (`TEXT`/`IMAGE`/`VIDEO`), and (for non-text) a media URL (Cloudinary — no upload widget yet); submits via `POST /api/posts` with `sonner` success/error toasts.
+  - `routes/history.tsx`: lists posts from `GET /api/posts` (polled every 5s), with a status badge and the failed log's error message if present.
+  - Added the shadcn/ui components these needed: `badge`, `input`, `label`, `select`, `sonner`, `textarea`. Mounted `<Toaster />` in `main.tsx`.
+- Also had a design-time-only n8n UI question resolved (not a code change): the expression editor's `[ERROR: not accessible via UI, please run node]` message under `{{ $env.CALLBACK_SECRET }}` is expected — n8n's browser-side expression preview can't resolve `$env` (only the execution engine can, at runtime); the successful `204`/`PUBLISHED` result above already proves it resolves correctly when the workflow actually runs.
+
+**Decisions made:**
+- Facebook-only, single-`ConnectedAccount`-to-one-`Post` dispatch for this pass — no multi-platform fan-out, no BullMQ queueing yet; both are deferred until a second platform is wired up and parallel dispatch is actually needed (per the `tidy-yawning-karp.md` plan).
+- The backend's own n8n instance is now a project-scoped Docker service in `backend/docker-compose.yml`, separate from the shared InternApplier container used for the original V1 workflow-building/testing — avoids coupling the SaaS backend's infra to an unrelated project.
+- `N8N_BASE_URL` points at `localhost:5678` directly rather than through ngrok, since n8n and the backend run on the same machine and ngrok's free plan only grants one static domain (already used for `PUBLIC_BACKEND_URL`/OAuth).
+- `n8n-callback` route auth is a simple shared-secret header (`x-callback-secret`) check, not HMAC-signed payloads — matches the "shared secret" convention already used for `TOKEN_ENCRYPTION_KEY_V1`/`N8N_CALLBACK_SECRET` elsewhere in the stack; revisit only if a real security need arises.
+- The actually-built webhook payload/callback schema is deliberately simpler than `websitePlan.md` §5/§6's aspirational one (no `error_type`/`usage`/`youtube_metadata` fields yet — just what `facebook-poster.json` actually sends/expects). `websitePlan.md` updated to flag this gap explicitly rather than silently diverge from what's documented.
+
+**Files modified this session:**
+- `backend/prisma/schema.prisma`, new migration `20260915201030_add_post_connected_account` — `Post.connectedAccountId` FK
+- `backend/src/lib/env.ts`, `backend/.env`, `backend/.env.example` — `N8N_BASE_URL`, `N8N_CALLBACK_SECRET`
+- `backend/src/service/n8n.ts` (new) — `buildFacebookPayload`, `dispatchToN8n`
+- `backend/src/routes/posts.ts` (new) — `POST`/`GET /api/posts`
+- `backend/src/routes/webhooks.ts` (new) — `POST /api/webhooks/n8n-callback`
+- `backend/src/middleware/error-handler.ts` (new) — global `onError` handler
+- `backend/src/index.ts` — registered `postsRoute`/`webhooksRoute`, wired `errorHandler`
+- `backend/docker-compose.yml` — added project-scoped `n8n` service (`CALLBACK_SECRET`, `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`)
+- `workflows/facebook-poster.json` — `x-callback-secret` header added to both callback `HTTP Request` nodes
+- `frontend/src/routes/composer.tsx`, `frontend/src/routes/history.tsx` — real implementations (previously placeholders)
+- `frontend/src/routes/dashboard.tsx` — duplicate-toast fix, disconnect toasts, connect-button guard
+- `frontend/src/main.tsx` — mounted `<Toaster />`
+- `frontend/src/components/ui/{badge,input,label,select,sonner,textarea}.tsx` (new shadcn components)
+- `frontend/src/lib/api-schema.d.ts` — regenerated for `/api/posts`, `/api/webhooks/n8n-callback`
+- `websitePlan.md` — §5/§6 actual-vs-planned schema gap flagged; Phase 1/3 roadmap items checked off; footer changelog
+- `history.md` — this entry, Quick State Snapshot, Platform Credential Reference, Key Technical Decisions updated
+
+---
+
 ## Platform Credential Reference
 
 > Fill this in as you complete setup.md steps. Keep actual secrets in a password manager — only record IDs here.
 
 | Platform | App/Project Name | App ID / Client ID | Notes |
 |----------|-----------------|-------------------|-------|
-| Facebook | SMPosting App | *Configured* | `facebook-poster.json` fully tested — `TEXT`, `PHOTO`, `VIDEO`, and `MULTI_PHOTO` (carousel) all confirmed working end-to-end (Sep 10) once the code-368 block cleared. **Access token pasted in chat Sep 8 — treat as compromised, rotate before reuse.** |
+| Facebook | SMPosting App | *Configured* | `facebook-poster.json` fully tested — `TEXT`, `PHOTO`, `VIDEO`, and `MULTI_PHOTO` (carousel) all confirmed working end-to-end (Sep 10) once the code-368 block cleared. **Access token pasted in chat Sep 8 — treat as compromised, rotate before reuse.** V2 SaaS backend's real dispatch loop (OAuth connect → encrypted token storage → Composer submit → n8n → Graph API → callback → `PUBLISHED`) confirmed working end-to-end Sep 16 — first platform wired to the actual backend, not just the standalone n8n workflow. |
 | Instagram | SMPosting App | *Configured* | Instagram Business Account ID retrieved; `instagram-poster.json` tested successfully for photo/story/reel (Sep 7) |
 | Threads | SMPosting App | *Configured* | Long-lived token generated via curl; `threads-poster.json` tested successfully for TEXT (Sep 7) |
 | Reddit | — | — | *Deferred* (Pending API Access Request) |
@@ -537,6 +592,12 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | Token encryption key storage (V2) | Single master key via env var (`TOKEN_ENCRYPTION_KEY_V1`), stored separately from Postgres — no Vault/KMS until scale/compliance justifies it |
 | `key_version` column & rotation (V2) | Added to `ConnectedAccounts`; rotation is zero-downtime — add new key to the app's lookup, flip new writes to the new version, background job re-encrypts old rows onto it, delete the old key once unused |
 | Encrypt/decrypt utility scope (V2) | One backend module (`encrypt(plaintext, keyVersion)` / `decrypt(ciphertext, keyVersion)`) called only from OAuth callback routes (encrypt, on connect/refresh) and the dispatch layer (decrypt, right before injecting into the n8n payload) — never touches the frontend or n8n |
+| Global error handling (V2) | Single Hono `onError` hook (`middleware/error-handler.ts`): `HTTPException` → `{ error: message }` + its status; anything else → logged server-side, generic `500` to the client. Routes just `throw new HTTPException(...)`, no per-route error boilerplate. |
+| Post dispatch scope (V2, current) | Facebook-only, one `ConnectedAccount` ↔ one `Post` (no multi-platform join table yet); `POST /api/posts` creates the post as `PROCESSING` and dispatches immediately — no draft step, no BullMQ queue yet (single synchronous `fetch` to n8n is enough until a second platform needs parallel fan-out) |
+| n8n dispatch failure handling (V2) | If the `fetch` to n8n itself throws (tunnel/container down) before n8n can even attempt the post, the backend immediately flips `Post.status = FAILED` and writes a `PostLog` row — prevents a post from being stuck in `PROCESSING` forever with no callback ever coming |
+| n8n callback auth (V2) | Shared-secret header (`x-callback-secret`, checked against `N8N_CALLBACK_SECRET`) on `POST /api/webhooks/n8n-callback` — not HMAC-signed payloads; matches the shared-secret convention already used elsewhere in the stack |
+| n8n container topology (V2) | SaaS backend's n8n runs as its own Docker service (`smposting-n8n`) in `backend/docker-compose.yml`, separate from the shared InternApplier container used to build/test the standalone V1 workflows — avoids coupling backend infra to an unrelated project. Needs its own `CALLBACK_SECRET` + `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` set to match the backend's `N8N_CALLBACK_SECRET` and allow callback nodes to read it via `{{ $env.CALLBACK_SECRET }}` |
+| `N8N_BASE_URL` vs. tunnel (V2) | Points directly at `http://localhost:5678`, not through ngrok — backend and n8n run on the same machine, and ngrok's free plan only grants one static domain (already used for `PUBLIC_BACKEND_URL`/Meta OAuth, which does require a public HTTPS URL since Meta rejects localhost redirects) |
 
 ---
 

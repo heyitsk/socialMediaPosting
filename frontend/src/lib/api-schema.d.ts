@@ -119,6 +119,111 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/posts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List posts with their dispatch logs */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Posts for the current user */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Post"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        /** Create a post and immediately dispatch it to n8n */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["CreatePostRequest"];
+                };
+            };
+            responses: {
+                /** @description Post created and dispatch attempted */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Post"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/webhooks/n8n-callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Receives per-platform post results from n8n */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["N8nCallback"];
+                };
+            };
+            responses: {
+                /** @description Callback processed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid or missing callback secret */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -136,6 +241,44 @@ export interface components {
             accountName: string;
             /** Format: date-time */
             lastRefreshedAt: string | null;
+        };
+        Post: {
+            id: string;
+            caption: string;
+            /** @enum {string} */
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL";
+            mediaUrls: string[];
+            /** @enum {string} */
+            status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED";
+            /** Format: date-time */
+            createdAt: string;
+            logs: components["schemas"]["PostLog"][];
+        };
+        PostLog: {
+            /** @enum {string} */
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST";
+            /** @enum {string} */
+            status: "SUCCESS" | "FAILED";
+            platformPostId: string | null;
+            errorMessage: string | null;
+            /** Format: date-time */
+            executedAt: string;
+        };
+        CreatePostRequest: {
+            connectedAccountId: string;
+            caption: string;
+            /** @enum {string} */
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL";
+            /** @default [] */
+            mediaUrls: string[];
+        };
+        N8nCallback: {
+            post_id: string;
+            platform: string;
+            /** @enum {string} */
+            status: "SUCCESS" | "FAILED";
+            platform_post_id?: string | null;
+            error?: string | null;
         };
     };
     responses: never;

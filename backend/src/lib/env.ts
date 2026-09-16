@@ -15,6 +15,9 @@ const envSchema = z.object({
 
   DEFAULT_USER_EMAIL: z.string().email(),
   DEFAULT_USER_NAME: z.string().min(1),
+
+  N8N_BASE_URL: z.url(),
+  N8N_CALLBACK_SECRET: z.string().min(1),
 });
 
 const parsed = envSchema.safeParse(process.env);

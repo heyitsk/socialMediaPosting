@@ -7,6 +7,8 @@ import { errorHandler } from "./middleware/error-handler";
 import { facebookAuthRoute } from "./routes/auth/facebook";
 import { healthRoute } from "./routes/health";
 import { integrationsRoute } from "./routes/integrations";
+import { postsRoute } from "./routes/posts";
+import { webhooksRoute } from "./routes/webhooks";
 
 const app = new OpenAPIHono();
 
@@ -17,6 +19,8 @@ app.onError(errorHandler);
 app.route("/health", healthRoute);
 app.route("/api/auth/facebook", facebookAuthRoute);
 app.route("/api/integrations", integrationsRoute);
+app.route("/api/posts", postsRoute);
+app.route("/api/webhooks", webhooksRoute);
 
 app.doc("/openapi.json", {
   openapi: "3.1.0",

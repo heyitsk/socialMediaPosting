@@ -76,20 +76,24 @@ model ConnectedAccount {
   refreshStrategy         RefreshStrategy @map("refresh_strategy")
   lastRefreshedAt         DateTime?      @map("last_refreshed_at")
 
+  posts Post[]
+
   @@unique([userId, platform, platformAccountId])
   @@map("connected_accounts")
 }
 
 model Post {
-  id            String     @id @default(uuid())
-  userId        String     @map("user_id")
-  user          User       @relation(fields: [userId], references: [id])
-  caption       String
-  mediaType     MediaType  @map("media_type")
-  mediaUrls     Json       @map("media_urls")
-  status        PostStatus @default(DRAFT)
-  scheduledFor  DateTime?  @map("scheduled_for")
-  createdAt     DateTime   @default(now()) @map("created_at")
+  id                 String           @id @default(uuid())
+  userId             String           @map("user_id")
+  user               User             @relation(fields: [userId], references: [id])
+  connectedAccountId String           @map("connected_account_id")
+  connectedAccount   ConnectedAccount @relation(fields: [connectedAccountId], references: [id])
+  caption            String
+  mediaType          MediaType        @map("media_type")
+  mediaUrls          Json             @map("media_urls")
+  status             PostStatus       @default(DRAFT)
+  scheduledFor       DateTime?        @map("scheduled_for")
+  createdAt          DateTime         @default(now()) @map("created_at")
 
   logs PostLog[]
 
