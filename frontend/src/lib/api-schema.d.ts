@@ -239,6 +239,8 @@ export interface components {
             /** @enum {string} */
             platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST";
             accountName: string;
+            /** @enum {string} */
+            connectionMethod: "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN";
             /** Format: date-time */
             lastRefreshedAt: string | null;
         };
@@ -246,7 +248,7 @@ export interface components {
             id: string;
             caption: string;
             /** @enum {string} */
-            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL";
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
             mediaUrls: string[];
             /** @enum {string} */
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED";
@@ -268,7 +270,7 @@ export interface components {
             connectedAccountId: string;
             caption: string;
             /** @enum {string} */
-            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL";
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
             /** @default [] */
             mediaUrls: string[];
         };

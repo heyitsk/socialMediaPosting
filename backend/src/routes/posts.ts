@@ -1,10 +1,24 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
+import type { Platform } from "@prisma/client";
 import { prisma } from "../db/client";
 import { getOrCreateDefaultUser } from "../db/users";
-import { buildFacebookPayload, dispatchToN8n } from "../service/n8n";
+import {
+  buildFacebookPayload,
+  buildInstagramPayload,
+  dispatchInstagramToN8n,
+  dispatchToN8n,
+} from "../service/n8n";
 
-const mediaTypeSchema = z.enum(["TEXT", "IMAGE", "VIDEO", "CAROUSEL"]);
+const mediaTypeSchema = z.enum(["TEXT", "IMAGE", "VIDEO", "CAROUSEL", "REELS", "STORIES"]);
+
+// n8n's per-platform workflows only implement these branches — reject
+// anything else before dispatching instead of relying on the workflow's
+// fallback "unsupported media_type" error branch.
+const SUPPORTED_MEDIA_TYPES: Partial<Record<Platform, readonly string[]>> = {
+  FACEBOOK: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
+  INSTAGRAM: ["IMAGE", "CAROUSEL", "REELS", "STORIES"],
+};
 
 const postLogSchema = z
   .object({
@@ -112,14 +126,21 @@ export const postsRoute = new OpenAPIHono()
     const user = await getOrCreateDefaultUser();
 
     const connectedAccount = await prisma.connectedAccount.findFirst({
-      where: { id: body.connectedAccountId, userId: user.id },
+      where: { id: body.connectedAccountId, userId: user.id, disconnectedAt: null },
     });
 
     if (!connectedAccount) {
       throw new HTTPException(404, { message: "Connected account not found" });
     }
-    if (connectedAccount.platform !== "FACEBOOK") {
-      throw new HTTPException(400, { message: "Only Facebook accounts can be dispatched right now" });
+
+    const supportedMediaTypes = SUPPORTED_MEDIA_TYPES[connectedAccount.platform];
+    if (!supportedMediaTypes) {
+      throw new HTTPException(400, { message: `${connectedAccount.platform} accounts can't be dispatched yet` });
+    }
+    if (!supportedMediaTypes.includes(body.mediaType)) {
+      throw new HTTPException(400, {
+        message: `${connectedAccount.platform} doesn't support media type ${body.mediaType}`,
+      });
     }
 
     const post = await prisma.post.create({
@@ -134,15 +155,18 @@ export const postsRoute = new OpenAPIHono()
     });
 
     try {
-      const payload = buildFacebookPayload(post, connectedAccount);
-      await dispatchToN8n(payload);
+      if (connectedAccount.platform === "FACEBOOK") {
+        await dispatchToN8n(buildFacebookPayload(post, connectedAccount));
+      } else {
+        await dispatchInstagramToN8n(buildInstagramPayload(post, connectedAccount));
+      }
     } catch (err) {
       console.error("n8n dispatch failed:", err);
       await prisma.post.update({ where: { id: post.id }, data: { status: "FAILED" } });
       await prisma.postLog.create({
         data: {
           postId: post.id,
-          platform: "FACEBOOK",
+          platform: connectedAccount.platform,
           status: "FAILED",
           errorMessage: err instanceof Error ? err.message : "n8n dispatch failed",
         },

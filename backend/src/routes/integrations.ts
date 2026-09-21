@@ -8,6 +8,7 @@ const connectedAccountSchema = z
     id: z.string(),
     platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST"]),
     accountName: z.string(),
+    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN"]),
     lastRefreshedAt: z.iso.datetime().nullable(),
   })
   .openapi("ConnectedAccountSummary");
@@ -43,8 +44,14 @@ export const integrationsRoute = new OpenAPIHono()
   .openapi(listIntegrations, async (c) => {
     const user = await getOrCreateDefaultUser();
     const accounts = await prisma.connectedAccount.findMany({
-      where: { userId: user.id },
-      select: { id: true, platform: true, accountName: true, lastRefreshedAt: true },
+      where: { userId: user.id, disconnectedAt: null },
+      select: {
+        id: true,
+        platform: true,
+        accountName: true,
+        connectionMethod: true,
+        lastRefreshedAt: true,
+      },
     });
 
     return c.json(
@@ -59,8 +66,12 @@ export const integrationsRoute = new OpenAPIHono()
     const { id } = c.req.valid("param");
     const user = await getOrCreateDefaultUser();
 
-    const result = await prisma.connectedAccount.deleteMany({
-      where: { id, userId: user.id },
+    // Soft-delete: posts.connected_account_id is RESTRICT, so a hard delete
+    // fails once the account has post history. Reconnecting via OAuth
+    // upserts the same row and clears disconnectedAt.
+    const result = await prisma.connectedAccount.updateMany({
+      where: { id, userId: user.id, disconnectedAt: null },
+      data: { disconnectedAt: new Date() },
     });
 
     if (result.count === 0) {

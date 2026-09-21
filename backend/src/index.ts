@@ -5,6 +5,7 @@ import { env } from "./lib/env";
 import { corsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/error-handler";
 import { facebookAuthRoute } from "./routes/auth/facebook";
+import { instagramAuthRoute } from "./routes/auth/instagram";
 import { healthRoute } from "./routes/health";
 import { integrationsRoute } from "./routes/integrations";
 import { postsRoute } from "./routes/posts";
@@ -19,6 +20,7 @@ app.onError(errorHandler);
 
 app.route("/health", healthRoute);
 app.route("/api/auth/facebook", facebookAuthRoute);
+app.route("/api/auth/instagram", instagramAuthRoute);
 app.route("/api/integrations", integrationsRoute);
 app.route("/api/posts", postsRoute);
 app.route("/api/webhooks", webhooksRoute);

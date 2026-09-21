@@ -28,6 +28,16 @@ enum MediaType {
   IMAGE
   VIDEO
   CAROUSEL
+  REELS
+  STORIES
+}
+
+// Distinguishes how an Instagram ConnectedAccount was linked — the two paths
+// issue tokens scoped to different Graph API hosts and different platform
+// account ID namespaces for the same physical account (see instagram.ts).
+enum ConnectionMethod {
+  FACEBOOK_PAGE
+  INSTAGRAM_LOGIN
 }
 
 enum PostStatus {
@@ -63,6 +73,7 @@ model ConnectedAccount {
   platform              Platform
   accountName           String          @map("account_name")
   platformAccountId     String          @map("platform_account_id")
+  connectionMethod      ConnectionMethod @default(FACEBOOK_PAGE) @map("connection_method")
 
   // AES-256-GCM encrypted (nonce || ciphertext || authTag, base64) — see
   // websitePlan.md §7 "Token Encryption Scheme". Never touches the frontend or n8n.
@@ -76,9 +87,20 @@ model ConnectedAccount {
   refreshStrategy         RefreshStrategy @map("refresh_strategy")
   lastRefreshedAt         DateTime?      @map("last_refreshed_at")
 
+  // Soft-delete marker. "Disconnect" sets this instead of deleting the row —
+  // posts.connected_account_id is RESTRICT, so a hard delete fails once the
+  // account has post history. Reconnecting via OAuth upserts on the same
+  // composite key and clears this field.
+  disconnectedAt DateTime? @map("disconnected_at")
+
   posts Post[]
 
-  @@unique([userId, platform, platformAccountId])
+  // Facebook-Page-linked and standalone-Instagram-Login flows can both
+  // resolve to the SAME platformAccountId for the same physical Instagram
+  // account (it's a stable per-account ID in Meta's API, not per-auth-method)
+  // — connectionMethod must be part of the key or one flow's upsert clobbers
+  // the other's token.
+  @@unique([userId, platform, platformAccountId, connectionMethod])
   @@map("connected_accounts")
 }
 

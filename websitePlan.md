@@ -129,13 +129,28 @@ User Click ──> OAuth Consent ──> Backend Callback (with Code) ──> Ex
 - **Refresh shape**: `NONE` — the returned Page access token is effectively non-expiring as long as the user token/session stays valid; no background refresh job needed (§7).
 - **Gotcha**: `pages_manage_posts` etc. are restricted permissions — requires Meta **App Review** before working for any account beyond added testers/admins.
 
-### 2.2 Instagram (Instagram Graph API — same Meta app as Facebook)
+### 2.2 Instagram — **two independent connection methods** (confirmed built Sep 17, 2026)
 
-- Rides entirely on the Facebook OAuth dialog above — **no separate consent screen**. Requires the user's Instagram account to be a Business/Creator account linked to a Facebook Page.
+Unlike every other platform in this section, Instagram can be connected **two different ways**, and both are implemented (`lib/facebook.ts`+`routes/auth/facebook.ts` for the first, `lib/instagram.ts`+`routes/auth/instagram.ts` for the second). They can both end up pointing at the *same* physical Instagram Business/Creator account, but each issues a token valid on a **different Graph API host** — this distinction is load-bearing, not cosmetic (see the `ConnectedAccounts.connection_method` note in §7 and the `graph_host` field in §5's Instagram payload).
+
+**Method A — Facebook Login (`connectionMethod: FACEBOOK_PAGE`)**
+- Rides entirely on the Facebook OAuth dialog in §2.1 — **no separate consent screen**. Requires the user's Instagram account to be a Business/Creator account linked to a Facebook Page.
 - **Additional scopes**: `instagram_basic`, `instagram_content_publish`, `instagram_manage_comments` (optional, for later comment moderation)
-- **Harvesting**: same `/me/accounts` call as §2.1, using its `instagram_business_account{id,name}` field — no separate token, uses the Page access token.
-- **Refresh shape**: `NONE`, same as Facebook.
+- **Harvesting**: same `/me/accounts` call as §2.1, using its `instagram_business_account{id,name}` field — no separate token; the Instagram row is stored with the **same Page access token** as the Facebook Page it's linked to.
+- **Token host**: valid only against `graph.facebook.com`.
+- **Refresh shape**: `NONE`, same as Facebook — Page token is effectively non-expiring.
 - **Gotcha**: `instagram_content_publish` is a restricted permission requiring **App Review + Business Verification** — file this alongside the Pinterest/YouTube review dependencies already tracked in §5.
+
+**Method B — Instagram Login (`connectionMethod: INSTAGRAM_LOGIN`)**
+- A genuinely separate Meta OAuth product — no Facebook Page in the loop at all. User authorizes directly against Instagram.
+- **Authorization URL**: `https://www.instagram.com/oauth/authorize`
+- **Scopes**: `instagram_business_basic`, `instagram_business_content_publish`
+- **Code → short-lived token**: `POST https://api.instagram.com/oauth/access_token` (form-urlencoded: `client_id`, `client_secret`, `grant_type=authorization_code`, `redirect_uri`, `code`)
+- **Short-lived → long-lived (60-day) exchange**: `GET https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret&access_token={short_token}`
+- **Harvesting**: `GET https://graph.instagram.com/me?fields=user_id,username` using the long-lived token.
+- **Token host**: valid only against `graph.instagram.com` — **not** interchangeable with a Method A token, even for the same underlying account.
+- **Refresh shape**: `SLIDING_WINDOW` — unlike Threads' "renew in place" call shape, no refresh-endpoint call is wired up yet; the dispatch layer (§5) fails fast with a clear error if the token is within 24h of `token_expires_at`, rather than proactively refreshing. A background refresh job is a follow-up, not yet built.
+- **Gotcha (bug found + fixed Sep 17, 2026)**: because both methods can resolve to the same `platform_account_id`, the original `ConnectedAccounts` unique key (`user_id, platform, platform_account_id`) let connecting via one method silently overwrite the other method's token — a Method B connection would clobber a Method A row with a token that only works on a different host, producing `OAuthException 190` at dispatch time. Fixed by adding `connection_method` to the unique key (§7) so both can coexist as separate rows; the frontend surfaces a "duplicate account, connected via two methods" toast when this happens rather than hiding it.
 
 ### 2.3 Threads (Threads API — separate Meta surface from Graph API)
 
@@ -233,6 +248,8 @@ Rate limiting happens **here**, before dispatch — a token-bucket limiter per `
 4. **Pinterest's Developer App review (pre-launch blocker, same shape as case 3)** — submitting the app (Sep 2026) required a live company/app URL and privacy policy link before Pinterest would even accept the form, then places the app in manual review ("your request is still being reviewed") with no in-dashboard status/ETA — confirmation only arrives by email. New apps default to **Trial access** (limited scopes/rate limits) regardless of outcome; reaching **Standard Access** for production traffic needs a separate review after that. Same implication as the YouTube gate: this is an external dependency with unknown lead time, not something the backend can work around, and it blocks `pinterest-poster` beyond a handful of test posts until it clears.
 
 > **Note (Sep 16, 2026):** the schema below is the aspirational full design. The first real implementation (`backend/src/service/n8n.ts` dispatching to `facebook-poster.json`, confirmed working end-to-end) is deliberately simpler — no `youtube_metadata` block (Facebook-only so far) and `token` is shaped `{ page_id, access_token }` rather than the IG example below. A `callback_url` field (pointing at `${PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`) is also sent per-call rather than assumed, since it's what each workflow's callback node actually reads. This will converge back toward the full schema as more platforms get wired up.
+>
+> **Note (Sep 17, 2026):** Instagram is now the second platform actually wired to the backend (`buildInstagramPayload`/`dispatchInstagramToN8n` in `service/n8n.ts` → `instagram-poster.json`). Its real `token` shape is `{ ig_business_id, access_token, graph_host }` — `graph_host` is the one addition beyond what §2.2 alone would suggest: since an Instagram token's validity depends on *which OAuth product connected it* (`graph.facebook.com` for Facebook Login, `graph.instagram.com` for standalone Instagram Login — see §2.2), the backend resolves that once via `GRAPH_HOST[connectedAccount.connectionMethod]` and ships the result as plain data in the payload. `instagram-poster.json`'s HTTP nodes build every URL as `graph_host + '/v23.0/' + ig_user_id + '/...'` — n8n never decides the host itself, it only ever echoes back what the backend told it. `media_type` for Instagram is sent as the raw Prisma enum value (`IMAGE`/`CAROUSEL`/`REELS`/`STORIES`) — no `PHOTO`/`MULTI_PHOTO` renaming like Facebook's, since `instagram-poster.json`'s Switch node was built to match those values verbatim.
 
 ### Webhook Payload Schema (Sent from Backend to n8n) — one call per platform
 
@@ -260,7 +277,7 @@ Rate limiting happens **here**, before dispatch — a token-bucket limiter per `
 
 ### Per-Platform n8n Workflow (same shape as before, just no longer branched together)
 * **`facebook-poster`**: `HTTP Request` node (`/feed`, `/photos`, `/videos`, or the split-upload+`/feed` flow for `MULTI_PHOTO`) — not the typed `Facebook Graph API` node, since its `Credential` field can't take a per-call dynamic token; access token is passed as a query param from the webhook payload instead. Testing status (Sep 2026): `TEXT`, `PHOTO`, `VIDEO`, and `MULTI_PHOTO` (carousel) all confirmed working end-to-end after token rotation — carousel's multi-upload-then-attach flow was re-verified once the earlier rate limit cleared and posts correctly.
-* **`instagram-poster`**: 2-Step Flow — `POST /media` (create container) ➔ **Wait Node** (5-10s) ➔ `POST /media_publish`.
+* **`instagram-poster`**: 2-Step Flow — `POST {graph_host}/{ig_business_id}/media` (create container) ➔ **Wait Node** (5-10s) ➔ `POST {graph_host}/{ig_business_id}/media_publish`. Every URL is built from `graph_host` in the webhook payload (see §5 Sep 17 note above), not a hardcoded host — the same workflow serves both Facebook-Login-connected and Instagram-Login-connected accounts. Callback nodes send the `x-callback-secret` header (added Sep 17, matching `facebook-poster`'s pattern from Session 18).
 * **`threads-poster`**: 2-Step Flow — `POST /me/threads` (create container) ➔ **Wait Node** (30-60s for video transcoding) ➔ `POST /me/threads_publish`.
 * **`youtube-poster`**: `AWS S3` Download Node (fetches binary stream into `data` field) ➔ `YouTube` Upload Node.
 * **`pinterest-poster`** *(planned, blocked on Developer App review — see §5 case 4)*: `HTTP Request` node(s) against Pinterest API v5 — `GET /v5/boards` to resolve `board_id`, then `POST /v5/pins` with `media_source` + `board_id`, same per-call dynamic-token pattern as the other HTTP-Request-based workflows.
@@ -324,6 +341,7 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 
 ### Dual Notification Engine
 * **In-App Realtime Updates**: Web App receives WebSocket / Server-Sent Events (SSE) from backend to update status pills (`Published` 🟢, `Partial Failure` 🟡, `Failed` 🔴) instantly without page refresh.
+  > **Note (Sep 16, 2026):** deliberately deferred — `history.tsx` currently polls `GET /api/posts` every 5s, which is real but minor waste (no-op requests when nothing changed). Discussed replacing it with `socket.io`/SSE push now vs. later; decided to hold off until all V1 platforms are integrated and dispatching (end of Phase 3), so the live-update layer is built once against the final multi-platform `Post`/`PostLog` shape rather than being reworked per platform as each one comes online. This is unrelated to and does not replace the Facebook video-status poller (§6 below) — that poller exists because Facebook itself has no push/webhook for VOD transcoding completion (only a `live_videos` webhook for going *live*), so backend→Facebook must stay pull-based regardless; only the backend→frontend leg is the deferred-but-planned WebSocket candidate.
 * **Push Notifications / Pop-up**: For completions that resolve later than the initial callback — currently just the Video Processing Poller above — the backend fires a Web Push notification (and an in-app pop-up if the tab is open) once polling confirms `"ready"` or `"error"`, since the user may have navigated away during the multi-minute transcode wait.
 * **Email Alerts (Resend / SendGrid)**: On completion (or if errors occurred), the backend dispatches an HTML email report summarizing the published posts and highlighting any failed platforms with direct resolution links.
 
@@ -349,12 +367,14 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 * `platform` (Enum: `FACEBOOK`, `INSTAGRAM`, `THREADS`, `YOUTUBE`, `PINTEREST`)
 * `account_name` (String)
 * `platform_account_id` (String — Page ID, IG Business ID, Channel ID, Pinterest Board ID)
+* `connection_method` (Enum: `FACEBOOK_PAGE`, `INSTAGRAM_LOGIN` — added Sep 17, 2026. Only meaningfully distinguishes Instagram's two OAuth products today (§2.2); other platforms default to `FACEBOOK_PAGE` as a placeholder value since they don't (yet) have more than one connection path. **Part of the table's unique key** — `(user_id, platform, platform_account_id, connection_method)` — because Instagram's two connection methods can resolve to the same `platform_account_id` while issuing tokens valid on different Graph API hosts; without this column in the key, connecting via one method silently overwrote the other's token (real bug, fixed Sep 17 — see §2.2).
 * `encrypted_access_token` (Text — AES-256-GCM encrypted; see **Token Encryption Scheme** below for the exact byte format)
 * `encrypted_refresh_token` (Text, Nullable — AES-256-GCM encrypted; `NULL` for platforms with no separate refresh token, e.g. Facebook/Instagram)
 * `key_version` (Integer — which encryption key encrypted this row's tokens; see **Token Encryption Scheme** below for why this exists)
 * `token_expires_at` (Timestamp, Nullable — `NULL` where meaningless for that platform's refresh_strategy)
 * `refresh_strategy` (Enum: `NONE`, `SLIDING_WINDOW`, `ON_DEMAND`)
 * `last_refreshed_at` (Timestamp, Nullable — for debugging/auditing refresh jobs)
+* `disconnected_at` (Timestamp, Nullable — added Sep 21, 2026. `NULL` means actively connected. Clicking **Disconnect** sets this instead of deleting the row, because `Posts.connected_account_id` is a `RESTRICT` foreign key — a hard delete fails outright once the account has post history. Every read path that lists/resolves an account for use (`GET /api/integrations`, post-creation account lookup, the Instagram duplicate-account check) filters `disconnected_at IS NULL`. Reconnecting via OAuth `upsert`s on the same composite unique key above and clears this field, reviving the row — and its `Posts`/`PostLogs` history — rather than creating a duplicate or erroring on the unique constraint.)
 
 > **Refresh shapes by platform** (drives the `refresh_strategy` switch, not per-platform `if` branches scattered through the codebase):
 > * **`NONE`** — Facebook / Instagram. Page token has no fixed expiry in practice; no background job acts on it, user just re-connects if it ever stops working.
@@ -400,8 +420,8 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 - [x] Spike-test `ioredis`/BullMQ under Bun (see §1 "BullMQ/ioredis-under-Bun Spike Test Results" — all 7 scenarios passed, Sep 11 2026). `@prisma/adapter-pg` and Bun's native S3/Redis clients already confirmed working (Sep 10).
 - [x] Set up Web App Framework: Bun + Hono backend API, Vite + React frontend.
 - [x] Configure database schema (PostgreSQL, Docker-hosted) via Prisma (driver adapter) with AES-256-GCM token encryption (versioned keys, per §7 Token Encryption Scheme).
-- [x] Implement OAuth 2.0 handler for Meta Facebook (Sep 16) — Instagram/Threads/Google/Pinterest callback routes still pending, per §2.
-- [x] Build Integration Dashboard with "Connect / Disconnect" buttons (Facebook only so far; duplicate-connect guard + disconnect toasts added Sep 16).
+- [x] Implement OAuth 2.0 handler for Meta Facebook (Sep 16) and both Instagram connection methods, Facebook Login + standalone Instagram Login (Sep 17) — Threads/Google/Pinterest callback routes still pending, per §2.
+- [x] Build Integration Dashboard with "Connect / Disconnect" buttons (Facebook + both Instagram methods; duplicate-connect guard + disconnect toasts added Sep 16-17). "Disconnect" is a soft-delete (Sep 21) so accounts with post history can be disconnected/reconnected without hitting the `Posts` FK constraint.
 
 ### Phase 2 — Media Engine & Post Composer
 - [ ] Set up AWS S3 bucket and presigned URL upload handler.
@@ -410,7 +430,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 
 ### Phase 3 — n8n Webhook & Execution Workflow
 - [x] Build one independent n8n workflow per platform (`facebook-poster`, `instagram-poster`, `threads-poster`, `youtube-poster`) — no shared "master" workflow with internal platform branching. (`pinterest-poster` still pending Developer App review.)
-- [x] Configure platform nodes with dynamic expressions for tokens and IDs, sourced from the per-call webhook payload only — confirmed for `facebook-poster`, since it's the only one wired to the real backend so far.
+- [x] Configure platform nodes with dynamic expressions for tokens and IDs, sourced from the per-call webhook payload only — confirmed for `facebook-poster` and, as of Sep 17, `instagram-poster` (including per-call `graph_host` selection between `graph.facebook.com`/`graph.instagram.com`, per §2.2/§5).
 - [ ] Implement S3 binary download for YouTube node — `youtube-poster.json` currently uses a plain HTTP GET stand-in (Session 13/14); real S3 wiring and the streaming-relay fix (§3) not yet built, and YouTube isn't wired to the backend at all yet.
 - [ ] Stand up n8n in **queue mode**: Postgres for shared workflow storage, Redis for the job queue, `n8n-main` + `n8n-worker` roles. (Current dev setup, Sep 16, is a single non-queue-mode n8n container in `backend/docker-compose.yml` — fine for one platform/low volume, not yet the queue-mode architecture this section describes.)
 - [ ] Deploy n8n main/worker on Kubernetes; configure **KEDA** autoscaling of worker replicas on Redis queue depth.
@@ -419,7 +439,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 
 ### Phase 4 — History, Error Center & Notifications
 - [ ] Build History Dashboard & Error Center UI.
-- [ ] Implement WebSockets/SSE for live dashboard updates.
+- [ ] Implement WebSockets/SSE for live dashboard updates — deliberately deferred (see §6 note, Sep 16) until all V1 platforms are integrated; `history.tsx`'s 5s `GET /api/posts` poll is the interim placeholder.
 - [ ] Set up Email Notification service (Resend / SendGrid).
 - [ ] Implement "One-Click Retry" for failed post attempts.
 
@@ -429,4 +449,6 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 *Updated: 2026-09-10 | Facebook `MULTI_PHOTO` (carousel) confirmed tested/working (§5). Full §2 OAuth detail added for all 5 platforms. `ConnectedAccounts` schema (§7) revised for the three token refresh shapes (`NONE`/`SLIDING_WINDOW`/`ON_DEMAND`). Backend tech stack finalized (§1): Bun + Hono, Docker Postgres + Prisma (driver adapter), Vite + React, BullMQ + ioredis (bunqueue as fallback), Bun native Redis client for pub/sub, Bun native S3 client for object storage. UploadThing evaluated and rejected.*  
 *Updated: 2026-09-11 | Token encryption scheme finalized (§7): AES-256-GCM via Bun's `node:crypto`, nonce packed into the ciphertext blob (no separate column), single env-var master key for now, and a `key_version` column added to `ConnectedAccounts` enabling zero-downtime key rotation (old rows decrypt on their original key while a background job re-encrypts them onto the new one).*  
 *Updated: 2026-09-11 | BullMQ/ioredis-under-Bun spike test passed (§1) — all 7 reliability scenarios (round-trip, crash recovery, repeatable jobs, retry/backoff, concurrency, graceful shutdown, QueueEvents) confirmed working. Stack risk resolved: BullMQ + ioredis is confirmed primary, `bunqueue` fallback not activated. Phase 1 roadmap item checked off.*  
-*Updated: 2026-09-16 | First real end-to-end dispatch loop confirmed working: Facebook OAuth connect (§2.1) → encrypted token storage (§7) → Composer submit → backend `POST /api/posts` → `facebook-poster` n8n workflow → Graph API → callback → `Post.status = PUBLISHED`. §5/§6 flagged with notes on where the actual (simpler, Facebook-only) payload/callback schema currently diverges from this doc's full aspirational design. Phase 1/3 roadmap items checked off for what's genuinely built (Bun+Hono, Prisma schema, Facebook OAuth handler, Integration Dashboard, per-platform n8n workflows, backend callback handler); fan-out dispatcher, rate limiter, queue mode, K8s/KEDA, and non-Facebook OAuth handlers remain open. n8n's dev deployment for the SaaS backend moved to its own project-scoped Docker service (`backend/docker-compose.yml`), separate from the shared container used to build/test the standalone V1 workflows.*
+*Updated: 2026-09-16 | First real end-to-end dispatch loop confirmed working: Facebook OAuth connect (§2.1) → encrypted token storage (§7) → Composer submit → backend `POST /api/posts` → `facebook-poster` n8n workflow → Graph API → callback → `Post.status = PUBLISHED`. §5/§6 flagged with notes on where the actual (simpler, Facebook-only) payload/callback schema currently diverges from this doc's full aspirational design. Phase 1/3 roadmap items checked off for what's genuinely built (Bun+Hono, Prisma schema, Facebook OAuth handler, Integration Dashboard, per-platform n8n workflows, backend callback handler); fan-out dispatcher, rate limiter, queue mode, K8s/KEDA, and non-Facebook OAuth handlers remain open. n8n's dev deployment for the SaaS backend moved to its own project-scoped Docker service (`backend/docker-compose.yml`), separate from the shared container used to build/test the standalone V1 workflows.*  
+*Updated: 2026-09-17 | Instagram becomes the second platform wired to the real backend, with a wrinkle the earlier draft didn't anticipate: it has **two independent OAuth connection methods** (§2.2 rewritten) — Facebook Login (rides the existing §2.1 dialog) and standalone Instagram Login (new `lib/instagram.ts`/`routes/auth/instagram.ts`) — which can both connect the same physical account but issue tokens valid on different Graph API hosts. Fixed a real bug where the two methods clobbered each other's tokens by adding `connection_method` to `ConnectedAccounts`' unique key (§7). `service/n8n.ts` gained `buildInstagramPayload`/`dispatchInstagramToN8n` and a `GRAPH_HOST` lookup so the correct host is resolved backend-side and passed to n8n as data (§5) rather than n8n guessing; also a 24h token-expiry fail-fast guard since Instagram Login tokens expire and there's no refresh worker yet. `instagram-poster.json` callback nodes gained the `x-callback-secret` header, matching `facebook-poster`. Phase 1/3 roadmap items updated.*  
+*Updated: 2026-09-21 | Fixed a Postgres FK-violation (`23001`) on disconnecting an account with post history — `Posts.connected_account_id` is `RESTRICT`, so the hard `DELETE` used by `DELETE /api/integrations/:id` failed outright. Replaced with a soft-delete: `ConnectedAccounts.disconnected_at` (§7, new column) is stamped instead of deleting the row; every read path that lists/resolves an account now filters it out, and reconnecting via OAuth (same composite key from the Sep 17 fix) clears it automatically, reviving the row and its post history.*

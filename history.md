@@ -10,7 +10,7 @@
 
 | Item | Value |
 |------|-------|
-| **Current Phase** | V1 n8n workflows ✅ all tested (`facebook-poster`/`instagram-poster`/`threads-poster`/`youtube-poster`); Pinterest pending Developer App review. V2 SaaS (`websitePlan.md`) Phase 1 backend scaffold is live — Bun/Hono + Prisma + Facebook OAuth connect flow + first real end-to-end dispatch loop (Composer → backend → `facebook-poster` n8n workflow → Graph API → callback → `PUBLISHED`) confirmed working Sep 16. Other platforms (Instagram/Threads/YouTube/Pinterest) not yet wired to the backend — only their standalone n8n workflows are tested. |
+| **Current Phase** | V1 n8n workflows ✅ all tested (`facebook-poster`/`instagram-poster`/`threads-poster`/`youtube-poster`); Pinterest pending Developer App review. V2 SaaS (`websitePlan.md`) Phase 1 backend scaffold is live — Bun/Hono + Prisma + Facebook OAuth connect flow + first real end-to-end dispatch loop (Composer → backend → `facebook-poster` n8n workflow → Graph API → callback → `PUBLISHED`) confirmed working Sep 16. **Instagram is now the second platform wired to the real backend** (Sep 17-21): both connection methods (Facebook Login and standalone Instagram Login) OAuth-connect end-to-end, dispatch through `instagram-poster` n8n workflow using the correct per-connection-method Graph host (`graph.facebook.com` vs `graph.instagram.com`), and "Disconnect" is now a soft-delete so accounts with post history can be disconnected/reconnected for testing. Threads/YouTube/Pinterest still not wired to the backend — only their standalone n8n workflows are tested. |
 | **Active Platforms** | Facebook, Instagram, Reddit, YouTube, Pinterest |
 | **Excluded (V1)** | Quora (no API), X/Twitter (deferred to V2) |
 | **Credential Scope** | Single user (your own accounts) |
@@ -35,7 +35,7 @@
 | `history.md` | This file — running session log | 2026-08-11 |
 | `docker-compose.yml` | n8n Docker configuration with all required env variables | 2026-08-11 |
 | `workflows/` | n8n workflow JSON exports (importable into n8n) | 2026-09-07 |
-| `websitePlan.md` | V2 SaaS product & technical spec (architecture, OAuth, DB schema, roadmap) | 2026-09-11 |
+| `websitePlan.md` | V2 SaaS product & technical spec (architecture, OAuth, DB schema, roadmap) | 2026-09-21 |
 | `trialBun/` *(external, `/home/kushagra/Desktop/trialBun`)* | BullMQ/ioredis-under-Bun spike test scaffold — not part of this repo | 2026-09-11 |
 
 ---
@@ -572,6 +572,64 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 
 ---
 
+### Session 20 — 2026-09-17
+
+**What we did:**
+- **Built the standalone Instagram Login OAuth flow**, the second of the two ways an Instagram Business/Creator account can be connected (the first being Facebook Login, already built Session 18) — `lib/instagram.ts` (`buildAuthUrl`, `exchangeCodeForToken`, `exchangeForLongLivedToken`, `fetchProfile`) and `routes/auth/instagram.ts` (`/api/auth/instagram/connect` + `/callback`), mirroring the shape of `lib/facebook.ts`/`routes/auth/facebook.ts` but hitting Instagram's own OAuth product (`www.instagram.com/oauth/authorize`, `api.instagram.com/oauth/access_token`, `graph.instagram.com`) — a separate Meta product from the Facebook Login dialog, with no Facebook Page in the loop at all.
+- Added Instagram OAuth env vars (`INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET`) to `lib/env.ts`/`.env`/`.env.example`, regenerated the frontend's OpenAPI schema for the new endpoints, and added platform-specific "Connect" buttons + connection-method badges to `dashboard.tsx` (duplicate-account detection toast when the same account is connected via both methods).
+- Extended the composer for Instagram's media types (`CAROUSEL`/`REELS`/`STORIES` alongside `IMAGE`), with platform-aware media-type options and account selection.
+- **Found and fixed a real token-scoping bug during end-to-end testing**: an Instagram photo post dispatched through n8n failed with `OAuthException 190 — Invalid OAuth access token`. Root cause traced through several layers:
+  1. `N8N_MEDIA_TYPE` in `service/n8n.ts` was mapping Instagram media types to Facebook's `PHOTO`/`MULTI_PHOTO` strings — Instagram's actual enum values are `IMAGE`/`CAROUSEL`/`REELS`/`STORIES`; fixed the translation layer (migration `20260916195236_add_instagram_login_and_media_types` adds these to the Prisma `MediaType` enum).
+  2. The real bug: **Facebook Login and Instagram Login can both resolve to the same physical Instagram account** (same `platformAccountId`), but each issues a token valid on a different host — `graph.facebook.com` for a Facebook-Page-issued IG token, `graph.instagram.com` for an Instagram-Login-issued token. The original `ConnectedAccount` unique constraint (`userId, platform, platformAccountId`) didn't include which flow connected it, so connecting via one flow after the other silently **overwrote** the first token with a token that was only valid on the *other* host — exactly what was happening.
+  3. Fixed by adding a `connectionMethod` enum (`FACEBOOK_PAGE` | `INSTAGRAM_LOGIN`) to `ConnectedAccount` and folding it into the unique constraint (`userId, platform, platformAccountId, connectionMethod`), so the two flows now upsert into separate rows instead of clobbering each other. Both `routes/auth/facebook.ts` and `routes/auth/instagram.ts` updated to upsert on the new composite key, each stamping its own `connectionMethod`.
+  4. The DB migration for this hit a real snag: the naive `ALTER ... ADD CONSTRAINT` approach failed because existing duplicate rows would've violated the new constraint immediately. Resolved by dropping/recreating as an **index** operation instead of a constraint operation, marking the first stalled migration attempt as rolled back, and reapplying — documented as the pattern to reuse if this happens again (see migration `20260916205952_fix_connected_account_unique_key`).
+- Added `service/n8n.ts`'s `GRAPH_HOST` lookup (`Record<ConnectionMethod, string>`) and `buildInstagramPayload()`/`dispatchInstagramToN8n()` — the Instagram counterpart to the existing Facebook dispatch functions, sending `token.graph_host` in the webhook payload so `instagram-poster.json`'s HTTP nodes build URLs against the correct Graph host per-request rather than assuming one. Also added a fail-fast expiry guard (`TOKEN_EXPIRY_BUFFER_MS`, 24h) that throws before dispatch if an `INSTAGRAM_LOGIN`-connected (`SLIDING_WINDOW` refresh strategy) token is expired or about to expire, since there's no proactive refresh worker yet — surfaces a clear "reconnect the account" error instead of letting a doomed request reach n8n. `postToN8n` was factored out as a shared helper since Facebook and Instagram dispatch now share identical POST/error-handling logic, differing only in webhook path and payload shape.
+- Updated `workflows/instagram-poster.json`'s callback nodes (success + error) to send the `x-callback-secret` header, matching the pattern already used in `facebook-poster.json` (Session 18) — previously only the Facebook workflow authenticated its callback.
+- Verified end-to-end: connected the same Instagram test account via both flows (confirming they now coexist as separate rows with distinct badges/duplicate warning in the dashboard), dispatched a real Instagram photo post, confirmed it now correctly hits `graph.instagram.com` with a valid `INSTAGRAM_LOGIN` token and publishes successfully.
+
+**Decisions made:**
+- `ConnectionMethod` (`FACEBOOK_PAGE` | `INSTAGRAM_LOGIN`) is now part of `ConnectedAccount`'s identity, not just metadata — it's in the unique constraint precisely because the two flows can target the same underlying account with mutually-incompatible tokens.
+- Token-host selection is resolved once, at dispatch-payload-build time in the backend (`GRAPH_HOST[connectionMethod]`), and passed to n8n as data (`token.graph_host`) rather than n8n trying to infer or hardcode a host — keeps n8n workflows dumb/stateless per the existing `websitePlan.md` §1 principle.
+- Fixing a stalled/half-applied migration: prefer dropping/recreating the affected index directly over letting Prisma retry the original failed constraint DDL, then mark the failed migration resolved as rolled-back before reapplying — avoids fighting Prisma's migration-history bookkeeping.
+
+**Files modified this session:**
+- `backend/src/lib/instagram.ts` (new), `backend/src/routes/auth/instagram.ts` (new)
+- `backend/src/lib/env.ts`, `backend/.env`, `backend/.env.example` — `INSTAGRAM_APP_ID`/`INSTAGRAM_APP_SECRET`
+- `backend/prisma/schema.prisma`, migrations `20260916195236_add_instagram_login_and_media_types` and `20260916205952_fix_connected_account_unique_key` — `MediaType` enum additions (`REELS`/`STORIES`), `ConnectionMethod` enum, composite unique constraint
+- `backend/src/service/n8n.ts` — `GRAPH_HOST`, `buildInstagramPayload`, `dispatchInstagramToN8n`, shared `postToN8n` helper, token-expiry guard
+- `backend/src/routes/auth/facebook.ts` — upserts updated to the new composite unique key
+- `workflows/instagram-poster.json` — `x-callback-secret` header added to callback nodes
+- `frontend/src/routes/dashboard.tsx` — platform-specific connect buttons, connection-method badges, duplicate-account toast
+- `frontend/src/routes/composer.tsx` — Instagram media types (`CAROUSEL`/`REELS`/`STORIES`), platform-aware account/media-type selection
+- `frontend/src/lib/api-schema.d.ts` — regenerated for Instagram endpoints
+- `history.md` — this entry
+
+---
+
+### Session 21 — 2026-09-21
+
+**What we did:**
+- Diagnosed a Postgres foreign-key violation (`23001`) when clicking **Disconnect** on a connected account that already had posts against it: `Post.connectedAccountId → ConnectedAccount.id` has no `onDelete` behavior specified in `schema.prisma`, which Prisma/Postgres defaults to `RESTRICT` — so `DELETE /api/integrations/:id`'s `prisma.connectedAccount.deleteMany(...)` failed outright once the account had post history, blocking the user from disconnecting and re-testing the Instagram OAuth flow from scratch.
+- **Chose soft-delete over cascading the delete or catching-and-messaging the FK error** — cascading would silently destroy the user's post/`PostLog` history the moment they disconnect an account (worse than an inactive row sitting around); a soft-delete flag both fixes the immediate bug and is the right long-term behavior regardless.
+- Added a `disconnectedAt` (nullable timestamp) column to `ConnectedAccount` (migration `20260921031208_add_connected_account_soft_delete`). `DELETE /api/integrations/:id` now does `updateMany({ disconnectedAt: new Date() })` instead of `deleteMany`; `GET /api/integrations` and the post-creation account lookup in `routes/posts.ts` both filter `disconnectedAt: null` so a disconnected account stops appearing/stops being postable, without touching its post history.
+- Made reconnecting transparent: since both OAuth callbacks (`routes/auth/facebook.ts`, `routes/auth/instagram.ts`) already `upsert` on the `(userId, platform, platformAccountId, connectionMethod)` composite key from Session 20, their `update` blocks now also clear `disconnectedAt: null` — running the OAuth flow again on a previously-disconnected account revives the same row (and its post history) instead of erroring on the unique constraint or creating an orphaned duplicate.
+- Verified: the previously-stuck test account (`06ae519c-...`, an `INSTAGRAM_LOGIN`-connected row) was inspected directly in the DB and confirmed unaffected by the earlier failed delete (Postgres rolled the whole failed transaction back — no data lost); `bunx tsc --noEmit` clean; migration applied via `prisma migrate deploy` (not `migrate dev`, since the dev DB had unrelated drift from Session 20's manually-patched migration that `migrate dev` wanted to resolve via a full reset).
+
+**Decisions made:**
+- "Disconnect" is a soft-delete (`ConnectedAccount.disconnectedAt`), not a hard delete — consistent with the DB actively protecting `Post`/`PostLog` referential integrity via `RESTRICT`, rather than working around that constraint destructively.
+- Every read path that lists or resolves a `ConnectedAccount` for use (integrations list, post-creation lookup, the Instagram duplicate-detection query) must filter `disconnectedAt: null` — there's no single shared query helper for this yet; each call site was updated individually.
+
+**Files modified this session:**
+- `backend/prisma/schema.prisma`, new migration `20260921031208_add_connected_account_soft_delete` — `ConnectedAccount.disconnectedAt`
+- `backend/src/routes/integrations.ts` — list filters `disconnectedAt: null`; disconnect does a soft-delete `updateMany` instead of `deleteMany`
+- `backend/src/routes/auth/facebook.ts`, `backend/src/routes/auth/instagram.ts` — `update` blocks clear `disconnectedAt: null` on reconnect; Instagram's duplicate-check query also filters `disconnectedAt: null`
+- `backend/src/routes/posts.ts` — post-creation account lookup filters `disconnectedAt: null`
+- `websitePlan.md` — §7 `ConnectedAccounts` schema updated with `disconnected_at`; §2.2 Instagram OAuth section expanded for the dual connection-method reality; §5 Instagram payload/host notes added; roadmap/footer updated
+- `history.md` — this entry
+- `history.md` — this entry
+
+---
+
 ## Platform Credential Reference
 
 > Fill this in as you complete setup.md steps. Keep actual secrets in a password manager — only record IDs here.
@@ -579,7 +637,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | Platform | App/Project Name | App ID / Client ID | Notes |
 |----------|-----------------|-------------------|-------|
 | Facebook | SMPosting App | *Configured* | `facebook-poster.json` fully tested — `TEXT`, `PHOTO`, `VIDEO`, and `MULTI_PHOTO` (carousel) all confirmed working end-to-end (Sep 10) once the code-368 block cleared. **Access token pasted in chat Sep 8 — treat as compromised, rotate before reuse.** V2 SaaS backend's real dispatch loop (OAuth connect → encrypted token storage → Composer submit → n8n → Graph API → callback → `PUBLISHED`) confirmed working end-to-end Sep 16 — first platform wired to the actual backend, not just the standalone n8n workflow. |
-| Instagram | SMPosting App | *Configured* | Instagram Business Account ID retrieved; `instagram-poster.json` tested successfully for photo/story/reel (Sep 7) |
+| Instagram | SMPosting App | *Configured* | Instagram Business Account ID retrieved; `instagram-poster.json` tested successfully for photo/story/reel (Sep 7). V2 SaaS backend now supports **both** connection methods end-to-end (Sep 17-21): Facebook Login (rides on the Facebook OAuth dialog, IG token scoped to `graph.facebook.com`) and standalone Instagram Login (`routes/auth/instagram.ts`, own OAuth product, IG token scoped to `graph.instagram.com`) — tracked as separate `ConnectedAccount` rows via the `connectionMethod` column so the two token scopes never clobber each other. |
 | Threads | SMPosting App | *Configured* | Long-lived token generated via curl; `threads-poster.json` tested successfully for TEXT (Sep 7) |
 | Reddit | — | — | *Deferred* (Pending API Access Request) |
 | YouTube | SMPosting V1 | *Configured* | Upload-audit gate has **lifted** — `youtube-poster.json` tested successfully end-to-end for standard video and Shorts (Sep 8), after fixing a missing `Validate Payload → Initiate Resumable Upload` canvas connection |
@@ -633,6 +691,10 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | n8n callback auth (V2) | Shared-secret header (`x-callback-secret`, checked against `N8N_CALLBACK_SECRET`) on `POST /api/webhooks/n8n-callback` — not HMAC-signed payloads; matches the shared-secret convention already used elsewhere in the stack |
 | n8n container topology (V2) | SaaS backend's n8n runs as its own Docker service (`smposting-n8n`) in `backend/docker-compose.yml`, separate from the shared InternApplier container used to build/test the standalone V1 workflows — avoids coupling backend infra to an unrelated project. Needs its own `CALLBACK_SECRET` + `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` set to match the backend's `N8N_CALLBACK_SECRET` and allow callback nodes to read it via `{{ $env.CALLBACK_SECRET }}` |
 | `N8N_BASE_URL` vs. tunnel (V2) | Points directly at `http://localhost:5678`, not through ngrok — backend and n8n run on the same machine, and ngrok's free plan only grants one static domain (already used for `PUBLIC_BACKEND_URL`/Meta OAuth, which does require a public HTTPS URL since Meta rejects localhost redirects) |
+| Instagram dual connection methods (V2) | Facebook Login and standalone Instagram Login can both connect the *same* physical Instagram account but issue tokens valid on different hosts (`graph.facebook.com` vs `graph.instagram.com`). Modeled as `ConnectedAccount.connectionMethod` (`FACEBOOK_PAGE` \| `INSTAGRAM_LOGIN`), folded into the unique constraint (`userId, platform, platformAccountId, connectionMethod`) so connecting via one flow never overwrites the other's token. |
+| Instagram Graph host selection (V2) | Resolved once, backend-side, at payload-build time — `GRAPH_HOST[connectedAccount.connectionMethod]` in `service/n8n.ts` — and shipped to n8n as `token.graph_host` data. n8n's HTTP nodes just string-concatenate whatever host they're given; no host-selection logic lives in the workflow itself. |
+| Instagram token expiry guard (V2) | `buildInstagramPayload` throws before dispatch if a `SLIDING_WINDOW` (Instagram-Login) token is within 24h of `tokenExpiresAt` or already past it — fails fast with "reconnect the account" instead of sending a doomed request to n8n, since there's no proactive refresh worker for this token type yet. |
+| `ConnectedAccount` disconnect semantics (V2) | Soft-delete via `disconnectedAt` (nullable timestamp), not a hard `DELETE` — `Post.connectedAccountId` is `RESTRICT`, so a hard delete fails once the account has post history. Every read path that lists/resolves an account for use filters `disconnectedAt: null`; OAuth callbacks clear it on reconnect (same upsert key as the dual-connection-method fix above), reviving the row and its history instead of erroring or duplicating. |
 
 ---
 

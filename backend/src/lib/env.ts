@@ -13,6 +13,12 @@ const envSchema = z.object({
   META_APP_SECRET: z.string().min(1),
   META_GRAPH_VERSION: z.string().default("v21.0"),
 
+  // Separate from META_APP_ID/SECRET — issued when the "Instagram API setup
+  // with Instagram Login" product is added to the Meta App, used for
+  // standalone Instagram accounts with no linked Facebook Page.
+  INSTAGRAM_APP_ID: z.string().min(1),
+  INSTAGRAM_APP_SECRET: z.string().min(1),
+
   DEFAULT_USER_EMAIL: z.string().email(),
   DEFAULT_USER_NAME: z.string().min(1),
 

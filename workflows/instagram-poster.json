@@ -13,7 +13,7 @@
       "parameters": {
         "width": 640,
         "height": 420,
-        "content": "## instagram-poster\nWebhook-triggered, per-platform posting workflow. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\n**After importing:** activate the workflow, copy the Webhook node's *Production URL* (or use the Test URL while the editor is open in listen mode), then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/instagram-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test001\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"instagram\",\n    \"content\": \"Test caption #smposting\",\n    \"media_type\": \"IMAGE\",\n    \"media_urls\": [\"https://images.unsplash.com/photo-XXXX\"],\n    \"token\": {\n      \"ig_business_id\": \"YOUR_IG_BUSINESS_ID\",\n      \"access_token\": \"YOUR_LONG_LIVED_TOKEN\"\n    },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `IMAGE | CAROUSEL | REELS | STORIES`. For `CAROUSEL`, `media_urls` should have 2+ entries. `callback_url` is optional \u2014 defaults to the backend's future `/api/webhooks/n8n-callback` route; point it at webhook.site while there's no backend yet to see the result payload."
+        "content": "## instagram-poster\nWebhook-triggered, per-platform posting workflow. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\n**After importing:** activate the workflow, copy the Webhook node's *Production URL* (or use the Test URL while the editor is open in listen mode), then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/instagram-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test001\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"instagram\",\n    \"content\": \"Test caption #smposting\",\n    \"media_type\": \"IMAGE\",\n    \"media_urls\": [\"https://images.unsplash.com/photo-XXXX\"],\n    \"token\": {\n      \"ig_business_id\": \"YOUR_IG_BUSINESS_ID\",\n      \"access_token\": \"YOUR_LONG_LIVED_TOKEN\",\n      \"graph_host\": \"https://graph.facebook.com\"\n    },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `IMAGE | CAROUSEL | REELS | STORIES`. For `CAROUSEL`, `media_urls` should have 2+ entries. `callback_url` is optional \u2014 defaults to the backend's future `/api/webhooks/n8n-callback` route; point it at webhook.site while there's no backend yet to see the result payload.\n\n`token.graph_host` selects which Graph API host the access token is valid against: `https://graph.facebook.com` for Instagram accounts linked via a Facebook Page, `https://graph.instagram.com` for accounts connected via standalone Instagram Login. Defaults to `https://graph.facebook.com` if omitted."
       }
     },
     {
@@ -43,7 +43,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'instagram',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    ig_user_id: body.token && body.token.ig_business_id,\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'instagram',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    ig_user_id: body.token && body.token.ig_business_id,\n    access_token: body.token && body.token.access_token,\n    graph_host: (body.token && body.token.graph_host) || 'https://graph.facebook.com',\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
       }
     },
     {
@@ -173,7 +173,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -221,7 +221,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -264,7 +264,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -319,7 +319,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -371,7 +371,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -400,7 +400,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -452,7 +452,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -481,7 +481,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -530,7 +530,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "={{ 'https://graph.facebook.com/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
+        "url": "={{ $('Parse Request').first().json.graph_host + '/v23.0/' + $('Parse Request').first().json.ig_user_id + '/media_publish' }}",
         "authentication": "none",
         "sendQuery": true,
         "queryParameters": {
@@ -590,7 +590,16 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
-        "options": {}
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-callback-secret",
+              "value": "={{ $env.CALLBACK_SECRET }}"
+            }
+          ]
+        }
       },
       "onError": "continueRegularOutput"
     },
@@ -634,7 +643,16 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
-        "options": {}
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-callback-secret",
+              "value": "={{ $env.CALLBACK_SECRET }}"
+            }
+          ]
+        }
       },
       "onError": "continueRegularOutput"
     }

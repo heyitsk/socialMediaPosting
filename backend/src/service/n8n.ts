@@ -1,4 +1,4 @@
-import type { ConnectedAccount, MediaType, Post } from "@prisma/client";
+import type { ConnectedAccount, ConnectionMethod, MediaType, Post } from "@prisma/client";
 import { decrypt } from "../lib/crypto";
 import { env } from "../lib/env";
 
@@ -9,6 +9,17 @@ const N8N_MEDIA_TYPE: Record<MediaType, string> = {
   IMAGE: "PHOTO",
   VIDEO: "VIDEO",
   CAROUSEL: "MULTI_PHOTO",
+  REELS: "REELS",
+  STORIES: "STORIES",
+};
+
+// instagram-poster.json's HTTP Request nodes build their URL from this host —
+// Facebook-Page-issued IG tokens only work against graph.facebook.com, while
+// Instagram Login tokens only work against graph.instagram.com (see
+// lib/instagram.ts).
+const GRAPH_HOST: Record<ConnectionMethod, string> = {
+  FACEBOOK_PAGE: "https://graph.facebook.com",
+  INSTAGRAM_LOGIN: "https://graph.instagram.com",
 };
 
 export interface FacebookDispatchPayload {
@@ -43,8 +54,58 @@ export function buildFacebookPayload(
   };
 }
 
-export async function dispatchToN8n(payload: FacebookDispatchPayload): Promise<void> {
-  const response = await fetch(`${env.N8N_BASE_URL}/webhook/facebook-poster`, {
+export interface InstagramDispatchPayload {
+  post_id: string;
+  user_id: string;
+  platform: "instagram";
+  content: string;
+  media_type: string;
+  media_urls: string[];
+  token: { ig_business_id: string; access_token: string; graph_host: string };
+  callback_url: string;
+}
+
+// Standalone Instagram Login tokens expire after ~60 days and there's no
+// proactive refresh worker yet — fail fast with a clear error here rather
+// than dispatching a doomed request to n8n (see websitePlan.md token
+// refresh notes; SLIDING_WINDOW refresh automation is a follow-up).
+const TOKEN_EXPIRY_BUFFER_MS = 24 * 60 * 60 * 1000;
+
+export function buildInstagramPayload(
+  post: Post,
+  connectedAccount: ConnectedAccount,
+): InstagramDispatchPayload {
+  if (
+    connectedAccount.refreshStrategy === "SLIDING_WINDOW" &&
+    connectedAccount.tokenExpiresAt &&
+    connectedAccount.tokenExpiresAt.getTime() - TOKEN_EXPIRY_BUFFER_MS < Date.now()
+  ) {
+    throw new Error("Instagram token expired or expiring soon — reconnect the account");
+  }
+
+  const accessToken = decrypt(connectedAccount.encryptedAccessToken, connectedAccount.keyVersion);
+
+  return {
+    post_id: post.id,
+    user_id: post.userId,
+    platform: "instagram",
+    content: post.caption,
+    // Unlike Facebook's PHOTO/MULTI_PHOTO renaming, instagram-poster.json's
+    // Switch node matches on our Prisma MediaType values verbatim — no
+    // N8N_MEDIA_TYPE lookup here.
+    media_type: post.mediaType,
+    media_urls: post.mediaUrls as string[],
+    token: {
+      ig_business_id: connectedAccount.platformAccountId,
+      access_token: accessToken,
+      graph_host: GRAPH_HOST[connectedAccount.connectionMethod],
+    },
+    callback_url: `${env.PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`,
+  };
+}
+
+async function postToN8n(webhookPath: string, payload: unknown): Promise<void> {
+  const response = await fetch(`${env.N8N_BASE_URL}/webhook/${webhookPath}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -53,4 +114,12 @@ export async function dispatchToN8n(payload: FacebookDispatchPayload): Promise<v
   if (!response.ok) {
     throw new Error(`n8n dispatch failed (${response.status}): ${await response.text()}`);
   }
+}
+
+export async function dispatchToN8n(payload: FacebookDispatchPayload): Promise<void> {
+  await postToN8n("facebook-poster", payload);
+}
+
+export async function dispatchInstagramToN8n(payload: InstagramDispatchPayload): Promise<void> {
+  await postToN8n("instagram-poster", payload);
 }

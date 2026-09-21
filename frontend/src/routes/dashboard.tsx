@@ -10,6 +10,9 @@ const CONNECT_ERROR_MESSAGES: Record<string, string> = {
   facebook_connect_denied: "Facebook connection was cancelled.",
   facebook_connect_invalid_state: "Facebook connection expired — please try again.",
   facebook_connect_failed: "Failed to connect Facebook account.",
+  instagram_connect_denied: "Instagram connection was cancelled.",
+  instagram_connect_invalid_state: "Instagram connection expired — please try again.",
+  instagram_connect_failed: "Failed to connect Instagram account.",
 };
 
 function useConnectStatusToast() {
@@ -21,12 +24,21 @@ function useConnectStatusToast() {
 
     const connected = searchParams.get("connected");
     const error = searchParams.get("error");
+    const duplicate = searchParams.get("duplicate") === "1";
     if (!connected && !error) return;
 
     handled.current = true;
 
     if (connected === "facebook") {
       toast.success("Facebook account connected.");
+    } else if (connected === "instagram") {
+      if (duplicate) {
+        toast.warning(
+          "Instagram connected — this account may already be connected via a Facebook Page.",
+        );
+      } else {
+        toast.success("Instagram account connected.");
+      }
     } else if (error) {
       toast.error(CONNECT_ERROR_MESSAGES[error] ?? "Failed to connect account.");
     }
@@ -35,6 +47,7 @@ function useConnectStatusToast() {
       (prev) => {
         prev.delete("connected");
         prev.delete("error");
+        prev.delete("duplicate");
         return prev;
       },
       { replace: true },
@@ -101,8 +114,6 @@ function ConnectedAccountsCard() {
     onError: () => toast.error("Failed to disconnect account."),
   });
 
-  const facebookConnected = accounts?.some((account) => account.platform === "FACEBOOK") ?? false;
-
   return (
     <Card className="max-w-sm">
       <CardHeader>
@@ -118,7 +129,13 @@ function ConnectedAccountsCard() {
           <div key={account.id} className="flex items-center justify-between gap-2">
             <div>
               <div className="font-medium">{account.accountName}</div>
-              <div className="text-xs text-muted-foreground">{account.platform}</div>
+              <div className="text-xs text-muted-foreground">
+                {account.platform}
+                {account.platform === "INSTAGRAM" &&
+                  (account.connectionMethod === "INSTAGRAM_LOGIN"
+                    ? " · Direct login"
+                    : " · via Facebook Page")}
+              </div>
             </div>
             <Button
               variant="destructive"
@@ -133,12 +150,20 @@ function ConnectedAccountsCard() {
         <Button
           variant="outline"
           size="sm"
-          disabled={facebookConnected}
           onClick={() => {
             window.location.href = `${API_URL}/api/auth/facebook`;
           }}
         >
-          {facebookConnected ? "Facebook Connected" : "Connect Facebook"}
+          Connect / Add Facebook Pages
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            window.location.href = `${API_URL}/api/auth/instagram`;
+          }}
+        >
+          Connect Instagram
         </Button>
       </CardContent>
     </Card>

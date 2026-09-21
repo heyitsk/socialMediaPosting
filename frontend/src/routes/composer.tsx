@@ -16,9 +16,28 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 
-type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL";
+type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
 
 const MIN_CAROUSEL_PHOTOS = 2;
+
+// Mirrors backend SUPPORTED_MEDIA_TYPES in routes/posts.ts — what each
+// platform's n8n workflow actually implements.
+const MEDIA_TYPES_BY_PLATFORM: Record<"FACEBOOK" | "INSTAGRAM", { value: MediaType; label: string }[]> = {
+  FACEBOOK: [
+    { value: "TEXT", label: "Text only" },
+    { value: "IMAGE", label: "Image" },
+    { value: "VIDEO", label: "Video" },
+    { value: "CAROUSEL", label: "Carousel (multiple photos)" },
+  ],
+  INSTAGRAM: [
+    { value: "IMAGE", label: "Image" },
+    { value: "CAROUSEL", label: "Carousel (multiple photos)" },
+    { value: "REELS", label: "Reel (video)" },
+    { value: "STORIES", label: "Story (image only, for now)" },
+  ],
+};
+
+const SINGLE_URL_MEDIA_TYPES: MediaType[] = ["IMAGE", "VIDEO", "REELS", "STORIES"];
 
 export function ComposerPage() {
   const queryClient = useQueryClient();
@@ -32,13 +51,18 @@ export function ComposerPage() {
     },
   });
 
-  const facebookAccounts = accounts?.filter((account) => account.platform === "FACEBOOK") ?? [];
+  const postableAccounts =
+    accounts?.filter((account) => account.platform === "FACEBOOK" || account.platform === "INSTAGRAM") ?? [];
 
   const [connectedAccountId, setConnectedAccountId] = useState("");
   const [caption, setCaption] = useState("");
   const [mediaType, setMediaType] = useState<MediaType>("TEXT");
   const [mediaUrl, setMediaUrl] = useState("");
   const [carouselUrls, setCarouselUrls] = useState<string[]>(["", ""]);
+
+  const selectedAccount = postableAccounts.find((account) => account.id === connectedAccountId);
+  const selectedPlatform = selectedAccount?.platform as "FACEBOOK" | "INSTAGRAM" | undefined;
+  const availableMediaTypes = selectedPlatform ? MEDIA_TYPES_BY_PLATFORM[selectedPlatform] : [];
 
   const trimmedCarouselUrls = carouselUrls.map((url) => url.trim()).filter((url) => url !== "");
 
@@ -50,11 +74,7 @@ export function ComposerPage() {
           caption,
           mediaType,
           mediaUrls:
-            mediaType === "TEXT"
-              ? []
-              : mediaType === "CAROUSEL"
-                ? trimmedCarouselUrls
-                : [mediaUrl],
+            mediaType === "TEXT" ? [] : mediaType === "CAROUSEL" ? trimmedCarouselUrls : [mediaUrl],
         },
       });
       if (error) throw error;
@@ -83,6 +103,17 @@ export function ComposerPage() {
         : mediaUrl.trim() !== "")) &&
     !createPost.isPending;
 
+  function handleAccountChange(accountId: string) {
+    setConnectedAccountId(accountId);
+    const account = postableAccounts.find((a) => a.id === accountId);
+    const validTypes = MEDIA_TYPES_BY_PLATFORM[account?.platform as "FACEBOOK" | "INSTAGRAM"]?.map(
+      (t) => t.value,
+    );
+    if (validTypes && !validTypes.includes(mediaType)) {
+      setMediaType(validTypes[0]);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold">Post Composer</h1>
@@ -96,24 +127,24 @@ export function ComposerPage() {
           {isError && (
             <p className="text-sm text-destructive">Could not load connected accounts.</p>
           )}
-          {!isPending && !isError && facebookAccounts.length === 0 && (
+          {!isPending && !isError && postableAccounts.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              Connect a Facebook account from the Dashboard before posting.
+              Connect a Facebook or Instagram account from the Dashboard before posting.
             </p>
           )}
 
-          {facebookAccounts.length > 0 && (
+          {postableAccounts.length > 0 && (
             <>
               <div className="flex flex-col gap-2">
                 <Label htmlFor="account">Post as</Label>
-                <Select value={connectedAccountId} onValueChange={setConnectedAccountId}>
+                <Select value={connectedAccountId} onValueChange={handleAccountChange}>
                   <SelectTrigger id="account">
-                    <SelectValue placeholder="Select a Facebook Page" />
+                    <SelectValue placeholder="Select an account" />
                   </SelectTrigger>
                   <SelectContent>
-                    {facebookAccounts.map((account) => (
+                    {postableAccounts.map((account) => (
                       <SelectItem key={account.id} value={account.id}>
-                        {account.accountName}
+                        {account.accountName} ({account.platform})
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -141,15 +172,16 @@ export function ComposerPage() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="TEXT">Text only</SelectItem>
-                    <SelectItem value="IMAGE">Image</SelectItem>
-                    <SelectItem value="VIDEO">Video</SelectItem>
-                    <SelectItem value="CAROUSEL">Carousel (multiple photos)</SelectItem>
+                    {availableMediaTypes.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
 
-              {(mediaType === "IMAGE" || mediaType === "VIDEO") && (
+              {SINGLE_URL_MEDIA_TYPES.includes(mediaType) && (
                 <div className="flex flex-col gap-2">
                   <Label htmlFor="media-url">Media URL (Cloudinary)</Label>
                   <Input
@@ -202,7 +234,11 @@ export function ComposerPage() {
               )}
 
               <Button disabled={!canSubmit} onClick={() => createPost.mutate()}>
-                {createPost.isPending ? "Posting…" : "Post to Facebook"}
+                {createPost.isPending
+                  ? "Posting…"
+                  : selectedPlatform
+                    ? `Post to ${selectedPlatform === "FACEBOOK" ? "Facebook" : "Instagram"}`
+                    : "Post"}
               </Button>
             </>
           )}

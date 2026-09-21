@@ -55,10 +55,11 @@ facebookAuthRoute.get("/callback", async (c) => {
 
       await prisma.connectedAccount.upsert({
         where: {
-          userId_platform_platformAccountId: {
+          userId_platform_platformAccountId_connectionMethod: {
             userId: user.id,
             platform: "FACEBOOK",
             platformAccountId: page.id,
+            connectionMethod: "FACEBOOK_PAGE",
           },
         },
         update: {
@@ -66,6 +67,7 @@ facebookAuthRoute.get("/callback", async (c) => {
           encryptedAccessToken: encryptedPageToken,
           keyVersion: 1,
           lastRefreshedAt: new Date(),
+          disconnectedAt: null,
         },
         create: {
           userId: user.id,
@@ -83,10 +85,11 @@ facebookAuthRoute.get("/callback", async (c) => {
       if (instagramAccount) {
         await prisma.connectedAccount.upsert({
           where: {
-            userId_platform_platformAccountId: {
+            userId_platform_platformAccountId_connectionMethod: {
               userId: user.id,
               platform: "INSTAGRAM",
               platformAccountId: instagramAccount.id,
+              connectionMethod: "FACEBOOK_PAGE",
             },
           },
           update: {
@@ -94,11 +97,13 @@ facebookAuthRoute.get("/callback", async (c) => {
             encryptedAccessToken: encryptedPageToken,
             keyVersion: 1,
             lastRefreshedAt: new Date(),
+            disconnectedAt: null,
           },
           create: {
             userId: user.id,
             platform: "INSTAGRAM",
             platformAccountId: instagramAccount.id,
+            connectionMethod: "FACEBOOK_PAGE",
             accountName: instagramAccount.username,
             encryptedAccessToken: encryptedPageToken,
             keyVersion: 1,
