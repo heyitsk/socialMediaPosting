@@ -68,8 +68,10 @@ export interface InstagramDispatchPayload {
 // Standalone Instagram Login tokens expire after ~60 days and there's no
 // proactive refresh worker yet — fail fast with a clear error here rather
 // than dispatching a doomed request to n8n (see websitePlan.md token
-// refresh notes; SLIDING_WINDOW refresh automation is a follow-up).
-const TOKEN_EXPIRY_BUFFER_MS = 24 * 60 * 60 * 1000;
+// refresh notes; SLIDING_WINDOW refresh automation is a follow-up). Exported
+// so routes/integrations.ts can flag the same "needs reconnect" window to
+// the frontend before the user even tries to post.
+export const TOKEN_EXPIRY_BUFFER_MS = 24 * 60 * 60 * 1000;
 
 export function buildInstagramPayload(
   post: Post,
@@ -147,6 +149,53 @@ export function buildThreadsPayload(
   };
 }
 
+export interface LinkedInDispatchPayload {
+  post_id: string;
+  user_id: string;
+  platform: "linkedin";
+  content: string;
+  media_type: string;
+  media_urls: string[];
+  token: { access_token: string; author_urn: string };
+  callback_url: string;
+}
+
+// linkedin-poster.json's Switch node matches media_type verbatim, same as
+// Instagram/Threads — no N8N_MEDIA_TYPE lookup needed.
+//
+// LinkedIn access tokens have no refresh token at all (see
+// RefreshStrategy.REQUIRES_RECONNECT in schema.prisma) — reuses Instagram's/
+// Threads' TOKEN_EXPIRY_BUFFER_MS check so a doomed dispatch fails fast here
+// with a clear "reconnect" error instead of erroring out inside n8n.
+export function buildLinkedInPayload(
+  post: Post,
+  connectedAccount: ConnectedAccount,
+): LinkedInDispatchPayload {
+  if (
+    connectedAccount.refreshStrategy === "REQUIRES_RECONNECT" &&
+    connectedAccount.tokenExpiresAt &&
+    connectedAccount.tokenExpiresAt.getTime() - TOKEN_EXPIRY_BUFFER_MS < Date.now()
+  ) {
+    throw new Error("LinkedIn token expired or expiring soon — reconnect the account");
+  }
+
+  const accessToken = decrypt(connectedAccount.encryptedAccessToken, connectedAccount.keyVersion);
+
+  return {
+    post_id: post.id,
+    user_id: post.userId,
+    platform: "linkedin",
+    content: post.caption,
+    media_type: post.mediaType,
+    media_urls: post.mediaUrls as string[],
+    token: {
+      access_token: accessToken,
+      author_urn: `urn:li:person:${connectedAccount.platformAccountId}`,
+    },
+    callback_url: `${env.PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`,
+  };
+}
+
 async function postToN8n(webhookPath: string, payload: unknown): Promise<void> {
   const response = await fetch(`${env.N8N_BASE_URL}/webhook/${webhookPath}`, {
     method: "POST",
@@ -169,4 +218,8 @@ export async function dispatchInstagramToN8n(payload: InstagramDispatchPayload):
 
 export async function dispatchThreadsToN8n(payload: ThreadsDispatchPayload): Promise<void> {
   await postToN8n("threads-poster", payload);
+}
+
+export async function dispatchLinkedInToN8n(payload: LinkedInDispatchPayload): Promise<void> {
+  await postToN8n("linkedin-poster", payload);
 }

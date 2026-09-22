@@ -839,7 +839,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const req = $('Parse Request').first().json;\nconst headers = $json.headers || {};\nconst postId = headers['x-restli-id'] || headers['X-RestLi-Id'] || headers['x-linkedin-id'] || null;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'SUCCESS',\n    platform_post_id: postId,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
+        "jsCode": "const req = $('Parse Request').first().json;\nconst headers = $json.headers || {};\nconst postId = headers['x-restli-id'] || headers['X-RestLi-Id'] || headers['x-linkedin-id'] || null;\n\n// The video's own urn:li:video:... isn't the same thing as postId (the\n// created post/share's urn) — the backend's video-status poller needs both:\n// one id to poll (GET /rest/videos/{urn}) and a different id to log as the\n// history page's platform_post_id once that poll confirms it's ready.\n// Only the VIDEO branch has a video urn to send back.\nlet mediaUrn = null;\nif (req.media_type === 'VIDEO') {\n  mediaUrn = $('LI Init Video Upload').first().json.value.video;\n}\n\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'SUCCESS',\n    platform_post_id: postId,\n    media_urn: mediaUrn,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
       }
     },
     {
@@ -857,7 +857,7 @@
         "authentication": "none",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, media_urn: $json.media_urn, error: $json.error }) }}",
         "options": {},
         "sendHeaders": true,
         "headerParameters": {

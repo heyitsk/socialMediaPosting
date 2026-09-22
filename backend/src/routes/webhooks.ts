@@ -5,7 +5,7 @@ import { prisma } from "../db/client";
 import { env } from "../lib/env";
 import { enqueueVideoStatusPoll } from "../queue/video-status-queue";
 
-const PLATFORM_VALUES = ["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST"] as const;
+const PLATFORM_VALUES = ["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"] as const;
 
 const n8nCallbackSchema = z
   .object({
@@ -13,6 +13,11 @@ const n8nCallbackSchema = z
     platform: z.string(),
     status: z.enum(["SUCCESS", "FAILED"]),
     platform_post_id: z.string().nullable().optional(),
+    // Only sent by linkedin-poster.json's VIDEO branch — the video's own
+    // urn:li:video:... isn't the same thing as platform_post_id (the created
+    // post/share's urn), so it travels as a separate field. See
+    // "LinkedIn video: poll before marking PUBLISHED" below.
+    media_urn: z.string().nullable().optional(),
     error: z.string().nullable().optional(),
   })
   .openapi("N8nCallback");
@@ -47,10 +52,23 @@ export const webhooksRoute = new OpenAPIHono().openapi(n8nCallback, async (c) =>
   // id immediately, but the video is still transcoding — don't mark PUBLISHED
   // until a background poller confirms video_status is actually "ready"
   // (websitePlan.md §6 "Async Media Processing Poller").
-  if (platform === "FACEBOOK" && body.status === "SUCCESS" && body.platform_post_id) {
+  //
+  // LinkedIn video: linkedin-poster.json already blind-waits 30s and only
+  // calls this callback after LI Publish Video succeeds, so the post exists
+  // by now — same as Facebook's case, the underlying video can still fail
+  // processing after that (CORRUPTED_ENTITY etc.), so poll GET
+  // /rest/videos/{urn} before trusting it enough to show "Published" on the
+  // history page. Polls media_urn (the video's own urn:li:video:...), logs
+  // platform_post_id (the created post's urn:li:share:...) once confirmed.
+  if (
+    (platform === "FACEBOOK" || platform === "LINKEDIN") &&
+    body.status === "SUCCESS" &&
+    body.platform_post_id
+  ) {
     const post = await prisma.post.findUniqueOrThrow({ where: { id: body.post_id } });
     if (post.mediaType === "VIDEO") {
-      await enqueueVideoStatusPoll(body.post_id, body.platform_post_id);
+      const mediaId = platform === "LINKEDIN" ? (body.media_urn ?? body.platform_post_id) : body.platform_post_id;
+      await enqueueVideoStatusPoll(body.post_id, platform, body.platform_post_id, mediaId);
       return c.body(null, 204);
     }
   }

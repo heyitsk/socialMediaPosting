@@ -20,9 +20,11 @@ type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
 
 const MIN_CAROUSEL_PHOTOS = 2;
 
+type PostablePlatform = "FACEBOOK" | "INSTAGRAM" | "LINKEDIN";
+
 // Mirrors backend SUPPORTED_MEDIA_TYPES in routes/posts.ts — what each
 // platform's n8n workflow actually implements.
-const MEDIA_TYPES_BY_PLATFORM: Record<"FACEBOOK" | "INSTAGRAM", { value: MediaType; label: string }[]> = {
+const MEDIA_TYPES_BY_PLATFORM: Record<PostablePlatform, { value: MediaType; label: string }[]> = {
   FACEBOOK: [
     { value: "TEXT", label: "Text only" },
     { value: "IMAGE", label: "Image" },
@@ -35,6 +37,18 @@ const MEDIA_TYPES_BY_PLATFORM: Record<"FACEBOOK" | "INSTAGRAM", { value: MediaTy
     { value: "REELS", label: "Reel (video)" },
     { value: "STORIES", label: "Story (image only, for now)" },
   ],
+  LINKEDIN: [
+    { value: "TEXT", label: "Text only" },
+    { value: "IMAGE", label: "Image" },
+    { value: "VIDEO", label: "Video" },
+    { value: "CAROUSEL", label: "Carousel (multiple photos)" },
+  ],
+};
+
+const PLATFORM_LABELS: Record<PostablePlatform, string> = {
+  FACEBOOK: "Facebook",
+  INSTAGRAM: "Instagram",
+  LINKEDIN: "LinkedIn",
 };
 
 const SINGLE_URL_MEDIA_TYPES: MediaType[] = ["IMAGE", "VIDEO", "REELS", "STORIES"];
@@ -52,7 +66,12 @@ export function ComposerPage() {
   });
 
   const postableAccounts =
-    accounts?.filter((account) => account.platform === "FACEBOOK" || account.platform === "INSTAGRAM") ?? [];
+    accounts?.filter(
+      (account) =>
+        account.platform === "FACEBOOK" ||
+        account.platform === "INSTAGRAM" ||
+        account.platform === "LINKEDIN",
+    ) ?? [];
 
   const [connectedAccountId, setConnectedAccountId] = useState("");
   const [caption, setCaption] = useState("");
@@ -61,7 +80,7 @@ export function ComposerPage() {
   const [carouselUrls, setCarouselUrls] = useState<string[]>(["", ""]);
 
   const selectedAccount = postableAccounts.find((account) => account.id === connectedAccountId);
-  const selectedPlatform = selectedAccount?.platform as "FACEBOOK" | "INSTAGRAM" | undefined;
+  const selectedPlatform = selectedAccount?.platform as PostablePlatform | undefined;
   const availableMediaTypes = selectedPlatform ? MEDIA_TYPES_BY_PLATFORM[selectedPlatform] : [];
 
   const trimmedCarouselUrls = carouselUrls.map((url) => url.trim()).filter((url) => url !== "");
@@ -106,7 +125,7 @@ export function ComposerPage() {
   function handleAccountChange(accountId: string) {
     setConnectedAccountId(accountId);
     const account = postableAccounts.find((a) => a.id === accountId);
-    const validTypes = MEDIA_TYPES_BY_PLATFORM[account?.platform as "FACEBOOK" | "INSTAGRAM"]?.map(
+    const validTypes = MEDIA_TYPES_BY_PLATFORM[account?.platform as PostablePlatform]?.map(
       (t) => t.value,
     );
     if (validTypes && !validTypes.includes(mediaType)) {
@@ -129,7 +148,7 @@ export function ComposerPage() {
           )}
           {!isPending && !isError && postableAccounts.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              Connect a Facebook or Instagram account from the Dashboard before posting.
+              Connect a Facebook, Instagram, or LinkedIn account from the Dashboard before posting.
             </p>
           )}
 
@@ -237,7 +256,7 @@ export function ComposerPage() {
                 {createPost.isPending
                   ? "Posting…"
                   : selectedPlatform
-                    ? `Post to ${selectedPlatform === "FACEBOOK" ? "Facebook" : "Instagram"}`
+                    ? `Post to ${PLATFORM_LABELS[selectedPlatform]}`
                     : "Post"}
               </Button>
             </>

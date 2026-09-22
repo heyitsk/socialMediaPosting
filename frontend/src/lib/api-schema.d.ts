@@ -237,12 +237,13 @@ export interface components {
         ConnectedAccountSummary: {
             id: string;
             /** @enum {string} */
-            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST";
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
             accountName: string;
             /** @enum {string} */
-            connectionMethod: "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN";
+            connectionMethod: "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN" | "THREADS_LOGIN" | "LINKEDIN_LOGIN";
             /** Format: date-time */
             lastRefreshedAt: string | null;
+            needsReconnect: boolean;
         };
         Post: {
             id: string;
@@ -258,7 +259,7 @@ export interface components {
         };
         PostLog: {
             /** @enum {string} */
-            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST";
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
             /** @enum {string} */
             status: "SUCCESS" | "FAILED";
             platformPostId: string | null;
@@ -280,6 +281,7 @@ export interface components {
             /** @enum {string} */
             status: "SUCCESS" | "FAILED";
             platform_post_id?: string | null;
+            media_urn?: string | null;
             error?: string | null;
         };
     };

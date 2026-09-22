@@ -13,6 +13,7 @@ enum Platform {
   THREADS
   YOUTUBE
   PINTEREST
+  LINKEDIN
 }
 
 // Drives refresh-job branching instead of scattering per-platform `if`s
@@ -21,6 +22,7 @@ enum RefreshStrategy {
   NONE // Facebook/Instagram — Page token effectively non-expiring
   SLIDING_WINDOW // Threads/Pinterest — proactively refreshed before expiry
   ON_DEMAND // YouTube — refresh token exchanged right before each use
+  REQUIRES_RECONNECT // LinkedIn — 60-day token, no refresh token at all; member must redo OAuth consent
 }
 
 enum MediaType {
@@ -39,6 +41,7 @@ enum ConnectionMethod {
   FACEBOOK_PAGE
   INSTAGRAM_LOGIN
   THREADS_LOGIN
+  LINKEDIN_LOGIN
 }
 
 enum PostStatus {

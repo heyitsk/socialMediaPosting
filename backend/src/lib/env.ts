@@ -25,6 +25,12 @@ const envSchema = z.object({
   THREADS_APP_ID: z.string().min(1),
   THREADS_APP_SECRET: z.string().min(1),
 
+  // From a standalone LinkedIn App (developer.linkedin.com), not a Meta App —
+  // "Sign In with LinkedIn using OpenID Connect" + "Share on LinkedIn"
+  // products. See lib/linkedin.ts.
+  LINKEDIN_CLIENT_ID: z.string().min(1),
+  LINKEDIN_CLIENT_SECRET: z.string().min(1),
+
   DEFAULT_USER_EMAIL: z.string().email(),
   DEFAULT_USER_NAME: z.string().min(1),
 

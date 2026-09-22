@@ -16,6 +16,9 @@ const CONNECT_ERROR_MESSAGES: Record<string, string> = {
   threads_connect_denied: "Threads connection was cancelled.",
   threads_connect_invalid_state: "Threads connection expired — please try again.",
   threads_connect_failed: "Failed to connect Threads account.",
+  linkedin_connect_denied: "LinkedIn connection was cancelled.",
+  linkedin_connect_invalid_state: "LinkedIn connection expired — please try again.",
+  linkedin_connect_failed: "Failed to connect LinkedIn account.",
 };
 
 function useConnectStatusToast() {
@@ -44,6 +47,8 @@ function useConnectStatusToast() {
       }
     } else if (connected === "threads") {
       toast.success("Threads account connected.");
+    } else if (connected === "linkedin") {
+      toast.success("LinkedIn account connected.");
     } else if (error) {
       toast.error(CONNECT_ERROR_MESSAGES[error] ?? "Failed to connect account.");
     }
@@ -95,6 +100,17 @@ export function DashboardPage() {
   );
 }
 
+// Where "Connect"/"Reconnect" for a given platform starts — reconnecting
+// re-runs the same OAuth flow, which upserts onto the same unique key and
+// clears disconnectedAt, so it works for both a fresh connect and a
+// REQUIRES_RECONNECT/SLIDING_WINDOW token refresh.
+const CONNECT_PATH: Partial<Record<string, string>> = {
+  FACEBOOK: "/api/auth/facebook",
+  INSTAGRAM: "/api/auth/instagram",
+  THREADS: "/api/auth/threads",
+  LINKEDIN: "/api/auth/linkedin",
+};
+
 function ConnectedAccountsCard() {
   const queryClient = useQueryClient();
 
@@ -141,15 +157,31 @@ function ConnectedAccountsCard() {
                     ? " · Direct login"
                     : " · via Facebook Page")}
               </div>
+              {account.needsReconnect && (
+                <div className="text-xs text-destructive">Token expired — reconnect below</div>
+              )}
             </div>
-            <Button
-              variant="destructive"
-              size="sm"
-              disabled={disconnect.isPending}
-              onClick={() => disconnect.mutate(account.id)}
-            >
-              Disconnect
-            </Button>
+            <div className="flex gap-2">
+              {account.needsReconnect && CONNECT_PATH[account.platform] && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    window.location.href = `${API_URL}${CONNECT_PATH[account.platform]}`;
+                  }}
+                >
+                  Reconnect
+                </Button>
+              )}
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={disconnect.isPending}
+                onClick={() => disconnect.mutate(account.id)}
+              >
+                Disconnect
+              </Button>
+            </div>
           </div>
         ))}
         <Button
@@ -178,6 +210,15 @@ function ConnectedAccountsCard() {
           }}
         >
           Connect Threads
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            window.location.href = `${API_URL}/api/auth/linkedin`;
+          }}
+        >
+          Connect LinkedIn
         </Button>
       </CardContent>
     </Card>

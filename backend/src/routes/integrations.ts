@@ -2,14 +2,22 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
 import { getOrCreateDefaultUser } from "../db/users";
+import { TOKEN_EXPIRY_BUFFER_MS } from "../service/n8n";
 
 const connectedAccountSchema = z
   .object({
     id: z.string(),
-    platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST"]),
+    platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"]),
     accountName: z.string(),
-    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN", "THREADS_LOGIN"]),
+    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN", "THREADS_LOGIN", "LINKEDIN_LOGIN"]),
     lastRefreshedAt: z.iso.datetime().nullable(),
+    // True once a REQUIRES_RECONNECT/SLIDING_WINDOW account's token is inside
+    // (or past) TOKEN_EXPIRY_BUFFER_MS of expiring — LinkedIn issues no
+    // refresh token at all, so this is the only way back short of the member
+    // redoing the OAuth consent screen (see service/n8n.ts's dispatch-time
+    // check, which throws the same condition — this just surfaces it in the
+    // UI before the user even tries to post).
+    needsReconnect: z.boolean(),
   })
   .openapi("ConnectedAccountSummary");
 
@@ -51,13 +59,19 @@ export const integrationsRoute = new OpenAPIHono()
         accountName: true,
         connectionMethod: true,
         lastRefreshedAt: true,
+        refreshStrategy: true,
+        tokenExpiresAt: true,
       },
     });
 
     return c.json(
-      accounts.map((account) => ({
+      accounts.map(({ refreshStrategy, tokenExpiresAt, ...account }) => ({
         ...account,
         lastRefreshedAt: account.lastRefreshedAt?.toISOString() ?? null,
+        needsReconnect:
+          (refreshStrategy === "REQUIRES_RECONNECT" || refreshStrategy === "SLIDING_WINDOW") &&
+          tokenExpiresAt != null &&
+          tokenExpiresAt.getTime() - TOKEN_EXPIRY_BUFFER_MS < Date.now(),
       })),
       200,
     );

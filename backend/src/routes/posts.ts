@@ -6,8 +6,10 @@ import { getOrCreateDefaultUser } from "../db/users";
 import {
   buildFacebookPayload,
   buildInstagramPayload,
+  buildLinkedInPayload,
   buildThreadsPayload,
   dispatchInstagramToN8n,
+  dispatchLinkedInToN8n,
   dispatchThreadsToN8n,
   dispatchToN8n,
 } from "../service/n8n";
@@ -21,11 +23,12 @@ const SUPPORTED_MEDIA_TYPES: Partial<Record<Platform, readonly string[]>> = {
   FACEBOOK: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
   INSTAGRAM: ["IMAGE", "CAROUSEL", "REELS", "STORIES"],
   THREADS: ["TEXT", "IMAGE", "VIDEO"],
+  LINKEDIN: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
 };
 
 const postLogSchema = z
   .object({
-    platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST"]),
+    platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"]),
     status: z.enum(["SUCCESS", "FAILED"]),
     platformPostId: z.string().nullable(),
     errorMessage: z.string().nullable(),
@@ -162,6 +165,8 @@ export const postsRoute = new OpenAPIHono()
         await dispatchToN8n(buildFacebookPayload(post, connectedAccount));
       } else if (connectedAccount.platform === "INSTAGRAM") {
         await dispatchInstagramToN8n(buildInstagramPayload(post, connectedAccount));
+      } else if (connectedAccount.platform === "LINKEDIN") {
+        await dispatchLinkedInToN8n(buildLinkedInPayload(post, connectedAccount));
       } else {
         await dispatchThreadsToN8n(buildThreadsPayload(post, connectedAccount));
       }
