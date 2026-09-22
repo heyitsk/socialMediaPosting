@@ -256,6 +256,11 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             logs: components["schemas"]["PostLog"][];
+            connectedAccount: {
+                /** @enum {string} */
+                platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+                accountName: string;
+            };
         };
         PostLog: {
             /** @enum {string} */

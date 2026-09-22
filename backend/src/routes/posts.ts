@@ -45,6 +45,10 @@ const postSchema = z
     status: z.enum(["DRAFT", "SCHEDULED", "PROCESSING", "PUBLISHED", "PARTIAL_FAILURE", "FAILED"]),
     createdAt: z.iso.datetime(),
     logs: z.array(postLogSchema),
+    connectedAccount: z.object({
+      platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"]),
+      accountName: z.string(),
+    }),
   })
   .openapi("Post");
 
@@ -100,6 +104,7 @@ function serializePost(post: {
     errorMessage: string | null;
     executedAt: Date;
   }[];
+  connectedAccount: { platform: string; accountName: string };
 }) {
   return {
     ...post,
@@ -113,6 +118,10 @@ function serializePost(post: {
       status: log.status as z.infer<typeof postLogSchema>["status"],
       executedAt: log.executedAt.toISOString(),
     })),
+    connectedAccount: {
+      platform: post.connectedAccount.platform as z.infer<typeof postSchema>["connectedAccount"]["platform"],
+      accountName: post.connectedAccount.accountName,
+    },
   };
 }
 
@@ -121,7 +130,7 @@ export const postsRoute = new OpenAPIHono()
     const user = await getOrCreateDefaultUser();
     const posts = await prisma.post.findMany({
       where: { userId: user.id },
-      include: { logs: true },
+      include: { logs: true, connectedAccount: { select: { platform: true, accountName: true } } },
       orderBy: { createdAt: "desc" },
     });
 
@@ -185,7 +194,7 @@ export const postsRoute = new OpenAPIHono()
 
     const finalPost = await prisma.post.findUniqueOrThrow({
       where: { id: post.id },
-      include: { logs: true },
+      include: { logs: true, connectedAccount: { select: { platform: true, accountName: true } } },
     });
 
     return c.json(serializePost(finalPost), 201);

@@ -39,10 +39,13 @@ export function HistoryPage() {
           return (
             <Card key={post.id} className="max-w-lg">
               <CardHeader className="flex flex-row items-center justify-between gap-2">
-                <CardTitle className="text-base font-medium">{post.caption}</CardTitle>
+                <CardTitle className="text-base font-medium">
+                  {post.connectedAccount.platform} · {post.connectedAccount.accountName}
+                </CardTitle>
                 <Badge variant={STATUS_VARIANT[post.status] ?? "outline"}>{post.status}</Badge>
               </CardHeader>
               <CardContent className="flex flex-col gap-1 text-sm text-muted-foreground">
+                <div>{post.caption}</div>
                 <div>{new Date(post.createdAt).toLocaleString()}</div>
                 {failedLog?.errorMessage && (
                   <div className="text-destructive">{failedLog.errorMessage}</div>
