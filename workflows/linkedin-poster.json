@@ -1,0 +1,1310 @@
+{
+  "name": "linkedin-poster",
+  "nodes": [
+    {
+      "id": "sticky-readme",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        -560
+      ],
+      "parameters": {
+        "width": 700,
+        "height": 500,
+        "content": "## linkedin-poster\nWebhook-triggered, per-platform posting workflow for a LinkedIn personal profile, using the current LinkedIn **Posts API** (`/rest/posts`, replaces the deprecated UGC Posts API). Credentials come from the request payload only — never stored in n8n (see websitePlan.md §5).\n\nImage/video need LinkedIn's own binary upload flow (initialize → PUT bytes → [video only] finalize), same shape as the youtube-poster Merge pattern: the binary download and the upload-session init are independent HTTP calls, so they run in parallel and a **Merge** node recombines them before the binary PUT.\n\nCreated posts don't return an ID in the response body — LinkedIn puts it in the `x-restli-id` response header, so the publish nodes use Full Response mode.\n\n**Required app setup:** \"Share on LinkedIn\" product, `w_member_social` scope on the access token, and the author must be the token's own profile (`urn:li:person:...`).\n\n**After importing:** activate the workflow, then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/linkedin-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test005\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"linkedin\",\n    \"content\": \"Test post #smposting\",\n    \"media_type\": \"TEXT\",\n    \"media_urls\": [],\n    \"token\": {\n      \"access_token\": \"YOUR_LINKEDIN_ACCESS_TOKEN\",\n      \"author_urn\": \"urn:li:person:3SuMVf0Fy2\"\n    },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `TEXT | IMAGE | VIDEO | CAROUSEL`. `TEXT` ignores `media_urls`; `IMAGE`/`VIDEO` need exactly 1 entry; `CAROUSEL` needs 2-20 entries (all direct hosted URLs — this workflow downloads each and re-uploads the bytes to LinkedIn, since unlike Graph API, LinkedIn won't fetch by URL itself).\n\n**Carousel (multi-image) posts:** uses LinkedIn's `content.multiImage` post type, not `content.carousel` — the Posts API restricts `carousel` to sponsored/ads posts only, while `multiImage` is the organic equivalent (2-20 images, same Images API upload flow repeated once per photo via `Split Carousel URLs`, `Merge Carousel Image Upload`, and `Collect Carousel Image URNs`, mirroring the per-part fan-out pattern used for video). No `finalizeUpload` step for images — the upload PUT alone is enough, same as the single-`IMAGE` branch.\n\n**Video upload — multi-part handling:** LinkedIn's `initializeUpload` returns one `uploadInstructions` entry per byte-range part (files over 4,194,304 bytes get split into multiple parts by LinkedIn itself, not by us). `Split Video Into Parts` (Code node) downloads the file once, then fans it out into one item per part — each with its own byte-range slice as binary data via `this.helpers.getBinaryDataBuffer`/`prepareBinaryData` — so the existing `LI Upload Video Binary` PUT node runs once per part automatically (n8n processes one output per input item). `Collect Video Part ETags` gathers each part's `ETag` response header, in order, into the `uploadedPartIds` array `LI Finalize Video Upload` needs. Works uniformly whether LinkedIn returns 1 part or many.\n\n**Known limitations:** video publish uses a blind 30s Wait instead of polling `GET /rest/videos/{id}` until `status: AVAILABLE`, matching the pattern already used for Threads/Instagram — revisit if publishes start failing with \"media not ready\". `LinkedIn-Version` header is hardcoded to `202609`; LinkedIn versions are supported for a minimum of one year, so bump this periodically per LinkedIn's versioning docs. Malformed source video containers (e.g. bad `.webm` metadata) will still come back `PROCESSING_FAILED`/`CORRUPTED_ENTITY` from LinkedIn — re-encoding is a separate, not-yet-built fix."
+      }
+    },
+    {
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        0
+      ],
+      "webhookId": "linkedin-poster",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "linkedin-poster",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "parse-request",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'linkedin',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    author_urn: body.token && body.token.author_urn,\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "route-media-type",
+      "name": "Route by Media Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        180,
+        0
+      ],
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "outputKey": "TEXT",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-text",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "TEXT"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "IMAGE",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-image",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "IMAGE"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "VIDEO",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-video",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "VIDEO"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "CAROUSEL",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-carousel",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "CAROUSEL"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      }
+    },
+    {
+      "id": "li-publish-text",
+      "name": "LI Publish Text",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -360
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/posts",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ author: $('Parse Request').first().json.author_urn, commentary: $('Parse Request').first().json.content, visibility: 'PUBLIC', distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] }, lifecycleState: 'PUBLISHED', isReshareDisabledByAuthor: false }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "li-init-image-upload",
+      "name": "LI Init Image Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        -80
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/images?action=initializeUpload",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "li-download-image",
+      "name": "LI Download Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        80
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Parse Request').first().json.media_urls[0] }}",
+        "authentication": "none",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "li-merge-image",
+      "name": "Merge Image Upload",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "li-upload-image-binary",
+      "name": "LI Upload Image Binary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        0
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.value.uploadUrl }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "={{ $binary.data.mimeType || 'image/jpeg' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      }
+    },
+    {
+      "id": "li-publish-image",
+      "name": "LI Publish Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/posts",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ author: $('Parse Request').first().json.author_urn, commentary: $('Parse Request').first().json.content, visibility: 'PUBLIC', distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] }, content: { media: { id: $('LI Init Image Upload').first().json.value.image } }, lifecycleState: 'PUBLISHED', isReshareDisabledByAuthor: false }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "li-split-carousel-urls",
+      "name": "Split Carousel URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        640
+      ],
+      "parameters": {
+        "jsCode": "// Fan media_urls[] out into one item per photo, so the parallel init/download\n// branches below run once per photo (n8n runs a node once per input item),\n// same pattern as the video multi-part fix. LinkedIn's MultiImage content type\n// needs 2-20 images — not strictly validated here, LinkedIn will reject otherwise.\nconst req = $('Parse Request').first().json;\nconst urls = req.media_urls || [];\nreturn urls.map((url, i) => ({ json: { media_url: url, carousel_index: i } }));"
+      },
+      "notes": "One item per media_urls[] entry. LinkedIn's MultiImage requires 2-20 images."
+    },
+    {
+      "id": "li-init-image-upload-carousel",
+      "name": "LI Init Image Upload (Carousel)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/images?action=initializeUpload",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn } }) }}",
+        "options": {}
+      },
+      "notes": "Runs once per item from Split Carousel URLs — opens one upload session per photo. Doesn't need per-item data, just needs to run N times."
+    },
+    {
+      "id": "li-download-image-carousel",
+      "name": "LI Download Image (Carousel)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        720
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.media_url }}",
+        "authentication": "none",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "li-merge-image-carousel",
+      "name": "Merge Carousel Image Upload",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        900,
+        640
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "li-upload-image-binary-carousel",
+      "name": "LI Upload Image Binary (Carousel)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        640
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.value.uploadUrl }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "={{ $binary.data.mimeType || 'image/jpeg' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "notes": "Runs once per photo item, same fan-out as the video part upload."
+    },
+    {
+      "id": "li-collect-carousel-images",
+      "name": "Collect Carousel Image URNs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        640
+      ],
+      "parameters": {
+        "jsCode": "// One item per photo went through LI Init Image Upload (Carousel), in\n// media_urls[] order — pull each item's image urn back out in that same\n// order to build the multiImage.images array finalize/publish needs.\nconst initItems = $('LI Init Image Upload (Carousel)').all();\nconst images = initItems.map((item) => ({ id: item.json.value.image }));\nreturn [{ json: { images } }];"
+      }
+    },
+    {
+      "id": "li-publish-carousel",
+      "name": "LI Publish Carousel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1620,
+        640
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/posts",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ author: $('Parse Request').first().json.author_urn, commentary: $('Parse Request').first().json.content, visibility: 'PUBLIC', distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] }, content: { multiImage: { images: $json.images } }, lifecycleState: 'PUBLISHED', isReshareDisabledByAuthor: false }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "notes": "content.multiImage is LinkedIn's organic-only multi-photo post type (2-20 images) — distinct from content.carousel, which the Posts API restricts to sponsored/ads posts only."
+    },
+    {
+      "id": "li-probe-video-size",
+      "name": "LI Probe Video Size",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        320
+      ],
+      "parameters": {
+        "method": "HEAD",
+        "url": "={{ $('Parse Request').first().json.media_urls[0] }}",
+        "authentication": "none",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "notes": "HEAD request just to read Content-Length — LinkedIn's videos initializeUpload requires fileSizeBytes upfront, unlike YouTube's resumable upload."
+    },
+    {
+      "id": "li-init-video-upload",
+      "name": "LI Init Video Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        320
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/videos?action=initializeUpload",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn, fileSizeBytes: parseInt($json.headers['content-length'] || $json.headers['Content-Length'] || '0', 10), uploadCaptions: false, uploadThumbnail: false } }) }}",
+        "options": {}
+      },
+      "notes": "Returns 1+ uploadInstructions entries — 1 for files under LinkedIn's 4,194,304-byte single-part limit, more (byte-range parts) for larger files. Split Video Into Parts handles both cases uniformly."
+    },
+    {
+      "id": "li-download-video",
+      "name": "LI Download Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        480
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Parse Request').first().json.media_urls[0] }}",
+        "authentication": "none",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "li-merge-video",
+      "name": "Merge Video Upload",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        900,
+        400
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "li-split-video-parts",
+      "name": "Split Video Into Parts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// Merge Video Upload gives us one item: json = LI Init Video Upload's response\n// (value.uploadInstructions[]), binary.data = the full downloaded video file.\n// LinkedIn splits uploads over 4,194,304 bytes into multiple byte-range parts —\n// fan this out into one item per part, each carrying its own byte-range slice\n// of the video as binary data, so the next HTTP Request node PUTs each part\n// to its own uploadUrl (n8n runs a node once per input item automatically).\nconst item = $input.first();\nconst instructions = item.json.value.uploadInstructions;\nconst buffer = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst mimeType = (item.binary && item.binary.data && item.binary.data.mimeType) || 'video/mp4';\n\nconst output = [];\nfor (let i = 0; i < instructions.length; i++) {\n  const part = instructions[i];\n  const chunk = buffer.subarray(part.firstByte, part.lastByte + 1);\n  const binaryData = await this.helpers.prepareBinaryData(chunk, `part-${i}.bin`, mimeType);\n  output.push({\n    json: {\n      partIndex: i,\n      uploadUrl: part.uploadUrl,\n      firstByte: part.firstByte,\n      lastByte: part.lastByte\n    },\n    binary: { data: binaryData }\n  });\n}\nreturn output;"
+      },
+      "notes": "Fans out into 1 item per uploadInstructions entry (usually 1, but LinkedIn splits files over 4 MiB into multiple byte-range parts). Uses this.helpers.getBinaryDataBuffer/prepareBinaryData per n8n's Code node cookbook."
+    },
+    {
+      "id": "li-upload-video-binary",
+      "name": "LI Upload Video Binary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        400
+      ],
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $json.uploadUrl }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "={{ $binary.data.mimeType || 'video/mp4' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "notes": "Runs once per part item from Split Video Into Parts (n8n processes one output per input item). Full Response mode is required so each part's ETag response header can be collected for uploadedPartIds."
+    },
+    {
+      "id": "li-collect-video-etags",
+      "name": "Collect Video Part ETags",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// One item per uploaded part, in the same order Split Video Into Parts emitted\n// them in — collapse into a single ordered uploadedPartIds array for finalizeUpload.\nconst items = $input.all();\nconst uploadedPartIds = items.map((item) => {\n  const headers = item.json.headers || {};\n  return headers['etag'] || headers['Etag'] || headers['ETag'];\n});\nreturn [{ json: { uploadedPartIds } }];"
+      }
+    },
+    {
+      "id": "li-finalize-video-upload",
+      "name": "LI Finalize Video Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1840,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/videos?action=finalizeUpload",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ finalizeUploadRequest: { video: $('LI Init Video Upload').first().json.value.video, uploadToken: '', uploadedPartIds: $('Collect Video Part ETags').first().json.uploadedPartIds } }) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "li-wait-video",
+      "name": "Wait 30s (Video Processing)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2080,
+        400
+      ],
+      "parameters": {
+        "amount": 30,
+        "resume": "timeInterval",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "li-publish-video",
+      "name": "LI Publish Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2320,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/rest/posts",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "LinkedIn-Version",
+              "value": "202609"
+            },
+            {
+              "name": "X-Restli-Protocol-Version",
+              "value": "2.0.0"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ author: $('Parse Request').first().json.author_urn, commentary: $('Parse Request').first().json.content, visibility: 'PUBLIC', distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] }, content: { media: { id: $('LI Init Video Upload').first().json.value.video } }, lifecycleState: 'PUBLISHED', isReshareDisabledByAuthor: false }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "build-error-unsupported",
+      "name": "Build Error Result (Unsupported Type)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        920
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: `Unsupported media_type: ${req.media_type}`,\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "build-success-result",
+      "name": "Build Success Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2100,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const req = $('Parse Request').first().json;\nconst headers = $json.headers || {};\nconst postId = headers['x-restli-id'] || headers['X-RestLi-Id'] || headers['x-linkedin-id'] || null;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'SUCCESS',\n    platform_post_id: postId,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-callback",
+      "name": "Send Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2340,
+        0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-callback-secret",
+              "value": "={{ $env.CALLBACK_SECRET }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        900
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "build-error-from-trigger",
+      "name": "Build Error Result (From Trigger)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -40,
+        900
+      ],
+      "parameters": {
+        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'linkedin',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+      }
+    },
+    {
+      "id": "send-error-callback",
+      "name": "Send Error Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        180,
+        900
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "authentication": "none",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-callback-secret",
+              "value": "={{ $env.CALLBACK_SECRET }}"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Request": {
+      "main": [
+        [
+          {
+            "node": "Route by Media Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Media Type": {
+      "main": [
+        [
+          {
+            "node": "LI Publish Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LI Init Image Upload",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LI Download Image",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LI Probe Video Size",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LI Download Video",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split Carousel URLs",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Unsupported Type)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Carousel URLs": {
+      "main": [
+        [
+          {
+            "node": "LI Init Image Upload (Carousel)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "LI Download Image (Carousel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Init Image Upload (Carousel)": {
+      "main": [
+        [
+          {
+            "node": "Merge Carousel Image Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Download Image (Carousel)": {
+      "main": [
+        [
+          {
+            "node": "Merge Carousel Image Upload",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Carousel Image Upload": {
+      "main": [
+        [
+          {
+            "node": "LI Upload Image Binary (Carousel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Upload Image Binary (Carousel)": {
+      "main": [
+        [
+          {
+            "node": "Collect Carousel Image URNs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Carousel Image URNs": {
+      "main": [
+        [
+          {
+            "node": "LI Publish Carousel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Publish Carousel": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Publish Text": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Init Image Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge Image Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Download Image": {
+      "main": [
+        [
+          {
+            "node": "Merge Image Upload",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Image Upload": {
+      "main": [
+        [
+          {
+            "node": "LI Upload Image Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Upload Image Binary": {
+      "main": [
+        [
+          {
+            "node": "LI Publish Image",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Publish Image": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Probe Video Size": {
+      "main": [
+        [
+          {
+            "node": "LI Init Video Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Init Video Upload": {
+      "main": [
+        [
+          {
+            "node": "Merge Video Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Download Video": {
+      "main": [
+        [
+          {
+            "node": "Merge Video Upload",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Video Upload": {
+      "main": [
+        [
+          {
+            "node": "Split Video Into Parts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Video Into Parts": {
+      "main": [
+        [
+          {
+            "node": "LI Upload Video Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Upload Video Binary": {
+      "main": [
+        [
+          {
+            "node": "Collect Video Part ETags",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Video Part ETags": {
+      "main": [
+        [
+          {
+            "node": "LI Finalize Video Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Finalize Video Upload": {
+      "main": [
+        [
+          {
+            "node": "Wait 30s (Video Processing)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 30s (Video Processing)": {
+      "main": [
+        [
+          {
+            "node": "LI Publish Video",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LI Publish Video": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (Unsupported Type)": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Success Result": {
+      "main": [
+        [
+          {
+            "node": "Send Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Error Result (From Trigger)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (From Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Send Error Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": "smposting-linkedin-poster-v1"
+  }
+}
