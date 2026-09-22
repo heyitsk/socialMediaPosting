@@ -13,6 +13,9 @@ const CONNECT_ERROR_MESSAGES: Record<string, string> = {
   instagram_connect_denied: "Instagram connection was cancelled.",
   instagram_connect_invalid_state: "Instagram connection expired — please try again.",
   instagram_connect_failed: "Failed to connect Instagram account.",
+  threads_connect_denied: "Threads connection was cancelled.",
+  threads_connect_invalid_state: "Threads connection expired — please try again.",
+  threads_connect_failed: "Failed to connect Threads account.",
 };
 
 function useConnectStatusToast() {
@@ -39,6 +42,8 @@ function useConnectStatusToast() {
       } else {
         toast.success("Instagram account connected.");
       }
+    } else if (connected === "threads") {
+      toast.success("Threads account connected.");
     } else if (error) {
       toast.error(CONNECT_ERROR_MESSAGES[error] ?? "Failed to connect account.");
     }
@@ -164,6 +169,15 @@ function ConnectedAccountsCard() {
           }}
         >
           Connect Instagram
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            window.location.href = `${API_URL}/api/auth/threads`;
+          }}
+        >
+          Connect Threads
         </Button>
       </CardContent>
     </Card>

@@ -17,7 +17,7 @@ const N8N_MEDIA_TYPE: Record<MediaType, string> = {
 // Facebook-Page-issued IG tokens only work against graph.facebook.com, while
 // Instagram Login tokens only work against graph.instagram.com (see
 // lib/instagram.ts).
-const GRAPH_HOST: Record<ConnectionMethod, string> = {
+const GRAPH_HOST: Record<Extract<ConnectionMethod, "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN">, string> = {
   FACEBOOK_PAGE: "https://graph.facebook.com",
   INSTAGRAM_LOGIN: "https://graph.instagram.com",
 };
@@ -98,8 +98,51 @@ export function buildInstagramPayload(
     token: {
       ig_business_id: connectedAccount.platformAccountId,
       access_token: accessToken,
-      graph_host: GRAPH_HOST[connectedAccount.connectionMethod],
+      // connectionMethod is only ever FACEBOOK_PAGE/INSTAGRAM_LOGIN for an
+      // Instagram-platform account — THREADS_LOGIN never reaches here.
+      graph_host: GRAPH_HOST[connectedAccount.connectionMethod as "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN"],
     },
+    callback_url: `${env.PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`,
+  };
+}
+
+export interface ThreadsDispatchPayload {
+  post_id: string;
+  user_id: string;
+  platform: "threads";
+  content: string;
+  media_type: string;
+  media_urls: string[];
+  token: { access_token: string };
+  callback_url: string;
+}
+
+// threads-poster.json posts to the caller's own /me/threads — no page/business
+// id to resolve, so this payload is simpler than Facebook's/Instagram's.
+// media_type values (TEXT/IMAGE/VIDEO) already match the Prisma MediaType
+// enum verbatim, same as Instagram — no N8N_MEDIA_TYPE lookup needed.
+export function buildThreadsPayload(
+  post: Post,
+  connectedAccount: ConnectedAccount,
+): ThreadsDispatchPayload {
+  if (
+    connectedAccount.refreshStrategy === "SLIDING_WINDOW" &&
+    connectedAccount.tokenExpiresAt &&
+    connectedAccount.tokenExpiresAt.getTime() - TOKEN_EXPIRY_BUFFER_MS < Date.now()
+  ) {
+    throw new Error("Threads token expired or expiring soon — reconnect the account");
+  }
+
+  const accessToken = decrypt(connectedAccount.encryptedAccessToken, connectedAccount.keyVersion);
+
+  return {
+    post_id: post.id,
+    user_id: post.userId,
+    platform: "threads",
+    content: post.caption,
+    media_type: post.mediaType,
+    media_urls: post.mediaUrls as string[],
+    token: { access_token: accessToken },
     callback_url: `${env.PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`,
   };
 }
@@ -122,4 +165,8 @@ export async function dispatchToN8n(payload: FacebookDispatchPayload): Promise<v
 
 export async function dispatchInstagramToN8n(payload: InstagramDispatchPayload): Promise<void> {
   await postToN8n("instagram-poster", payload);
+}
+
+export async function dispatchThreadsToN8n(payload: ThreadsDispatchPayload): Promise<void> {
+  await postToN8n("threads-poster", payload);
 }

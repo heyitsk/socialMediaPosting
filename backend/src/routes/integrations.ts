@@ -8,7 +8,7 @@ const connectedAccountSchema = z
     id: z.string(),
     platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST"]),
     accountName: z.string(),
-    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN"]),
+    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN", "THREADS_LOGIN"]),
     lastRefreshedAt: z.iso.datetime().nullable(),
   })
   .openapi("ConnectedAccountSummary");

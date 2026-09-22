@@ -630,6 +630,60 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 
 ---
 
+### Session 22 — 2026-09-21
+
+**What we did:**
+- **Built the Threads Login OAuth flow**, the third distinct Meta OAuth product wired to the backend (after Facebook Login and Instagram Login) — `lib/threads.ts` (`buildAuthUrl`, `exchangeCodeForToken`, `exchangeForLongLivedToken`, `refreshLongLivedToken`, `fetchProfile`) and `routes/auth/threads.ts` (`/api/auth/threads` + `/callback`), mirroring `lib/instagram.ts`/`routes/auth/instagram.ts`'s shape but hitting Threads' own endpoints (`threads.net/oauth/authorize`, `graph.threads.net/oauth/access_token`, `graph.threads.net/v1.0/me`) on the same Meta App as Facebook (own `THREADS_APP_ID`/`THREADS_APP_SECRET` credential pair, own "Threads API" product, own consent screen). Unlike Facebook/Instagram, a Threads token has no separate Page/Business ID to resolve — it's tied directly to the caller's own `/me/threads`.
+- Added `THREADS_LOGIN` to the `ConnectionMethod` enum (migration `20260921043412_add_threads_login`) so Threads gets its own connection-method identity in `ConnectedAccount`, consistent with Instagram's naming, even though Threads only has one OAuth path today.
+- Added Threads env vars (`THREADS_APP_ID`/`THREADS_APP_SECRET`) to `lib/env.ts`/`.env`/`.env.example`, mounted the route in `index.ts`, and added a "Connect Threads" button + connect/error toasts to `dashboard.tsx`.
+- Extended `service/n8n.ts` with `buildThreadsPayload`/`dispatchThreadsToN8n` → `threads-poster.json`. Threads' payload is the simplest of the three platforms: `token: { access_token }` only, no id/host field, since every call targets the caller's own account. `media_type` is sent as the raw Prisma enum value (`TEXT`/`IMAGE`/`VIDEO`), matching `threads-poster.json`'s Switch node verbatim — no translation table needed, same convention as Instagram. Reused the same `TOKEN_EXPIRY_BUFFER_MS` fail-fast guard pattern as Instagram Login (24h-before-expiry check on `SLIDING_WINDOW` tokens), since there's no proactive refresh worker for either yet.
+- Updated `posts.ts`'s `SUPPORTED_MEDIA_TYPES` to add `THREADS: ["TEXT", "IMAGE", "VIDEO"]` and extended the platform dispatch branch (was a two-way `if`/`else` for Facebook/Instagram, now a three-way branch including Threads) and `integrations.ts`'s `connectionMethod` response enum to include `THREADS_LOGIN`.
+- Updated `workflows/threads-poster.json`'s callback nodes (`Send Callback`, `Send Error Callback`) to send the `x-callback-secret` header, matching the pattern already used in `facebook-poster.json`/`instagram-poster.json` — previously Threads' workflow was the only one of the three left unauthenticated on its callback.
+- Ran `prisma migrate deploy` + `prisma generate` for the new enum value; `bunx tsc --noEmit` clean on both backend and frontend. Left the actual `THREADS_APP_ID`/`THREADS_APP_SECRET` values blank in `.env` for the user to fill in with their own Meta App credentials (already added as a Threads tester on that app) — did not restart any running dev server, per instruction, since testing was left to the user.
+
+**Decisions made:**
+- `THREADS_LOGIN` gets its own `ConnectionMethod` enum value rather than defaulting to `FACEBOOK_PAGE` — keeps the column's meaning "which OAuth product connected this row" consistent across every platform, not just Instagram-specific, even though Threads has no second method to disambiguate from today.
+- `GRAPH_HOST`'s type was narrowed from `Record<ConnectionMethod, string>` to `Record<Extract<ConnectionMethod, "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN">, string>` rather than adding a meaningless `THREADS_LOGIN` entry to it — that lookup is Instagram-specific (host selection), and Threads' payload never needs a host at all since `threads-poster.json` hardcodes `graph.threads.net`.
+- Deferred a proactive Threads token-refresh worker again (same call as Instagram Login, Session 20) — `refreshLongLivedToken()` is exported and ready, but wiring a BullMQ scheduled job for it is left for when a second `SLIDING_WINDOW` platform (Pinterest) makes a shared worker worth building once instead of twice.
+
+**Files modified this session:**
+- `backend/src/lib/threads.ts` (new), `backend/src/routes/auth/threads.ts` (new)
+- `backend/src/lib/env.ts`, `backend/.env`, `backend/.env.example` — `THREADS_APP_ID`/`THREADS_APP_SECRET`
+- `backend/prisma/schema.prisma`, migration `20260921043412_add_threads_login` — `ConnectionMethod.THREADS_LOGIN`
+- `backend/src/index.ts` — mounts `/api/auth/threads`
+- `backend/src/service/n8n.ts` — `buildThreadsPayload`, `dispatchThreadsToN8n`, narrowed `GRAPH_HOST`'s type
+- `backend/src/routes/posts.ts` — `THREADS` added to `SUPPORTED_MEDIA_TYPES`, three-way platform dispatch branch
+- `backend/src/routes/integrations.ts` — `connectionMethod` response enum includes `THREADS_LOGIN`
+- `workflows/threads-poster.json` — `x-callback-secret` header added to both callback nodes
+- `frontend/src/routes/dashboard.tsx` — "Connect Threads" button, connect/error toasts
+- `websitePlan.md` — §2.3 rewritten for the real implementation; §5 Threads payload note added; §7 `connection_method` enum updated; roadmap/footer updated
+- `history.md` — this entry
+
+### Session 23 — 2026-09-22
+
+**What we did:**
+- No code changes this session — entirely spent diagnosing why the Meta App Dashboard refuses to save a **Valid OAuth Redirect URI** on the "Access the Threads API" use case (`https://developers.facebook.com/apps/1575982267231848/...`), which is blocking `THREADS_APP_ID`/`THREADS_APP_SECRET` from ever being usable in `.env` — Session 22's backend/OAuth code has been ready and untested against a real Threads account this whole time because of this.
+- Ruled out, in order: `ERR_NGROK_8012` (backend was down; fixed — tunnel now returns a real `302` via `curl`), stale/cached form state (hard refresh, then a full incognito window — same failure), incomplete **Basic Settings** (App Domains, Privacy Policy URL, Terms of Service URL, App Icon, Category, Threads App ID/Secret — all confirmed filled in), a duplicate/legacy "Threads Login" product conflicting with the new "Access the Threads API" use case (dashboard shows only one Threads use case), a missing "App Type" setting (field no longer exists in the current dashboard UI), insufficient permissions (account confirmed **Administrator** in App Roles), an app-wide restriction (**Alert Inbox** empty, **Required Actions** clear), a Firefox/Gecko-specific bug (reproduced identically in genuine desktop Chrome, after first ruling out a false-positive mobile-emulation test), and a dead legacy product route (`/apps/.../threads-login/settings/` redirects straight back to the dashboard — that page doesn't exist for this app).
+- **Found the actual mechanism via the browser Network tab**: clicking Save POSTs to `https://developers.facebook.com/apps/1575982267231848/async/threads-login/setting/save/`, which returns a flat **HTTP 404 "Page Not Found - Meta for Developers"** — i.e. the generic "Form can't be saved, please verify all information" toast is masking a 404 from Meta's own internal save handler, not a real field-validation error. The request is well-formed (valid CSRF/DTSG token, correct cookies, correct payload) and reaches Meta's edge fine (response headers show legitimate multi-hop internal proxy routing, `x-fb-debug` trace IDs, etc.) — it just 404s once it gets there, consistently, regardless of browser/session/cache state.
+- The mismatch between the page's own self-identification (loaded via the newer "Use Cases" architecture — `product_route=threads-api` in the referrer) and the save request it fires (still hitting the legacy **`threads-login`** product's async endpoint) points to this specific app instance being stuck in a broken/half-migrated internal state on Meta's side, not anything fixable from settings the user controls.
+- Tried stripping the `?business_id=...` query param (viewing the use case outside Business Manager context) as a next diagnostic step — not yet completed/confirmed by end of session.
+
+**Where we're stuck:**
+- The Threads redirect URI **cannot currently be saved** through the Meta App Dashboard for this app (`test-n8n`, App ID `1575982267231848`), so `/api/auth/threads` cannot be tested end-to-end yet — `THREADS_APP_ID`/`THREADS_APP_SECRET` in `.env` remain placeholders.
+- **Not yet tried** (next session should start here, in this order — cheapest/most diagnostic first):
+  1. Retry with the `business_id` query param stripped from the URL (isolate whether Business Manager-scoped context is what's breaking the save).
+  2. VPN to a different region (US/EU) and retry — the proxy-hop pattern in the response headers is consistent with a regional rollout gap for this specific save action.
+  3. Add a second Facebook account as Admin under App Roles and retry the save logged in as that account — isolates an account/session-specific gatekeeper flag from a true per-app bug.
+  4. If none of the above work: delete and recreate the Meta App from scratch. **Caveat**: this same app (`META_APP_ID=1575982267231848`) is also the one used for the already-working Facebook and Instagram integrations, so recreating it means redoing Facebook Login for Business + Instagram API setup too, not just Threads — deferred for exactly this reason.
+- Decision made this session: **defer Threads dashboard troubleshooting** and move on to scoping the LinkedIn workflow instead, rather than burning further time on a Meta-side platform bug outside our control.
+
+**Files modified this session:**
+- None (diagnostic-only session).
+- `history.md` — this entry
+- `websitePlan.md` — Threads entry in Platform Credential Reference and changelog updated to reflect the dashboard blocker
+
+---
+
 ## Platform Credential Reference
 
 > Fill this in as you complete setup.md steps. Keep actual secrets in a password manager — only record IDs here.
@@ -638,7 +692,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 |----------|-----------------|-------------------|-------|
 | Facebook | SMPosting App | *Configured* | `facebook-poster.json` fully tested — `TEXT`, `PHOTO`, `VIDEO`, and `MULTI_PHOTO` (carousel) all confirmed working end-to-end (Sep 10) once the code-368 block cleared. **Access token pasted in chat Sep 8 — treat as compromised, rotate before reuse.** V2 SaaS backend's real dispatch loop (OAuth connect → encrypted token storage → Composer submit → n8n → Graph API → callback → `PUBLISHED`) confirmed working end-to-end Sep 16 — first platform wired to the actual backend, not just the standalone n8n workflow. |
 | Instagram | SMPosting App | *Configured* | Instagram Business Account ID retrieved; `instagram-poster.json` tested successfully for photo/story/reel (Sep 7). V2 SaaS backend now supports **both** connection methods end-to-end (Sep 17-21): Facebook Login (rides on the Facebook OAuth dialog, IG token scoped to `graph.facebook.com`) and standalone Instagram Login (`routes/auth/instagram.ts`, own OAuth product, IG token scoped to `graph.instagram.com`) — tracked as separate `ConnectedAccount` rows via the `connectionMethod` column so the two token scopes never clobber each other. |
-| Threads | SMPosting App | *Configured* | Long-lived token generated via curl; `threads-poster.json` tested successfully for TEXT (Sep 7) |
+| Threads | SMPosting App | *Configured* | Long-lived token generated via curl; `threads-poster.json` tested successfully for TEXT (Sep 7). V2 SaaS backend's Threads Login OAuth flow (`routes/auth/threads.ts`) implemented Sep 21 — own `THREADS_APP_ID`/`SECRET` on the same Meta App as Facebook, connecting account added as a Threads tester. **Blocked since Sep 22**: the Meta App Dashboard's "Access the Threads API" use case cannot save a Valid OAuth Redirect URI — its save action 404s on Meta's own internal endpoint (`/async/threads-login/setting/save/`), reproduced across incognito/Chrome/Firefox with Basic Settings fully complete; looks like this specific app instance is stuck in a broken migration state on Meta's side. See `history.md` Session 23 for the full diagnostic trail and untried next steps. `THREADS_APP_ID`/`SECRET` remain placeholders in `.env` until this clears — deferred in favor of LinkedIn workflow scoping. |
 | Reddit | — | — | *Deferred* (Pending API Access Request) |
 | YouTube | SMPosting V1 | *Configured* | Upload-audit gate has **lifted** — `youtube-poster.json` tested successfully end-to-end for standard video and Shorts (Sep 8), after fixing a missing `Validate Payload → Initiate Resumable Upload` canvas connection |
 | Pinterest | SMPosting V1 | *Configured* | Sandbox Developer Access Token generated |
@@ -695,6 +749,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | Instagram Graph host selection (V2) | Resolved once, backend-side, at payload-build time — `GRAPH_HOST[connectedAccount.connectionMethod]` in `service/n8n.ts` — and shipped to n8n as `token.graph_host` data. n8n's HTTP nodes just string-concatenate whatever host they're given; no host-selection logic lives in the workflow itself. |
 | Instagram token expiry guard (V2) | `buildInstagramPayload` throws before dispatch if a `SLIDING_WINDOW` (Instagram-Login) token is within 24h of `tokenExpiresAt` or already past it — fails fast with "reconnect the account" instead of sending a doomed request to n8n, since there's no proactive refresh worker for this token type yet. |
 | `ConnectedAccount` disconnect semantics (V2) | Soft-delete via `disconnectedAt` (nullable timestamp), not a hard `DELETE` — `Post.connectedAccountId` is `RESTRICT`, so a hard delete fails once the account has post history. Every read path that lists/resolves an account for use filters `disconnectedAt: null`; OAuth callbacks clear it on reconnect (same upsert key as the dual-connection-method fix above), reviving the row and its history instead of erroring or duplicating. |
+| Threads OAuth (V2) | Own `THREADS_APP_ID`/`THREADS_APP_SECRET` on the same Meta App as Facebook (own "Threads API" product, own `threads.net` consent screen) — same relationship Instagram Login has to Facebook. `ConnectionMethod` gained `THREADS_LOGIN` purely for naming consistency, even though Threads has only one connection path. Dispatch payload is `{ access_token }` only — no page/business id, since Threads always posts to the caller's own `/me/threads`. |
 
 ---
 

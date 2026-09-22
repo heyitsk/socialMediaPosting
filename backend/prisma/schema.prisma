@@ -38,6 +38,7 @@ enum MediaType {
 enum ConnectionMethod {
   FACEBOOK_PAGE
   INSTAGRAM_LOGIN
+  THREADS_LOGIN
 }
 
 enum PostStatus {

@@ -6,7 +6,9 @@ import { getOrCreateDefaultUser } from "../db/users";
 import {
   buildFacebookPayload,
   buildInstagramPayload,
+  buildThreadsPayload,
   dispatchInstagramToN8n,
+  dispatchThreadsToN8n,
   dispatchToN8n,
 } from "../service/n8n";
 
@@ -18,6 +20,7 @@ const mediaTypeSchema = z.enum(["TEXT", "IMAGE", "VIDEO", "CAROUSEL", "REELS", "
 const SUPPORTED_MEDIA_TYPES: Partial<Record<Platform, readonly string[]>> = {
   FACEBOOK: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
   INSTAGRAM: ["IMAGE", "CAROUSEL", "REELS", "STORIES"],
+  THREADS: ["TEXT", "IMAGE", "VIDEO"],
 };
 
 const postLogSchema = z
@@ -157,8 +160,10 @@ export const postsRoute = new OpenAPIHono()
     try {
       if (connectedAccount.platform === "FACEBOOK") {
         await dispatchToN8n(buildFacebookPayload(post, connectedAccount));
-      } else {
+      } else if (connectedAccount.platform === "INSTAGRAM") {
         await dispatchInstagramToN8n(buildInstagramPayload(post, connectedAccount));
+      } else {
+        await dispatchThreadsToN8n(buildThreadsPayload(post, connectedAccount));
       }
     } catch (err) {
       console.error("n8n dispatch failed:", err);

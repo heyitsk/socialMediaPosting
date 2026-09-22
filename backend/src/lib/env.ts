@@ -19,6 +19,12 @@ const envSchema = z.object({
   INSTAGRAM_APP_ID: z.string().min(1),
   INSTAGRAM_APP_SECRET: z.string().min(1),
 
+  // Issued by the "Threads API" product on the same Meta App as
+  // META_APP_ID/SECRET — separate credentials, separate OAuth dialog
+  // (threads.net, not facebook.com). See lib/threads.ts.
+  THREADS_APP_ID: z.string().min(1),
+  THREADS_APP_SECRET: z.string().min(1),
+
   DEFAULT_USER_EMAIL: z.string().email(),
   DEFAULT_USER_NAME: z.string().min(1),
 
