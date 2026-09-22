@@ -20,7 +20,7 @@ type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
 
 const MIN_CAROUSEL_PHOTOS = 2;
 
-type PostablePlatform = "FACEBOOK" | "INSTAGRAM" | "LINKEDIN";
+type PostablePlatform = "FACEBOOK" | "INSTAGRAM" | "THREADS" | "LINKEDIN";
 
 // Mirrors backend SUPPORTED_MEDIA_TYPES in routes/posts.ts — what each
 // platform's n8n workflow actually implements.
@@ -37,6 +37,12 @@ const MEDIA_TYPES_BY_PLATFORM: Record<PostablePlatform, { value: MediaType; labe
     { value: "REELS", label: "Reel (video)" },
     { value: "STORIES", label: "Story (image only, for now)" },
   ],
+  THREADS: [
+    { value: "TEXT", label: "Text only" },
+    { value: "IMAGE", label: "Image" },
+    { value: "VIDEO", label: "Video" },
+    { value: "CAROUSEL", label: "Carousel (multiple photos)" },
+  ],
   LINKEDIN: [
     { value: "TEXT", label: "Text only" },
     { value: "IMAGE", label: "Image" },
@@ -48,6 +54,7 @@ const MEDIA_TYPES_BY_PLATFORM: Record<PostablePlatform, { value: MediaType; labe
 const PLATFORM_LABELS: Record<PostablePlatform, string> = {
   FACEBOOK: "Facebook",
   INSTAGRAM: "Instagram",
+  THREADS: "Threads",
   LINKEDIN: "LinkedIn",
 };
 
@@ -70,6 +77,7 @@ export function ComposerPage() {
       (account) =>
         account.platform === "FACEBOOK" ||
         account.platform === "INSTAGRAM" ||
+        account.platform === "THREADS" ||
         account.platform === "LINKEDIN",
     ) ?? [];
 
@@ -148,7 +156,8 @@ export function ComposerPage() {
           )}
           {!isPending && !isError && postableAccounts.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              Connect a Facebook, Instagram, or LinkedIn account from the Dashboard before posting.
+              Connect a Facebook, Instagram, Threads, or LinkedIn account from the Dashboard before
+              posting.
             </p>
           )}
 

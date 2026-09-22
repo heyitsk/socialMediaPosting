@@ -22,7 +22,7 @@ const mediaTypeSchema = z.enum(["TEXT", "IMAGE", "VIDEO", "CAROUSEL", "REELS", "
 const SUPPORTED_MEDIA_TYPES: Partial<Record<Platform, readonly string[]>> = {
   FACEBOOK: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
   INSTAGRAM: ["IMAGE", "CAROUSEL", "REELS", "STORIES"],
-  THREADS: ["TEXT", "IMAGE", "VIDEO"],
+  THREADS: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
   LINKEDIN: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
 };
 

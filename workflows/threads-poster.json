@@ -13,7 +13,7 @@
       "parameters": {
         "width": 660,
         "height": 440,
-        "content": "## threads-poster\nWebhook-triggered, per-platform posting workflow for Threads. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\nUnlike Facebook/Instagram, Threads posting is tied directly to the authenticated user's own token (`/me/threads`) \u2014 there's no separate Page/Business ID to pass.\n\n**After importing:** activate the workflow, then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/threads-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test003\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"threads\",\n    \"content\": \"Test thread #smposting\",\n    \"media_type\": \"TEXT\",\n    \"media_urls\": [],\n    \"token\": { \"access_token\": \"YOUR_THREADS_LONG_LIVED_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `TEXT | IMAGE | VIDEO`. `TEXT` ignores `media_urls`; `IMAGE`/`VIDEO` need exactly 1 entry.\n\n**Known limitation:** publish uses a blind Wait (5s / 10s / 60s) instead of polling the container's `status` field until `FINISHED` \u2014 matches the pattern already used for Instagram/the old Threads draft, but Meta's docs recommend polling, especially for video. Revisit if video publishes start failing with \"media not ready\" errors."
+        "content": "## threads-poster\nWebhook-triggered, per-platform posting workflow for Threads. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\nUnlike Facebook/Instagram, Threads posting is tied directly to the authenticated user's own token (`/me/threads`) \u2014 there's no separate Page/Business ID to pass.\n\n**After importing:** activate the workflow, then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/threads-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test003\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"threads\",\n    \"content\": \"Test thread #smposting\",\n    \"media_type\": \"TEXT\",\n    \"media_urls\": [],\n    \"token\": { \"access_token\": \"YOUR_THREADS_LONG_LIVED_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `TEXT | IMAGE | VIDEO | CAROUSEL`. `TEXT` ignores `media_urls`; `IMAGE`/`VIDEO` need exactly 1 entry; `CAROUSEL` needs 2+ image URLs (image-only for now, matching Facebook/Instagram carousels in this codebase \u2014 Threads' API itself also allows video children, not implemented here).\n\n**Known limitation:** publish uses a blind Wait (5s / 10s / 10s / 60s) instead of polling the container's `status` field until `FINISHED` \u2014 matches the pattern already used for Instagram/the old Threads draft, but Meta's docs recommend polling, especially for video. This is a real gap, not just theoretical: a 1GB video on a slow connection can easily still be `IN_PROGRESS` after 60s, and `threads_publish` will fail with a \"media not ready\" error rather than the wait just being wasted time. Revisit with an actual poll-until-`FINISHED` loop (see status-check pattern below) if video publishes start failing."
       }
     },
     {
@@ -122,6 +122,30 @@
                       "singleValue": true
                     },
                     "rightValue": "VIDEO"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                }
+              }
+            },
+            {
+              "outputKey": "CAROUSEL",
+              "renameOutput": true,
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "mt-carousel",
+                    "leftValue": "={{ $json.media_type }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "singleValue": true
+                    },
+                    "rightValue": "CAROUSEL"
                   }
                 ],
                 "options": {
@@ -379,13 +403,167 @@
       }
     },
     {
+      "id": "th-split-media",
+      "name": "Split Media URLs",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        420,
+        560
+      ],
+      "parameters": {
+        "fieldToSplitOut": "media_urls",
+        "options": {}
+      }
+    },
+    {
+      "id": "th-create-child",
+      "name": "Create Child Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "media_type",
+              "value": "IMAGE"
+            },
+            {
+              "name": "image_url",
+              "value": "={{ $json.media_urls }}"
+            },
+            {
+              "name": "is_carousel_item",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "th-aggregate-children",
+      "name": "Aggregate Child IDs",
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        900,
+        560
+      ],
+      "parameters": {
+        "aggregate": "aggregateIndividualFields",
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {
+              "fieldToAggregate": "id",
+              "renameField": false
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "th-create-carousel",
+      "name": "Create Carousel Container",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "media_type",
+              "value": "CAROUSEL"
+            },
+            {
+              "name": "children",
+              "value": "={{ $json.id.join(',') }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $('Parse Request').first().json.content }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "th-wait-carousel",
+      "name": "Wait 10s (Carousel)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1380,
+        560
+      ],
+      "parameters": {
+        "amount": 10,
+        "resume": "timeInterval",
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "th-publish-carousel",
+      "name": "Publish Carousel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1620,
+        560
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.threads.net/v1.0/me/threads_publish' }}",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "access_token",
+              "value": "={{ $('Parse Request').first().json.access_token }}"
+            },
+            {
+              "name": "creation_id",
+              "value": "={{ $json.id }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
       "id": "build-error-unsupported",
       "name": "Build Error Result (Unsupported Type)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
         420,
-        480
+        840
       ],
       "parameters": {
         "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'threads',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: `Unsupported media_type: ${req.media_type}`,\n    callback_url: req.callback_url\n  }\n}];"
@@ -529,6 +707,13 @@
         [
           {
             "node": "Create Video Container",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Split Media URLs",
             "type": "main",
             "index": 0
           }
@@ -679,6 +864,72 @@
         [
           {
             "node": "Send Error Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Media URLs": {
+      "main": [
+        [
+          {
+            "node": "Create Child Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Child Container": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Child IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Child IDs": {
+      "main": [
+        [
+          {
+            "node": "Create Carousel Container",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Carousel Container": {
+      "main": [
+        [
+          {
+            "node": "Wait 10s (Carousel)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 10s (Carousel)": {
+      "main": [
+        [
+          {
+            "node": "Publish Carousel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Carousel": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
             "type": "main",
             "index": 0
           }
