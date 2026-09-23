@@ -8,13 +8,15 @@ import {
   buildInstagramPayload,
   buildLinkedInPayload,
   buildThreadsPayload,
+  buildYouTubePayload,
   dispatchInstagramToN8n,
   dispatchLinkedInToN8n,
   dispatchThreadsToN8n,
   dispatchToN8n,
+  dispatchYouTubeToN8n,
 } from "../service/n8n";
 
-const mediaTypeSchema = z.enum(["TEXT", "IMAGE", "VIDEO", "CAROUSEL", "REELS", "STORIES"]);
+const mediaTypeSchema = z.enum(["TEXT", "IMAGE", "VIDEO", "CAROUSEL", "REELS", "STORIES", "SHORTS"]);
 
 // n8n's per-platform workflows only implement these branches — reject
 // anything else before dispatching instead of relying on the workflow's
@@ -24,7 +26,42 @@ const SUPPORTED_MEDIA_TYPES: Partial<Record<Platform, readonly string[]>> = {
   INSTAGRAM: ["IMAGE", "CAROUSEL", "REELS", "STORIES"],
   THREADS: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
   LINKEDIN: ["TEXT", "IMAGE", "VIDEO", "CAROUSEL"],
+  YOUTUBE: ["VIDEO", "SHORTS"],
 };
+
+// YouTube rejects titles over 100 chars or containing < / > outright, and
+// caps all tags combined at ~500 chars — checked here so it's a clear 400
+// instead of a FAILED post log with a raw API error.
+//
+// YouTube's assignable video categories (videoCategories.list, regionCode=US,
+// assignable=true). Ids are global but a few regions don't allow every one —
+// hardcoded rather than fetched per channel since this list has been stable
+// for years; frontend composer.tsx mirrors it with labels.
+const YOUTUBE_CATEGORY_IDS = [
+  "1", "2", "10", "15", "17", "19", "20", "22", "23", "24", "25", "26", "27", "28", "29",
+] as const;
+
+const youtubeOptionsSchema = z
+  .object({
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(100)
+      .refine((title) => !/[<>]/.test(title), "Title can't contain < or >"),
+    // Defaults to private so a test post never goes public by accident —
+    // same default youtube-poster.json has always used.
+    privacyStatus: z.enum(["public", "unlisted", "private"]).default("private"),
+    // COPPA self-declaration — YouTube requires an explicit answer per video.
+    madeForKids: z.boolean().default(false),
+    // 22 = People & Blogs, youtube-poster.json's old hardcoded value.
+    categoryId: z.enum(YOUTUBE_CATEGORY_IDS).default("22"),
+    tags: z
+      .array(z.string().trim().min(1))
+      .default([])
+      .refine((tags) => tags.join(",").length <= 500, "Tags can't exceed 500 characters combined"),
+  })
+  .openapi("YouTubeOptions");
 
 const postLogSchema = z
   .object({
@@ -45,6 +82,9 @@ const postSchema = z
     status: z.enum(["DRAFT", "SCHEDULED", "PROCESSING", "PUBLISHED", "PARTIAL_FAILURE", "FAILED"]),
     createdAt: z.iso.datetime(),
     logs: z.array(postLogSchema),
+    // YouTube posts only — the caption is the video's description, so the
+    // title is what the history page leads with instead.
+    youtubeTitle: z.string().nullable(),
     connectedAccount: z.object({
       platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"]),
       accountName: z.string(),
@@ -58,6 +98,8 @@ const createPostSchema = z
     caption: z.string().min(1),
     mediaType: mediaTypeSchema,
     mediaUrls: z.array(z.string().url()).default([]),
+    // Required when connectedAccountId is a YouTube channel, ignored otherwise.
+    youtubeOptions: youtubeOptionsSchema.optional(),
   })
   .openapi("CreatePostRequest");
 
@@ -90,13 +132,14 @@ const createPost = createRoute({
   },
 });
 
-function serializePost(post: {
+function serializePost({ platformOptions, ...post }: {
   id: string;
   caption: string;
   mediaType: string;
   mediaUrls: unknown;
   status: string;
   createdAt: Date;
+  platformOptions: unknown;
   logs: {
     platform: string;
     status: string;
@@ -112,6 +155,7 @@ function serializePost(post: {
     mediaUrls: post.mediaUrls as string[],
     status: post.status as z.infer<typeof postSchema>["status"],
     createdAt: post.createdAt.toISOString(),
+    youtubeTitle: (platformOptions as { title?: string } | null)?.title ?? null,
     logs: post.logs.map((log) => ({
       ...log,
       platform: log.platform as z.infer<typeof postLogSchema>["platform"],
@@ -157,6 +201,9 @@ export const postsRoute = new OpenAPIHono()
         message: `${connectedAccount.platform} doesn't support media type ${body.mediaType}`,
       });
     }
+    if (connectedAccount.platform === "YOUTUBE" && !body.youtubeOptions) {
+      throw new HTTPException(400, { message: "YouTube posts need youtubeOptions.title" });
+    }
 
     const post = await prisma.post.create({
       data: {
@@ -165,6 +212,7 @@ export const postsRoute = new OpenAPIHono()
         caption: body.caption,
         mediaType: body.mediaType,
         mediaUrls: body.mediaUrls,
+        platformOptions: connectedAccount.platform === "YOUTUBE" ? body.youtubeOptions : undefined,
         status: "PROCESSING",
       },
     });
@@ -176,6 +224,8 @@ export const postsRoute = new OpenAPIHono()
         await dispatchInstagramToN8n(buildInstagramPayload(post, connectedAccount));
       } else if (connectedAccount.platform === "LINKEDIN") {
         await dispatchLinkedInToN8n(buildLinkedInPayload(post, connectedAccount));
+      } else if (connectedAccount.platform === "YOUTUBE") {
+        await dispatchYouTubeToN8n(await buildYouTubePayload(post, connectedAccount));
       } else {
         await dispatchThreadsToN8n(buildThreadsPayload(post, connectedAccount));
       }

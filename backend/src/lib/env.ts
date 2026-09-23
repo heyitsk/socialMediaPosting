@@ -31,6 +31,11 @@ const envSchema = z.object({
   LINKEDIN_CLIENT_ID: z.string().min(1),
   LINKEDIN_CLIENT_SECRET: z.string().min(1),
 
+  // OAuth 2.0 "Web application" client from a Google Cloud project with the
+  // YouTube Data API v3 enabled. See lib/youtube.ts.
+  GOOGLE_CLIENT_ID: z.string().min(1),
+  GOOGLE_CLIENT_SECRET: z.string().min(1),
+
   DEFAULT_USER_EMAIL: z.string().email(),
   DEFAULT_USER_NAME: z.string().min(1),
 

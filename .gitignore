@@ -22,3 +22,7 @@ backend/postgres_data/
 
 # editor/OS
 .DS_Store
+
+# claude code local state
+.claude/settings.local.json
+.claude/.headroom_wrap_marker.json

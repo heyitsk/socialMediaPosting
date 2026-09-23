@@ -1,6 +1,7 @@
 import type { ConnectedAccount, ConnectionMethod, MediaType, Post } from "@prisma/client";
 import { decrypt } from "../lib/crypto";
 import { env } from "../lib/env";
+import { getFreshYouTubeAccessToken } from "./youtube-token";
 
 // facebook-poster.json's "Route by Media Type" switch matches on these exact
 // strings, not our Prisma MediaType enum values.
@@ -11,6 +12,7 @@ const N8N_MEDIA_TYPE: Record<MediaType, string> = {
   CAROUSEL: "MULTI_PHOTO",
   REELS: "REELS",
   STORIES: "STORIES",
+  SHORTS: "SHORTS",
 };
 
 // instagram-poster.json's HTTP Request nodes build their URL from this host —
@@ -196,6 +198,71 @@ export function buildLinkedInPayload(
   };
 }
 
+export interface YouTubeOptions {
+  title: string;
+  privacyStatus: "public" | "unlisted" | "private";
+  madeForKids: boolean;
+  tags: string[];
+  categoryId: string;
+}
+
+export interface YouTubeDispatchPayload {
+  post_id: string;
+  user_id: string;
+  platform: "youtube";
+  media_type: string;
+  media_urls: string[];
+  youtube_metadata: {
+    title: string;
+    description: string;
+    privacy: YouTubeOptions["privacyStatus"];
+    made_for_kids: boolean;
+    tags: string[];
+    category_id: string;
+  };
+  token: { access_token: string };
+  callback_url: string;
+}
+
+// YouTube has no "post as Short" API flag — it classifies vertical/square
+// videos of <=3 min as Shorts on its own. #Shorts in the description is the
+// only extra hint we can give, so SHORTS adds it if the user didn't.
+const SHORTS_TAG = "#Shorts";
+
+// Async unlike the other builders — ON_DEMAND means the access token may
+// need a refresh-token exchange (and a DB write) before it can be sent.
+export async function buildYouTubePayload(
+  post: Post,
+  connectedAccount: ConnectedAccount,
+): Promise<YouTubeDispatchPayload> {
+  // routes/posts.ts rejects YouTube posts without these before the Post row
+  // is created, so this is always set here.
+  const options = post.platformOptions as unknown as YouTubeOptions;
+  const accessToken = await getFreshYouTubeAccessToken(connectedAccount);
+
+  const alreadyTagged = `${options.title} ${post.caption}`.toLowerCase().includes(SHORTS_TAG.toLowerCase());
+  const description =
+    post.mediaType === "SHORTS" && !alreadyTagged ? `${post.caption}\n\n${SHORTS_TAG}`.trim() : post.caption;
+
+  return {
+    post_id: post.id,
+    user_id: post.userId,
+    platform: "youtube",
+    media_type: post.mediaType,
+    media_urls: post.mediaUrls as string[],
+    youtube_metadata: {
+      title: options.title,
+      description,
+      privacy: options.privacyStatus,
+      made_for_kids: options.madeForKids,
+      tags: options.tags,
+      category_id: options.categoryId,
+    },
+    token: { access_token: accessToken },
+    callback_url: `${env.PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`,
+  };
+}
+
 async function postToN8n(webhookPath: string, payload: unknown): Promise<void> {
   const response = await fetch(`${env.N8N_BASE_URL}/webhook/${webhookPath}`, {
     method: "POST",
@@ -222,4 +289,8 @@ export async function dispatchThreadsToN8n(payload: ThreadsDispatchPayload): Pro
 
 export async function dispatchLinkedInToN8n(payload: LinkedInDispatchPayload): Promise<void> {
   await postToN8n("linkedin-poster", payload);
+}
+
+export async function dispatchYouTubeToN8n(payload: YouTubeDispatchPayload): Promise<void> {
+  await postToN8n("youtube-poster", payload);
 }

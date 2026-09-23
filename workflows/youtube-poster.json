@@ -13,7 +13,7 @@
       "parameters": {
         "width": 700,
         "height": 480,
-        "content": "## youtube-poster\nWebhook-triggered posting workflow for YouTube. Unlike Graph API/Threads, YouTube Data API v3 can't just be handed a URL \u2014 it needs the actual video bytes uploaded via a **resumable upload session** (init call \u2192 PUT the bytes to the returned Location URL).\n\n**OAuth is entirely the backend's job.** n8n only ever receives an already-valid `access_token` in the payload \u2014 refresh_token/client_id/secret never touch n8n, matching the per-call-token rule from websitePlan.md \u00a75.\n\nBecause the video bytes (Download Video) and the upload session URL (Initiate Resumable Upload) come from two independent HTTP calls that don't depend on each other, they run in parallel and a **Merge** node combines them before the final binary PUT \u2014 an HTTP Request node's output replaces the item it received, so this is the standard n8n pattern for keeping binary data alive alongside a second API response.\n\n**After importing:** activate the workflow, then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/youtube-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test004\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"youtube\",\n    \"media_urls\": [\"https://.../video.mp4\"],\n    \"youtube_metadata\": {\n      \"title\": \"Test upload #smposting\",\n      \"description\": \"Testing youtube-poster\",\n      \"privacy\": \"private\"\n    },\n    \"token\": { \"access_token\": \"YOUR_VALID_OAUTH_ACCESS_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`privacy` defaults to `private` if omitted \u2014 deliberately, so a test upload never accidentally goes public. For Shorts: same endpoint, just add `#Shorts` to the title/description and use a \u226460s 9:16 source video.\n\n**Verify after import:** the 'Upload Video Binary' node's Body Content Type should be 'n8n Binary File' pointing at field `data` \u2014 double-check this specific dropdown, it's the one part of this workflow I couldn't test against a live n8n instance before handing it to you."
+        "content": "## youtube-poster\nWebhook-triggered posting workflow for YouTube, dispatched by the backend (`service/n8n.ts` → `buildYouTubePayload`). Unlike Graph API/Threads, YouTube Data API v3 can't just be handed a URL — it needs the actual video bytes uploaded via a **resumable upload session** (init call → PUT the bytes to the returned Location URL).\n\n**OAuth is entirely the backend's job.** n8n only ever receives an already-fresh `access_token` (the backend swaps the stored refresh token for one right before dispatch — `RefreshStrategy.ON_DEMAND`). refresh_token/client_id/secret never touch n8n.\n\n**SUCCESS ≠ published.** The callback fires as soon as the PUT finishes, while YouTube is still processing (`uploadStatus: uploaded`). The backend's video-status poller (`queue/video-status-worker.ts`) polls `videos.list?part=status` and only then marks the post PUBLISHED or FAILED (rejected/duplicate/etc.).\n\nBecause the video bytes (Download Video) and the upload session URL (Initiate Resumable Upload) come from two independent HTTP calls, they run in parallel and a **Merge** node combines them before the final binary PUT.\n\n⚠️ Known gap (websitePlan.md §3): the whole video is downloaded into n8n before the upload starts — streaming-relay fix planned once S3 exists.\n\n**Callbacks** send `x-callback-secret: $env.CALLBACK_SECRET` — must match backend `N8N_CALLBACK_SECRET`.\n\nManual test payload:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/youtube-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test004\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"youtube\",\n    \"media_type\": \"VIDEO\",\n    \"media_urls\": [\"https://.../video.mp4\"],\n    \"youtube_metadata\": {\n      \"title\": \"Test upload\",\n      \"description\": \"Testing youtube-poster\",\n      \"privacy\": \"private\",\n      \"made_for_kids\": false,\n      \"tags\": [\"smposting\"],\n      \"category_id\": \"22\"\n    },\n    \"token\": { \"access_token\": \"YOUR_VALID_OAUTH_ACCESS_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`privacy` defaults to `private` if omitted. `media_type: SHORTS` is informational here — the backend already appended `#Shorts` to the description; YouTube itself decides Shorts from aspect ratio/duration (vertical or square, ≤3 min).\n\n**Verify after import:** 'Upload Video Binary' Body Content Type = 'n8n Binary File', field `data`."
       }
     },
     {
@@ -43,7 +43,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst meta = body.youtube_metadata || {};\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'youtube',\n    media_urls: body.media_urls || [],\n    title: meta.title || '',\n    description: meta.description || '',\n    privacy: meta.privacy || 'private',\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst meta = body.youtube_metadata || {};\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'youtube',\n    media_type: String(body.media_type || 'VIDEO').toUpperCase(),\n    media_urls: body.media_urls || [],\n    title: meta.title || '',\n    description: meta.description || '',\n    privacy: meta.privacy || 'private',\n    made_for_kids: meta.made_for_kids === true,\n    tags: Array.isArray(meta.tags) ? meta.tags : [],\n    category_id: String(meta.category_id || '22'),\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
       }
     },
     {
@@ -66,7 +66,7 @@
           "conditions": [
             {
               "id": "valid-payload",
-              "leftValue": "={{ ($json.media_urls && $json.media_urls.length > 0) && !!$json.title }}",
+              "leftValue": "={{ ($json.media_urls && $json.media_urls.length > 0) && !!$json.title && !!$json.access_token }}",
               "rightValue": true,
               "operator": {
                 "type": "boolean",
@@ -142,7 +142,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ snippet: { title: $json.title, description: $json.description, categoryId: '22' }, status: { privacyStatus: $json.privacy, selfDeclaredMadeForKids: false } }) }}",
+        "jsonBody": "={{ JSON.stringify({ snippet: { title: $json.title, description: $json.description, tags: $json.tags, categoryId: $json.category_id }, status: { privacyStatus: $json.privacy, selfDeclaredMadeForKids: $json.made_for_kids } }) }}",
         "options": {
           "response": {
             "response": {
@@ -162,7 +162,7 @@
         420
       ],
       "parameters": {
-        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: 'Invalid payload: media_urls and youtube_metadata.title are required',\n    callback_url: req.callback_url\n  }\n}];"
+        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: 'Invalid payload: media_urls, youtube_metadata.title and token.access_token are required',\n    callback_url: req.callback_url\n  }\n}];"
       }
     },
     {
@@ -219,7 +219,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
+        "jsCode": "// YouTube returns the video resource as soon as the bytes land —\n// status.uploadStatus is still 'uploaded' here, not 'processed'. SUCCESS only\n// means \"upload accepted\"; the backend's video-status poller decides when\n// the post is actually PUBLISHED (or FAILED, e.g. rejected as a duplicate).\nconst req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
       }
     },
     {
@@ -238,7 +238,16 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
-        "options": {}
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-callback-secret",
+              "value": "={{ $env.CALLBACK_SECRET }}"
+            }
+          ]
+        }
       },
       "onError": "continueRegularOutput"
     },
@@ -282,7 +291,16 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ post_id: $json.post_id, platform: $json.platform, status: $json.status, platform_post_id: $json.platform_post_id, error: $json.error }) }}",
-        "options": {}
+        "options": {},
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-callback-secret",
+              "value": "={{ $env.CALLBACK_SECRET }}"
+            }
+          ]
+        }
       },
       "onError": "continueRegularOutput"
     }
@@ -427,6 +445,6 @@
     "executionOrder": "v1"
   },
   "meta": {
-    "instanceId": "smposting-youtube-poster-v1"
+    "instanceId": "smposting-youtube-poster-v2"
   }
 }

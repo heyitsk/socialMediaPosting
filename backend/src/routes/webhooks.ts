@@ -60,13 +60,18 @@ export const webhooksRoute = new OpenAPIHono().openapi(n8nCallback, async (c) =>
   // /rest/videos/{urn} before trusting it enough to show "Published" on the
   // history page. Polls media_urn (the video's own urn:li:video:...), logs
   // platform_post_id (the created post's urn:li:share:...) once confirmed.
+  //
+  // YouTube: every post is a video (VIDEO or SHORTS), and youtube-poster.json
+  // calls back as soon as the upload PUT finishes — uploadStatus is still
+  // "uploaded", not "processed", and YouTube can still reject it (duplicate,
+  // copyright, etc.), so it always goes through the same poller.
   if (
-    (platform === "FACEBOOK" || platform === "LINKEDIN") &&
+    (platform === "FACEBOOK" || platform === "LINKEDIN" || platform === "YOUTUBE") &&
     body.status === "SUCCESS" &&
     body.platform_post_id
   ) {
     const post = await prisma.post.findUniqueOrThrow({ where: { id: body.post_id } });
-    if (post.mediaType === "VIDEO") {
+    if (platform === "YOUTUBE" || post.mediaType === "VIDEO") {
       const mediaId = platform === "LINKEDIN" ? (body.media_urn ?? body.platform_post_id) : body.platform_post_id;
       await enqueueVideoStatusPoll(body.post_id, platform, body.platform_post_id, mediaId);
       return c.body(null, 204);

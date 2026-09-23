@@ -19,6 +19,13 @@ const CONNECT_ERROR_MESSAGES: Record<string, string> = {
   linkedin_connect_denied: "LinkedIn connection was cancelled.",
   linkedin_connect_invalid_state: "LinkedIn connection expired — please try again.",
   linkedin_connect_failed: "Failed to connect LinkedIn account.",
+  youtube_connect_denied: "YouTube connection was cancelled.",
+  youtube_connect_invalid_state: "YouTube connection expired — please try again.",
+  youtube_connect_failed: "Failed to connect YouTube account.",
+  youtube_connect_missing_scope:
+    "YouTube connected without upload permission — reconnect and keep the upload checkbox ticked.",
+  youtube_connect_no_channel:
+    "That Google account has no YouTube channel — create one on YouTube first, then connect again.",
 };
 
 function useConnectStatusToast() {
@@ -49,6 +56,8 @@ function useConnectStatusToast() {
       toast.success("Threads account connected.");
     } else if (connected === "linkedin") {
       toast.success("LinkedIn account connected.");
+    } else if (connected === "youtube") {
+      toast.success("YouTube channel connected.");
     } else if (error) {
       toast.error(CONNECT_ERROR_MESSAGES[error] ?? "Failed to connect account.");
     }
@@ -109,6 +118,7 @@ const CONNECT_PATH: Partial<Record<string, string>> = {
   INSTAGRAM: "/api/auth/instagram",
   THREADS: "/api/auth/threads",
   LINKEDIN: "/api/auth/linkedin",
+  YOUTUBE: "/api/auth/youtube",
 };
 
 function ConnectedAccountsCard() {
@@ -219,6 +229,15 @@ function ConnectedAccountsCard() {
           }}
         >
           Connect LinkedIn
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            window.location.href = `${API_URL}/api/auth/youtube`;
+          }}
+        >
+          Connect YouTube
         </Button>
       </CardContent>
     </Card>

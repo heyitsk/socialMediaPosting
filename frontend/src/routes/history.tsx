@@ -45,6 +45,9 @@ export function HistoryPage() {
                 <Badge variant={STATUS_VARIANT[post.status] ?? "outline"}>{post.status}</Badge>
               </CardHeader>
               <CardContent className="flex flex-col gap-1 text-sm text-muted-foreground">
+                {post.youtubeTitle && (
+                  <div className="font-medium text-foreground">{post.youtubeTitle}</div>
+                )}
                 <div>{post.caption}</div>
                 <div>{new Date(post.createdAt).toLocaleString()}</div>
                 {failedLog?.errorMessage && (

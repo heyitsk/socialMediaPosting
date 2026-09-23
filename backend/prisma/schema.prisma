@@ -32,6 +32,10 @@ enum MediaType {
   CAROUSEL
   REELS
   STORIES
+  // YouTube-only. The API has no Shorts flag — YouTube classifies a video as
+  // a Short itself (vertical/square, ≤3 min). This just tags the description
+  // with #Shorts and tells the composer which guidance to show.
+  SHORTS
 }
 
 // Distinguishes how an Instagram ConnectedAccount was linked — the two paths
@@ -42,6 +46,7 @@ enum ConnectionMethod {
   INSTAGRAM_LOGIN
   THREADS_LOGIN
   LINKEDIN_LOGIN
+  YOUTUBE_LOGIN
 }
 
 enum PostStatus {
@@ -119,6 +124,10 @@ model Post {
   mediaUrls          Json             @map("media_urls")
   status             PostStatus       @default(DRAFT)
   scheduledFor       DateTime?        @map("scheduled_for")
+  // Platform-specific fields the shared caption/media columns can't hold —
+  // currently only YouTube's { title, privacyStatus, madeForKids, tags }.
+  // Validated per platform in routes/posts.ts, not by the DB.
+  platformOptions    Json?            @map("platform_options")
   createdAt          DateTime         @default(now()) @map("created_at")
 
   logs PostLog[]

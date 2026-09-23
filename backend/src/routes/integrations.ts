@@ -9,14 +9,17 @@ const connectedAccountSchema = z
     id: z.string(),
     platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"]),
     accountName: z.string(),
-    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN", "THREADS_LOGIN", "LINKEDIN_LOGIN"]),
+    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN", "THREADS_LOGIN", "LINKEDIN_LOGIN", "YOUTUBE_LOGIN"]),
     lastRefreshedAt: z.iso.datetime().nullable(),
     // True once a REQUIRES_RECONNECT/SLIDING_WINDOW account's token is inside
     // (or past) TOKEN_EXPIRY_BUFFER_MS of expiring — LinkedIn issues no
     // refresh token at all, so this is the only way back short of the member
     // redoing the OAuth consent screen (see service/n8n.ts's dispatch-time
     // check, which throws the same condition — this just surfaces it in the
-    // UI before the user even tries to post).
+    // UI before the user even tries to post). For ON_DEMAND (YouTube) the
+    // access token's own expiry is irrelevant — it's refreshed on use — so
+    // the signal is instead a refresh token Google rejected and
+    // service/youtube-token.ts cleared.
     needsReconnect: z.boolean(),
   })
   .openapi("ConnectedAccountSummary");
@@ -61,17 +64,20 @@ export const integrationsRoute = new OpenAPIHono()
         lastRefreshedAt: true,
         refreshStrategy: true,
         tokenExpiresAt: true,
+        encryptedRefreshToken: true,
       },
     });
 
     return c.json(
-      accounts.map(({ refreshStrategy, tokenExpiresAt, ...account }) => ({
+      accounts.map(({ refreshStrategy, tokenExpiresAt, encryptedRefreshToken, ...account }) => ({
         ...account,
         lastRefreshedAt: account.lastRefreshedAt?.toISOString() ?? null,
         needsReconnect:
-          (refreshStrategy === "REQUIRES_RECONNECT" || refreshStrategy === "SLIDING_WINDOW") &&
-          tokenExpiresAt != null &&
-          tokenExpiresAt.getTime() - TOKEN_EXPIRY_BUFFER_MS < Date.now(),
+          refreshStrategy === "ON_DEMAND"
+            ? encryptedRefreshToken == null
+            : (refreshStrategy === "REQUIRES_RECONNECT" || refreshStrategy === "SLIDING_WINDOW") &&
+              tokenExpiresAt != null &&
+              tokenExpiresAt.getTime() - TOKEN_EXPIRY_BUFFER_MS < Date.now(),
       })),
       200,
     );

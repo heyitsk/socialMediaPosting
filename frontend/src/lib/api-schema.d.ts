@@ -240,7 +240,7 @@ export interface components {
             platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
             accountName: string;
             /** @enum {string} */
-            connectionMethod: "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN" | "THREADS_LOGIN" | "LINKEDIN_LOGIN";
+            connectionMethod: "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN" | "THREADS_LOGIN" | "LINKEDIN_LOGIN" | "YOUTUBE_LOGIN";
             /** Format: date-time */
             lastRefreshedAt: string | null;
             needsReconnect: boolean;
@@ -249,13 +249,14 @@ export interface components {
             id: string;
             caption: string;
             /** @enum {string} */
-            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
             mediaUrls: string[];
             /** @enum {string} */
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED";
             /** Format: date-time */
             createdAt: string;
             logs: components["schemas"]["PostLog"][];
+            youtubeTitle: string | null;
             connectedAccount: {
                 /** @enum {string} */
                 platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
@@ -276,9 +277,27 @@ export interface components {
             connectedAccountId: string;
             caption: string;
             /** @enum {string} */
-            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
             /** @default [] */
             mediaUrls: string[];
+            youtubeOptions?: components["schemas"]["YouTubeOptions"];
+        };
+        YouTubeOptions: {
+            title: string;
+            /**
+             * @default private
+             * @enum {string}
+             */
+            privacyStatus: "public" | "unlisted" | "private";
+            /** @default false */
+            madeForKids: boolean;
+            /**
+             * @default 22
+             * @enum {string}
+             */
+            categoryId: "1" | "2" | "10" | "15" | "17" | "19" | "20" | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29";
+            /** @default [] */
+            tags: string[];
         };
         N8nCallback: {
             post_id: string;

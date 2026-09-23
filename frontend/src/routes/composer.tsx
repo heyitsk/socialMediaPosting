@@ -15,12 +15,13 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
+import type { components } from "@/lib/api-schema";
 
-type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES";
+type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
 
 const MIN_CAROUSEL_PHOTOS = 2;
 
-type PostablePlatform = "FACEBOOK" | "INSTAGRAM" | "THREADS" | "LINKEDIN";
+type PostablePlatform = "FACEBOOK" | "INSTAGRAM" | "THREADS" | "LINKEDIN" | "YOUTUBE";
 
 // Mirrors backend SUPPORTED_MEDIA_TYPES in routes/posts.ts — what each
 // platform's n8n workflow actually implements.
@@ -49,6 +50,10 @@ const MEDIA_TYPES_BY_PLATFORM: Record<PostablePlatform, { value: MediaType; labe
     { value: "VIDEO", label: "Video" },
     { value: "CAROUSEL", label: "Carousel (multiple photos)" },
   ],
+  YOUTUBE: [
+    { value: "VIDEO", label: "Video" },
+    { value: "SHORTS", label: "Short (vertical or square, ≤3 min)" },
+  ],
 };
 
 const PLATFORM_LABELS: Record<PostablePlatform, string> = {
@@ -56,9 +61,42 @@ const PLATFORM_LABELS: Record<PostablePlatform, string> = {
   INSTAGRAM: "Instagram",
   THREADS: "Threads",
   LINKEDIN: "LinkedIn",
+  YOUTUBE: "YouTube",
 };
 
-const SINGLE_URL_MEDIA_TYPES: MediaType[] = ["IMAGE", "VIDEO", "REELS", "STORIES"];
+const SINGLE_URL_MEDIA_TYPES: MediaType[] = ["IMAGE", "VIDEO", "REELS", "STORIES", "SHORTS"];
+
+// Mirrors backend youtubeOptionsSchema in routes/posts.ts.
+const YOUTUBE_TITLE_MAX = 100;
+
+type YouTubePrivacy = "public" | "unlisted" | "private";
+
+const YOUTUBE_PRIVACY_OPTIONS: { value: YouTubePrivacy; label: string }[] = [
+  { value: "private", label: "Private" },
+  { value: "unlisted", label: "Unlisted" },
+  { value: "public", label: "Public" },
+];
+
+type YouTubeCategoryId = components["schemas"]["YouTubeOptions"]["categoryId"];
+
+// Mirrors backend YOUTUBE_CATEGORY_IDS in routes/posts.ts.
+const YOUTUBE_CATEGORIES: { value: YouTubeCategoryId; label: string }[] = [
+  { value: "1", label: "Film & Animation" },
+  { value: "2", label: "Autos & Vehicles" },
+  { value: "10", label: "Music" },
+  { value: "15", label: "Pets & Animals" },
+  { value: "17", label: "Sports" },
+  { value: "19", label: "Travel & Events" },
+  { value: "20", label: "Gaming" },
+  { value: "22", label: "People & Blogs" },
+  { value: "23", label: "Comedy" },
+  { value: "24", label: "Entertainment" },
+  { value: "25", label: "News & Politics" },
+  { value: "26", label: "Howto & Style" },
+  { value: "27", label: "Education" },
+  { value: "28", label: "Science & Technology" },
+  { value: "29", label: "Nonprofits & Activism" },
+];
 
 export function ComposerPage() {
   const queryClient = useQueryClient();
@@ -78,7 +116,8 @@ export function ComposerPage() {
         account.platform === "FACEBOOK" ||
         account.platform === "INSTAGRAM" ||
         account.platform === "THREADS" ||
-        account.platform === "LINKEDIN",
+        account.platform === "LINKEDIN" ||
+        account.platform === "YOUTUBE",
     ) ?? [];
 
   const [connectedAccountId, setConnectedAccountId] = useState("");
@@ -86,10 +125,16 @@ export function ComposerPage() {
   const [mediaType, setMediaType] = useState<MediaType>("TEXT");
   const [mediaUrl, setMediaUrl] = useState("");
   const [carouselUrls, setCarouselUrls] = useState<string[]>(["", ""]);
+  const [youtubeTitle, setYoutubeTitle] = useState("");
+  const [youtubePrivacy, setYoutubePrivacy] = useState<YouTubePrivacy>("private");
+  const [youtubeMadeForKids, setYoutubeMadeForKids] = useState(false);
+  const [youtubeCategoryId, setYoutubeCategoryId] = useState<YouTubeCategoryId>("22");
+  const [youtubeTags, setYoutubeTags] = useState("");
 
   const selectedAccount = postableAccounts.find((account) => account.id === connectedAccountId);
   const selectedPlatform = selectedAccount?.platform as PostablePlatform | undefined;
   const availableMediaTypes = selectedPlatform ? MEDIA_TYPES_BY_PLATFORM[selectedPlatform] : [];
+  const isYouTube = selectedPlatform === "YOUTUBE";
 
   const trimmedCarouselUrls = carouselUrls.map((url) => url.trim()).filter((url) => url !== "");
 
@@ -102,6 +147,18 @@ export function ComposerPage() {
           mediaType,
           mediaUrls:
             mediaType === "TEXT" ? [] : mediaType === "CAROUSEL" ? trimmedCarouselUrls : [mediaUrl],
+          youtubeOptions: isYouTube
+            ? {
+                title: youtubeTitle,
+                privacyStatus: youtubePrivacy,
+                madeForKids: youtubeMadeForKids,
+                categoryId: youtubeCategoryId,
+                tags: youtubeTags
+                  .split(",")
+                  .map((tag) => tag.trim())
+                  .filter((tag) => tag !== ""),
+              }
+            : undefined,
         },
       });
       if (error) throw error;
@@ -117,6 +174,8 @@ export function ComposerPage() {
       setCaption("");
       setMediaUrl("");
       setCarouselUrls(["", ""]);
+      setYoutubeTitle("");
+      setYoutubeTags("");
     },
     onError: () => toast.error("Failed to create post."),
   });
@@ -124,6 +183,7 @@ export function ComposerPage() {
   const canSubmit =
     connectedAccountId !== "" &&
     caption.trim() !== "" &&
+    (!isYouTube || youtubeTitle.trim() !== "") &&
     (mediaType === "TEXT" ||
       (mediaType === "CAROUSEL"
         ? trimmedCarouselUrls.length >= MIN_CAROUSEL_PHOTOS
@@ -156,8 +216,8 @@ export function ComposerPage() {
           )}
           {!isPending && !isError && postableAccounts.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              Connect a Facebook, Instagram, Threads, or LinkedIn account from the Dashboard before
-              posting.
+              Connect a Facebook, Instagram, Threads, LinkedIn, or YouTube account from the Dashboard
+              before posting.
             </p>
           )}
 
@@ -179,8 +239,24 @@ export function ComposerPage() {
                 </Select>
               </div>
 
+              {isYouTube && (
+                <div className="flex flex-col gap-2">
+                  <Label htmlFor="youtube-title">Video title</Label>
+                  <Input
+                    id="youtube-title"
+                    value={youtubeTitle}
+                    maxLength={YOUTUBE_TITLE_MAX}
+                    onChange={(e) => setYoutubeTitle(e.target.value)}
+                    placeholder="What's this video about?"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {youtubeTitle.length}/{YOUTUBE_TITLE_MAX}
+                  </p>
+                </div>
+              )}
+
               <div className="flex flex-col gap-2">
-                <Label htmlFor="caption">Caption</Label>
+                <Label htmlFor="caption">{isYouTube ? "Description" : "Caption"}</Label>
                 <Textarea
                   id="caption"
                   value={caption}
@@ -219,6 +295,74 @@ export function ComposerPage() {
                     placeholder="https://res.cloudinary.com/..."
                   />
                 </div>
+              )}
+
+              {isYouTube && (
+                <>
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="youtube-privacy">Visibility</Label>
+                    <Select
+                      value={youtubePrivacy}
+                      onValueChange={(value) => setYoutubePrivacy(value as YouTubePrivacy)}
+                    >
+                      <SelectTrigger id="youtube-privacy">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {YOUTUBE_PRIVACY_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="youtube-category">Category</Label>
+                    <Select
+                      value={youtubeCategoryId}
+                      onValueChange={(value) => setYoutubeCategoryId(value as YouTubeCategoryId)}
+                    >
+                      <SelectTrigger id="youtube-category">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {YOUTUBE_CATEGORIES.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="youtube-kids">Made for kids?</Label>
+                    <Select
+                      value={youtubeMadeForKids ? "yes" : "no"}
+                      onValueChange={(value) => setYoutubeMadeForKids(value === "yes")}
+                    >
+                      <SelectTrigger id="youtube-kids">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="no">No, it's not made for kids</SelectItem>
+                        <SelectItem value="yes">Yes, it's made for kids</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="youtube-tags">Tags (optional, comma-separated)</Label>
+                    <Input
+                      id="youtube-tags"
+                      value={youtubeTags}
+                      onChange={(e) => setYoutubeTags(e.target.value)}
+                      placeholder="tutorial, product launch"
+                    />
+                  </div>
+                </>
               )}
 
               {mediaType === "CAROUSEL" && (
