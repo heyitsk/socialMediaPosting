@@ -29,27 +29,38 @@ export async function upsertUserFromGoogle(identity: GoogleIdentity) {
           });
     }
 
-    // Every user always has at least one workspace — a brand-new signup (or
-    // a linked row that somehow has none) gets a Personal one.
-    const membershipCount = await tx.membership.count({ where: { userId: user.id } });
-    if (membershipCount === 0) {
+    // Every user always has their own Personal workspace — created at signup
+    // (or for a linked row that somehow has none). It can't be deleted.
+    const personal = await tx.workspace.findFirst({
+      where: { ownerUserId: user.id, isPersonal: true },
+      select: { id: true },
+    });
+    if (!personal) {
       await tx.workspace.create({
         data: {
           name: "Personal",
           ownerUserId: user.id,
+          isPersonal: true,
           memberships: { create: { userId: user.id } },
         },
       });
     }
 
+    // Invites to a user who already existed were accepted when they were
+    // sent (routes/invites.ts) — this catches the ones sent before signup.
     const invites = await tx.workspaceInvite.findMany({
-      where: { email: identity.email, acceptedAt: null, expiresAt: { gt: new Date() } },
+      where: {
+        email: identity.email,
+        acceptedAt: null,
+        expiresAt: { gt: new Date() },
+        workspace: { deletedAt: null },
+      },
     });
     for (const invite of invites) {
       await tx.membership.upsert({
         where: { userId_workspaceId: { userId: user.id, workspaceId: invite.workspaceId } },
         update: {},
-        create: { userId: user.id, workspaceId: invite.workspaceId },
+        create: { userId: user.id, workspaceId: invite.workspaceId, role: invite.role },
       });
       await tx.workspaceInvite.update({
         where: { id: invite.id },

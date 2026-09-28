@@ -3,6 +3,7 @@ import { getConnInfo } from "hono/bun";
 import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
 import { redis } from "../lib/redis";
+import type { AuthEnv } from "./auth";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -21,16 +22,28 @@ function clientIp(c: Context): string {
   return forwarded.at(-1) ?? remote;
 }
 
-// Fixed-window per-IP counter in Redis.
+// Fixed-window counter in Redis.
+async function hit(key: string, limit: number, windowSeconds: number) {
+  const [[, count]] = (await redis.multi().incr(key).expire(key, windowSeconds, "NX").exec()) as [
+    [Error | null, number],
+  ];
+  if (count > limit) {
+    throw new HTTPException(429, { message: "Too many requests" });
+  }
+}
+
 export function rateLimit(name: string, limit: number, windowSeconds: number) {
   return createMiddleware(async (c, next) => {
-    const key = `ratelimit:${name}:${clientIp(c)}`;
-    const [[, count]] = (await redis.multi().incr(key).expire(key, windowSeconds, "NX").exec()) as [
-      [Error | null, number],
-    ];
-    if (count > limit) {
-      throw new HTTPException(429, { message: "Too many requests" });
-    }
+    await hit(`ratelimit:${name}:${clientIp(c)}`, limit, windowSeconds);
+    await next();
+  });
+}
+
+// Per signed-in user rather than per IP, for actions one user could spread
+// across many IPs (invites). Runs after requireAuth.
+export function rateLimitByUser(name: string, limit: number, windowSeconds: number) {
+  return createMiddleware<AuthEnv>(async (c, next) => {
+    await hit(`ratelimit:${name}:user:${c.var.userId}`, limit, windowSeconds);
     await next();
   });
 }

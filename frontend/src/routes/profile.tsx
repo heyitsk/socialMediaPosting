@@ -52,8 +52,8 @@ export function ProfilePage() {
               className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
             >
               <span className="font-medium">{workspace.name}</span>
-              <Badge variant={workspace.isOwner ? "default" : "secondary"}>
-                {workspace.isOwner ? "Owner" : "Member"}
+              <Badge variant={workspace.role === "OWNER" ? "default" : "secondary"}>
+                {{ OWNER: "Owner", ADMIN: "Admin", MEMBER: "Member" }[workspace.role]}
               </Badge>
             </Link>
           ))}

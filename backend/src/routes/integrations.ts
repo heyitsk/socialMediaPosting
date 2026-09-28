@@ -1,7 +1,7 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
-import type { WorkspaceEnv } from "../middleware/auth";
+import { requireRole, type WorkspaceEnv } from "../middleware/auth";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../service/n8n";
 import { workspaceParamsSchema } from "./workspace-params";
 
@@ -51,12 +51,14 @@ const disconnectIntegration = createRoute({
   method: "delete",
   path: "/{id}",
   tags: ["Integrations"],
-  summary: "Disconnect an account",
+  summary: "Disconnect an account (owner or admin)",
+  middleware: [requireRole("OWNER", "ADMIN")] as const,
   request: {
     params: workspaceParamsSchema.extend({ id: z.string() }),
   },
   responses: {
     204: { description: "Disconnected" },
+    403: { description: "Members can't disconnect accounts" },
     404: { description: "Not found" },
   },
 });

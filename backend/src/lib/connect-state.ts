@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Context } from "hono";
-import { isMember } from "../db/workspaces";
+import { canManageAccounts, getRole } from "../db/workspaces";
 import { env } from "./env";
 import { redis } from "./redis";
 import { readSession } from "./session";
@@ -40,7 +40,8 @@ export function connectRedirect(query: string, workspaceId?: string): string {
 }
 
 // Returns the provider state to send, or a Response to return instead when
-// the user isn't signed in / isn't a member of the requested workspace.
+// the user isn't signed in / isn't an owner or admin of the requested
+// workspace (plain members can't connect accounts — websitePlan.md §9.7).
 export async function beginConnect(
   c: Context,
   platform: string,
@@ -52,7 +53,7 @@ export async function beginConnect(
   }
 
   const workspaceId = c.req.query("workspaceId");
-  if (!workspaceId || !(await isMember(userId, workspaceId))) {
+  if (!workspaceId || !canManageAccounts(await getRole(userId, workspaceId))) {
     return { response: c.redirect(connectRedirect(`error=${platform}_connect_forbidden`)) };
   }
 
@@ -83,10 +84,11 @@ export async function finishConnect(
   }
   const record = JSON.parse(raw) as ConnectState;
 
-  // Same browser, same user that started the flow — and still a member (they
-  // could have been removed in the few minutes the consent screen was open).
+  // Same browser, same user that started the flow — and still an owner/admin
+  // (they could have been removed or demoted, or the workspace deleted, in the
+  // few minutes the consent screen was open).
   const userId = await readSession(c);
-  if (userId !== record.userId || !(await isMember(userId, record.workspaceId))) {
+  if (userId !== record.userId || !canManageAccounts(await getRole(userId, record.workspaceId))) {
     return fail("invalid_state");
   }
 
