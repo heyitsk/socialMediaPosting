@@ -931,6 +931,32 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 - `websitePlan.md` — §9 status, §9.1 Authorization/Invites rows, §9.7 rewritten, §9.8 member cap + future roles, changelog
 - `history.md` — this entry
 
+### Session 29 — 2026-09-29
+
+**What we did:**
+- **Multi-platform posting (post groups) and scheduling** (`websitePlan.md` §10). Planned with Kushagra first (9 questions), then built on branch `multiposting` (on top of the members work).
+- **Schema** (migration `20260929120000_add_post_groups`, hand-written + `migrate deploy`, DB backed up first): `PostGroup` parent (`content_kind`, shared caption/media, `scheduled_for`, `idempotency_key` unique per workspace, `cancelled_at`, aggregated `status`) over the existing per-target `posts` rows (`group_id`, `attempt`). `CANCELLED` status, `ContentKind` enum. Every existing post backfilled into its own group.
+- **Backend**: `GET /api/capabilities` (media types per platform + content kind, caption/carousel limits); `/api/workspaces/:id/post-groups` create/list/get/cancel/per-target retry. Create validates all-or-nothing with per-target errors (kind support, reconnect, caption length, IG hashtags, carousel range, YouTube title, URL HEAD check, ffprobe Shorts shape/length), dedupes the two Instagram connections of one account silently, and returns the existing group for a repeated idempotency key. New `post-publish` BullMQ queue: delayed publish jobs for schedules, callback-deadline jobs (20 min, 90 for video), "missed its scheduled time" after 1 h late, a 5-minute reconciler for lost jobs. All status changes (worker, n8n callback, video poller) go through `service/post-groups.ts`, which recomputes the group status under a row lock. Old `/posts` route removed.
+- **Frontend**: composer replaced — content kind → accounts (unsupported/reconnect-needed ones disabled with a reason) → shared caption + media → per-account caption override and YouTube fields (Video/Short, with a browser metadata check) → now or schedule. Invalid targets block submit with "Deselect invalid accounts". A live results panel shows each account's status with Retry. History shows grouped cards with per-account rows, Retry and Cancel.
+- **Verified**: backend and frontend typecheck, `vite build`; a 28-check API smoke test and a 4-check timer test (reconciler, missed schedule, callback deadline, delayed job) against the dev DB with n8n pointed at a dead port (nothing posted for real), test rows deleted afterwards. **Not yet click-tested in the browser or with real n8n posting.**
+
+**Decisions made:** (Kushagra, Sep 29)
+- Replace the composer. Per-platform caption overrides. Block submit on invalid targets with one-click deselect. Manual per-target retry only.
+- Instagram video always goes as a Reel; YouTube Short = user's choice + dimension check. Duplicate Instagram connections post once, silently; several accounts per platform allowed.
+- Stories stay Instagram-only. BullMQ dispatch, so scheduling is in. No live-post links yet.
+- Assumed, to confirm: 1 h late = missed; editing a scheduled post = cancel + recreate; schedule window 2 min-90 days; any member can cancel.
+
+**Still to do:**
+- Click-test the composer and History, then a real post to all platforms with n8n running.
+- Note: the shared dev DB is migrated, so `main`'s old code can't create posts until this branch is merged.
+
+**Files modified this session:**
+- `backend/prisma/schema.prisma`, `backend/prisma/migrations/20260929120000_add_post_groups/migration.sql` (new)
+- `backend/src/lib/capabilities.ts`, `backend/src/lib/media-probe.ts`, `backend/src/service/post-groups.ts`, `backend/src/queue/publish-queue.ts`, `backend/src/queue/publish-worker.ts`, `backend/src/routes/capabilities.ts`, `backend/src/routes/post-groups.ts`, `backend/src/routes/post-schemas.ts` (new); `backend/src/routes/posts.ts` (deleted)
+- `backend/src/index.ts`, `backend/src/service/n8n.ts`, `backend/src/routes/integrations.ts`, `backend/src/routes/webhooks.ts`, `backend/src/queue/video-status-queue.ts`, `backend/src/queue/video-status-worker.ts`
+- `frontend/src/lib/posting.ts`, `frontend/src/components/post-group-card.tsx` (new), `frontend/src/routes/composer.tsx`, `frontend/src/routes/history.tsx`, `frontend/src/lib/api-schema.d.ts`
+- `websitePlan.md` — §10, `history.md` — this entry
+
 ---
 
 *Update this file at the end of each session.*
