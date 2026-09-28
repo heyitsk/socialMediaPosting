@@ -6,7 +6,9 @@ import { DashboardPage } from "@/routes/dashboard";
 import { HistoryPage } from "@/routes/history";
 import { AppLayout } from "@/routes/layout";
 import { LoginPage } from "@/routes/login";
+import { NewWorkspacePage } from "@/routes/new-workspace";
 import { ProfilePage } from "@/routes/profile";
+import { WorkspaceSettingsPage } from "@/routes/workspace-settings";
 
 function RequireAuth() {
   const location = useLocation();
@@ -59,7 +61,9 @@ export function App() {
             <Route index element={<DashboardPage />} />
             <Route path="composer" element={<ComposerPage />} />
             <Route path="history" element={<HistoryPage />} />
+            <Route path="settings" element={<WorkspaceSettingsPage />} />
           </Route>
+          <Route path="workspaces/new" element={<NewWorkspacePage />} />
           <Route path="profile" element={<ProfilePage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

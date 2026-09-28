@@ -38,6 +38,16 @@ export function useWorkspaceId(): string | undefined {
   return me.workspaces.find((workspace) => workspace.id === last)?.id ?? me.workspaces[0]?.id;
 }
 
+// The active workspace's summary from /api/me (name, role, isPersonal). Role
+// only decides what the UI shows — the backend enforces it on every request.
+export function useWorkspace() {
+  const workspaceId = useWorkspaceId();
+  const { data: me } = useMe();
+  return me?.workspaces.find((workspace) => workspace.id === workspaceId);
+}
+
+export const ROLE_LABELS = { OWNER: "Owner", ADMIN: "Admin", MEMBER: "Member" } as const;
+
 export function useLogout() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();

@@ -14,6 +14,7 @@ const NAV_ITEMS = [
   { path: "", label: "Dashboard" },
   { path: "/composer", label: "Composer" },
   { path: "/history", label: "History" },
+  { path: "/settings", label: "Settings" },
 ];
 
 const navLinkClass = ({ isActive }: { isActive: boolean }) =>
@@ -75,6 +76,9 @@ export function AppLayout() {
               {item.label}
             </NavLink>
           ))}
+          <NavLink to="/workspaces/new" className={navLinkClass}>
+            + New workspace
+          </NavLink>
         </nav>
         {me && (
           <NavLink

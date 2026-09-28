@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { UserAvatar } from "@/components/user-avatar";
-import { useLogout, useMe } from "@/lib/session";
+import { ROLE_LABELS, useLogout, useMe } from "@/lib/session";
 
 export function ProfilePage() {
   const { data: me } = useMe();
@@ -51,12 +51,20 @@ export function ProfilePage() {
               to={`/w/${workspace.id}`}
               className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm hover:bg-accent"
             >
-              <span className="font-medium">{workspace.name}</span>
+              <span className="font-medium">
+                {workspace.name}
+                {workspace.isPersonal && (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">Personal</span>
+                )}
+              </span>
               <Badge variant={workspace.role === "OWNER" ? "default" : "secondary"}>
-                {{ OWNER: "Owner", ADMIN: "Admin", MEMBER: "Member" }[workspace.role]}
+                {ROLE_LABELS[workspace.role]}
               </Badge>
             </Link>
           ))}
+          <Button variant="outline" size="sm" className="self-start" asChild>
+            <Link to="/workspaces/new">New workspace</Link>
+          </Button>
         </CardContent>
       </Card>
 

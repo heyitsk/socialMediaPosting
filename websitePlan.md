@@ -534,7 +534,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 
 ## 9. App Authentication, Sessions & Workspaces
 
-> **Status (Sep 24, 2026):** Phase A (workspace schema, migration `20260924060000_add_workspaces_and_login`) applied. Phase B (Google sign-in, Redis sessions, `/api/me`, `/api/logout[-all]`, Vite `/api` proxy) live-tested. Phase C done: data routes moved under `/api/workspaces/:workspaceId/*` behind `requireAuth` + `requireWorkspace` (non-members get 404); connect flows take `?workspaceId=`, check session + membership at start, and at the callback the state must belong to the same signed-in user (`lib/connect-state.ts`); PKCE added to YouTube connect (Meta/LinkedIn unchanged); `csrf()` on `/api/*`; per-IP rate limit on `/api/login/*`; `/docs` + `/openapi.json` dev-only; single-user mode (`DEFAULT_USER_*`, `getDefaultWorkspaceContext`) removed. Phase D (workspace URLs, switcher, avatar/logout) built Sep 24. Phase E backend (roles, members, invites, soft delete) built Sep 29 — see §9.7; its frontend and Phase F not started. Rules follow the [OWASP OAuth 2.0 Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/OAuth2_Cheat_Sheet.html).
+> **Status (Sep 24, 2026):** Phase A (workspace schema, migration `20260924060000_add_workspaces_and_login`) applied. Phase B (Google sign-in, Redis sessions, `/api/me`, `/api/logout[-all]`, Vite `/api` proxy) live-tested. Phase C done: data routes moved under `/api/workspaces/:workspaceId/*` behind `requireAuth` + `requireWorkspace` (non-members get 404); connect flows take `?workspaceId=`, check session + membership at start, and at the callback the state must belong to the same signed-in user (`lib/connect-state.ts`); PKCE added to YouTube connect (Meta/LinkedIn unchanged); `csrf()` on `/api/*`; per-IP rate limit on `/api/login/*`; `/docs` + `/openapi.json` dev-only; single-user mode (`DEFAULT_USER_*`, `getDefaultWorkspaceContext`) removed. Phase D (workspace URLs, switcher, avatar/logout) built Sep 24. Phase E (roles, members, invites, soft delete — backend and frontend) built Sep 29, see §9.7; Phase F not started. Rules follow the [OWASP OAuth 2.0 Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/OAuth2_Cheat_Sheet.html).
 
 This is **app login** ("who is using smPosting"), which is a different thing from the §2 **platform connect** flows ("which Facebook Page may smPosting post to"). They share nothing except the OAuth mechanics.
 
@@ -629,7 +629,7 @@ Authorization Code flow + **PKCE (S256)** + **`nonce`**, confidential client (cl
 
 ### 9.7 Roles, members & invites (Phase E)
 
-> **Status (Sep 29, 2026):** backend built (migration `20260929060000_add_workspace_roles_and_soft_delete`), OpenAPI doc + `api-schema.d.ts` regenerated, 15 end-to-end permission tests passing. Frontend (settings page, create workspace, role-aware UI) not started.
+> **Status (Sep 29, 2026):** backend built (migration `20260929060000_add_workspace_roles_and_soft_delete`), OpenAPI doc + `api-schema.d.ts` regenerated, 15 end-to-end permission tests passing. Frontend built the same day (typecheck + production build clean; not yet click-tested with two real Google accounts).
 
 **Decisions (Sep 29, 2026):**
 - Exactly **one owner** per workspace (`workspaces.owner_user_id`, the creator). Ownership can't be transferred and the owner can't leave.
@@ -667,7 +667,12 @@ Authorization Code flow + **PKCE (S256)** + **`nonce`**, confidential client (cl
 - `/api/me` returns `role` (`OWNER`/`ADMIN`/`MEMBER`) and `isPersonal` per workspace instead of `isOwner`, and omits deleted workspaces.
 - V1 sends no invite email — the owner shares the app link. Email delivery rides on the Phase 4 Resend/SendGrid item.
 
-**Frontend (next):** workspace settings page (owner: members list with role dropdown + remove, invite form with role, pending invites + revoke, rename, delete; others: leave), "Create workspace" in the switcher, hide Connect/Disconnect for MEMBERs (a member hitting a connect URL currently lands on the generic `*_connect_forbidden` toast), refetch `/api/me` after any change.
+**Frontend:**
+- `/w/:workspaceId/settings` (`routes/workspace-settings.tsx`, "Settings" in the sidebar). Owner: rename, invite form (email + role, "Copy app link"), pending invites + revoke, members with role dropdown + remove, delete. Personal workspace: rename only, plus a note to create a new workspace to collaborate. Admin/member: their role and a Leave button.
+- `/workspaces/new` (`routes/new-workspace.tsx`), linked from "+ New workspace" in the sidebar and the profile page; lands on the new workspace's settings.
+- Dashboard hides Connect/Reconnect/Disconnect for MEMBERs; the `*_connect_forbidden` toast now covers "not an owner/admin" as well as "removed".
+- `useWorkspace()` (active workspace's `role`/`isPersonal` from `/api/me`) and `apiErrorMessage()` (shows the backend's `{ error }` message) are the shared helpers. Every change refetches `/api/me`; leave/delete navigate to `/`.
+- Confirmations use `window.confirm` — there's no dialog component yet.
 
 ### 9.8 Later / not V1
 
