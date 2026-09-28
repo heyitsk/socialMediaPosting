@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
+import { useWorkspaceId } from "@/lib/session";
 
 const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   PROCESSING: "secondary",
@@ -13,10 +14,18 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "
 };
 
 export function HistoryPage() {
-  const { data: posts, isPending, isError } = useQuery({
-    queryKey: ["posts"],
+  const workspaceId = useWorkspaceId() ?? "";
+  const {
+    data: posts,
+    isPending,
+    isError,
+  } = useQuery({
+    queryKey: ["posts", workspaceId],
+    enabled: !!workspaceId,
     queryFn: async () => {
-      const { data, error } = await api.GET("/api/posts");
+      const { data, error } = await api.GET("/api/workspaces/{workspaceId}/posts", {
+        params: { path: { workspaceId } },
+      });
       if (error) throw error;
       return data;
     },

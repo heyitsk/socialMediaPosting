@@ -14,13 +14,17 @@ export const UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload";
 // getVideoStatus poll processing status after upload.
 const SCOPES = [UPLOAD_SCOPE, "https://www.googleapis.com/auth/youtube.readonly"].join(" ");
 
-export function buildAuthUrl(state: string): string {
+export function buildAuthUrl(state: string, codeChallenge: string): string {
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
   url.searchParams.set("redirect_uri", REDIRECT_URI);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", SCOPES);
   url.searchParams.set("state", state);
+  // PKCE (S256) — a stolen authorization code is useless without the
+  // verifier kept server-side in the connect state (OWASP OAuth 2.0 Cheat Sheet).
+  url.searchParams.set("code_challenge", codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
   // offline = issue a refresh token at all; consent = re-issue one on every
   // connect, not just the very first — otherwise a reconnect after
   // disconnect silently comes back with no refresh token.
@@ -38,9 +42,13 @@ export interface GoogleToken {
   refresh_token?: string;
 }
 
-export async function exchangeCodeForToken(code: string): Promise<GoogleToken> {
+export async function exchangeCodeForToken(
+  code: string,
+  codeVerifier: string,
+): Promise<GoogleToken> {
   const body = new URLSearchParams({
     code,
+    code_verifier: codeVerifier,
     client_id: env.GOOGLE_CLIENT_ID,
     client_secret: env.GOOGLE_CLIENT_SECRET,
     redirect_uri: REDIRECT_URI,
@@ -125,28 +133,38 @@ export type YouTubeVideoStatus =
 // still fail or reject the video (duplicate, copyright, too long for an
 // unverified channel, etc.). Polled by queue/video-status-worker.ts, same as
 // Facebook/LinkedIn.
-export async function getVideoStatus(accessToken: string, videoId: string): Promise<YouTubeVideoStatus> {
+export async function getVideoStatus(
+  accessToken: string,
+  videoId: string,
+): Promise<YouTubeVideoStatus> {
   const url = new URL("https://www.googleapis.com/youtube/v3/videos");
   url.searchParams.set("part", "status");
   url.searchParams.set("id", videoId);
 
   const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!response.ok) {
-    throw new Error(`YouTube video status fetch failed (${response.status}): ${await response.text()}`);
+    throw new Error(
+      `YouTube video status fetch failed (${response.status}): ${await response.text()}`,
+    );
   }
 
   const data = (await response.json()) as {
-    items?: { status: { uploadStatus: string; failureReason?: string; rejectionReason?: string } }[];
+    items?: {
+      status: { uploadStatus: string; failureReason?: string; rejectionReason?: string };
+    }[];
   };
   const status = data.items?.[0]?.status;
 
-  if (!status) return { state: "error", reason: "Video not found on YouTube — it may have been deleted" };
+  if (!status)
+    return { state: "error", reason: "Video not found on YouTube — it may have been deleted" };
   if (status.uploadStatus === "processed") return { state: "ready" };
   if (status.uploadStatus === "uploaded") return { state: "processing" };
   return {
     state: "error",
     reason: `YouTube ${status.uploadStatus} the video${
-      status.failureReason || status.rejectionReason ? ` (${status.failureReason ?? status.rejectionReason})` : ""
+      status.failureReason || status.rejectionReason
+        ? ` (${status.failureReason ?? status.rejectionReason})`
+        : ""
     }`,
   };
 }

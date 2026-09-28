@@ -1,9 +1,13 @@
-import { OpenAPIHono } from "@hono/zod-openapi";
 import { swaggerUI } from "@hono/swagger-ui";
+import { OpenAPIHono } from "@hono/zod-openapi";
+import { csrf } from "hono/csrf";
 import { logger } from "hono/logger";
 import { env } from "./lib/env";
+import { requireAuth, requireWorkspace } from "./middleware/auth";
 import { corsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/error-handler";
+import { rateLimit } from "./middleware/rate-limit";
+import { startVideoStatusWorker } from "./queue/video-status-worker";
 import { facebookAuthRoute } from "./routes/auth/facebook";
 import { instagramAuthRoute } from "./routes/auth/instagram";
 import { linkedinAuthRoute } from "./routes/auth/linkedin";
@@ -11,31 +15,50 @@ import { threadsAuthRoute } from "./routes/auth/threads";
 import { youtubeAuthRoute } from "./routes/auth/youtube";
 import { healthRoute } from "./routes/health";
 import { integrationsRoute } from "./routes/integrations";
+import { loginRoute } from "./routes/login";
 import { postsRoute } from "./routes/posts";
+import { sessionRoute } from "./routes/session";
 import { webhooksRoute } from "./routes/webhooks";
-import { startVideoStatusWorker } from "./queue/video-status-worker";
 
 const app = new OpenAPIHono();
 
 app.use(logger());
 app.use(corsMiddleware);
+// Rejects cross-site form/text POSTs (the only kind that skip a CORS
+// preflight) whose Origin isn't the frontend — covers logout and anything
+// else that takes a session cookie. JSON requests are already preflighted.
+app.use("/api/*", csrf({ origin: env.FRONTEND_URL }));
 app.onError(errorHandler);
 
+// Access rules (websitePlan.md §9.5):
+// - public: /health, /api/login/* (rate-limited), /api/webhooks/* (n8n,
+//   guarded by N8N_CALLBACK_SECRET)
+// - session only: /api/me, /api/logout-all (requireAuth inside sessionRoute);
+//   /api/auth/* connect flows check the session + membership themselves,
+//   since they're browser navigations that must redirect, not 401
+// - session + membership: everything under /api/workspaces/:workspaceId/*
 app.route("/health", healthRoute);
+app.use("/api/login/*", rateLimit("login", 20, 60));
+app.route("/api/login", loginRoute);
+app.route("/api", sessionRoute);
 app.route("/api/auth/facebook", facebookAuthRoute);
 app.route("/api/auth/instagram", instagramAuthRoute);
 app.route("/api/auth/threads", threadsAuthRoute);
 app.route("/api/auth/linkedin", linkedinAuthRoute);
 app.route("/api/auth/youtube", youtubeAuthRoute);
-app.route("/api/integrations", integrationsRoute);
-app.route("/api/posts", postsRoute);
+app.use("/api/workspaces/:workspaceId/*", requireAuth, requireWorkspace);
+app.route("/api/workspaces/:workspaceId/integrations", integrationsRoute);
+app.route("/api/workspaces/:workspaceId/posts", postsRoute);
 app.route("/api/webhooks", webhooksRoute);
 
-app.doc("/openapi.json", {
-  openapi: "3.1.0",
-  info: { title: "smPosting API", version: "0.1.0" },
-});
-app.get("/docs", swaggerUI({ url: "/openapi.json" }));
+// The full API map is no business of the public internet — dev only.
+if (env.NODE_ENV !== "production") {
+  app.doc("/openapi.json", {
+    openapi: "3.1.0",
+    info: { title: "smPosting API", version: "0.1.0" },
+  });
+  app.get("/docs", swaggerUI({ url: "/openapi.json" }));
+}
 
 const server = Bun.serve({
   port: env.PORT,
@@ -47,4 +70,6 @@ const server = Bun.serve({
 startVideoStatusWorker();
 
 console.log(`smPosting backend listening on ${server.url}`);
-console.log(`API docs available at ${server.url}docs`);
+if (env.NODE_ENV !== "production") {
+  console.log(`API docs available at ${server.url}docs`);
+}

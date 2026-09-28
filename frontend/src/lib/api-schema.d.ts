@@ -40,7 +40,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/integrations": {
+    "/api/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The signed-in user and the workspaces they belong to */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Signed in */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Me"];
+                    };
+                };
+                /** @description Not signed in */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End this browser's session */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Signed out */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/logout-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End every session of the signed-in user, on all devices */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Signed out everywhere */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Not signed in */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/integrations": {
         parameters: {
             query?: never;
             header?: never;
@@ -52,12 +170,14 @@ export interface paths {
             parameters: {
                 query?: never;
                 header?: never;
-                path?: never;
+                path: {
+                    workspaceId: string;
+                };
                 cookie?: never;
             };
             requestBody?: never;
             responses: {
-                /** @description Connected accounts for the current user */
+                /** @description Connected accounts in the workspace */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -76,7 +196,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/integrations/{id}": {
+    "/api/workspaces/{workspaceId}/integrations/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -92,6 +212,7 @@ export interface paths {
                 query?: never;
                 header?: never;
                 path: {
+                    workspaceId: string;
                     id: string;
                 };
                 cookie?: never;
@@ -119,7 +240,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/posts": {
+    "/api/workspaces/{workspaceId}/posts": {
         parameters: {
             query?: never;
             header?: never;
@@ -131,12 +252,14 @@ export interface paths {
             parameters: {
                 query?: never;
                 header?: never;
-                path?: never;
+                path: {
+                    workspaceId: string;
+                };
                 cookie?: never;
             };
             requestBody?: never;
             responses: {
-                /** @description Posts for the current user */
+                /** @description Posts in the workspace */
                 200: {
                     headers: {
                         [name: string]: unknown;
@@ -153,7 +276,9 @@ export interface paths {
             parameters: {
                 query?: never;
                 header?: never;
-                path?: never;
+                path: {
+                    workspaceId: string;
+                };
                 cookie?: never;
             };
             requestBody?: {
@@ -233,6 +358,19 @@ export interface components {
             status: "ok";
             /** Format: date-time */
             timestamp: string;
+        };
+        Me: {
+            id: string;
+            email: string;
+            name: string;
+            avatarUrl: string | null;
+            createdAt: string;
+            workspaces: components["schemas"]["WorkspaceSummary"][];
+        };
+        WorkspaceSummary: {
+            id: string;
+            name: string;
+            isOwner: boolean;
         };
         ConnectedAccountSummary: {
             id: string;

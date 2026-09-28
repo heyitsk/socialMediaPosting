@@ -1,15 +1,22 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
-import { getOrCreateDefaultUser } from "../db/users";
+import type { WorkspaceEnv } from "../middleware/auth";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../service/n8n";
+import { workspaceParamsSchema } from "./workspace-params";
 
 const connectedAccountSchema = z
   .object({
     id: z.string(),
     platform: z.enum(["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"]),
     accountName: z.string(),
-    connectionMethod: z.enum(["FACEBOOK_PAGE", "INSTAGRAM_LOGIN", "THREADS_LOGIN", "LINKEDIN_LOGIN", "YOUTUBE_LOGIN"]),
+    connectionMethod: z.enum([
+      "FACEBOOK_PAGE",
+      "INSTAGRAM_LOGIN",
+      "THREADS_LOGIN",
+      "LINKEDIN_LOGIN",
+      "YOUTUBE_LOGIN",
+    ]),
     lastRefreshedAt: z.iso.datetime().nullable(),
     // True once a REQUIRES_RECONNECT/SLIDING_WINDOW account's token is inside
     // (or past) TOKEN_EXPIRY_BUFFER_MS of expiring — LinkedIn issues no
@@ -29,9 +36,12 @@ const listIntegrations = createRoute({
   path: "/",
   tags: ["Integrations"],
   summary: "List connected accounts",
+  request: {
+    params: workspaceParamsSchema,
+  },
   responses: {
     200: {
-      description: "Connected accounts for the current user",
+      description: "Connected accounts in the workspace",
       content: { "application/json": { schema: z.array(connectedAccountSchema) } },
     },
   },
@@ -43,7 +53,7 @@ const disconnectIntegration = createRoute({
   tags: ["Integrations"],
   summary: "Disconnect an account",
   request: {
-    params: z.object({ id: z.string() }),
+    params: workspaceParamsSchema.extend({ id: z.string() }),
   },
   responses: {
     204: { description: "Disconnected" },
@@ -51,11 +61,10 @@ const disconnectIntegration = createRoute({
   },
 });
 
-export const integrationsRoute = new OpenAPIHono()
+export const integrationsRoute = new OpenAPIHono<WorkspaceEnv>()
   .openapi(listIntegrations, async (c) => {
-    const user = await getOrCreateDefaultUser();
     const accounts = await prisma.connectedAccount.findMany({
-      where: { userId: user.id, disconnectedAt: null },
+      where: { workspaceId: c.var.workspaceId, disconnectedAt: null },
       select: {
         id: true,
         platform: true,
@@ -84,13 +93,12 @@ export const integrationsRoute = new OpenAPIHono()
   })
   .openapi(disconnectIntegration, async (c) => {
     const { id } = c.req.valid("param");
-    const user = await getOrCreateDefaultUser();
 
     // Soft-delete: posts.connected_account_id is RESTRICT, so a hard delete
     // fails once the account has post history. Reconnecting via OAuth
     // upserts the same row and clears disconnectedAt.
     const result = await prisma.connectedAccount.updateMany({
-      where: { id, userId: user.id, disconnectedAt: null },
+      where: { id, workspaceId: c.var.workspaceId, disconnectedAt: null },
       data: { disconnectedAt: new Date() },
     });
 

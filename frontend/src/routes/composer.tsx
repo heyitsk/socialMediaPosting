@@ -16,6 +16,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { components } from "@/lib/api-schema";
+import { useWorkspaceId } from "@/lib/session";
 
 type MediaType = "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
 
@@ -100,11 +101,19 @@ const YOUTUBE_CATEGORIES: { value: YouTubeCategoryId; label: string }[] = [
 
 export function ComposerPage() {
   const queryClient = useQueryClient();
+  const workspaceId = useWorkspaceId() ?? "";
 
-  const { data: accounts, isPending, isError } = useQuery({
-    queryKey: ["integrations"],
+  const {
+    data: accounts,
+    isPending,
+    isError,
+  } = useQuery({
+    queryKey: ["integrations", workspaceId],
+    enabled: !!workspaceId,
     queryFn: async () => {
-      const { data, error } = await api.GET("/api/integrations");
+      const { data, error } = await api.GET("/api/workspaces/{workspaceId}/integrations", {
+        params: { path: { workspaceId } },
+      });
       if (error) throw error;
       return data;
     },
@@ -140,7 +149,8 @@ export function ComposerPage() {
 
   const createPost = useMutation({
     mutationFn: async () => {
-      const { data, error } = await api.POST("/api/posts", {
+      const { data, error } = await api.POST("/api/workspaces/{workspaceId}/posts", {
+        params: { path: { workspaceId } },
         body: {
           connectedAccountId,
           caption,
@@ -165,7 +175,7 @@ export function ComposerPage() {
       return data;
     },
     onSuccess: (post) => {
-      queryClient.invalidateQueries({ queryKey: ["posts"] });
+      queryClient.invalidateQueries({ queryKey: ["posts", workspaceId] });
       if (post?.status === "FAILED") {
         toast.error("Post dispatch failed — check History for details.");
       } else {
@@ -216,8 +226,8 @@ export function ComposerPage() {
           )}
           {!isPending && !isError && postableAccounts.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              Connect a Facebook, Instagram, Threads, LinkedIn, or YouTube account from the Dashboard
-              before posting.
+              Connect a Facebook, Instagram, Threads, LinkedIn, or YouTube account from the
+              Dashboard before posting.
             </p>
           )}
 

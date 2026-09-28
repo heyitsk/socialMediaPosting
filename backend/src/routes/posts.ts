@@ -1,8 +1,8 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
-import { HTTPException } from "hono/http-exception";
 import type { Platform } from "@prisma/client";
+import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
-import { getOrCreateDefaultUser } from "../db/users";
+import type { WorkspaceEnv } from "../middleware/auth";
 import {
   buildFacebookPayload,
   buildInstagramPayload,
@@ -15,8 +15,17 @@ import {
   dispatchToN8n,
   dispatchYouTubeToN8n,
 } from "../service/n8n";
+import { workspaceParamsSchema } from "./workspace-params";
 
-const mediaTypeSchema = z.enum(["TEXT", "IMAGE", "VIDEO", "CAROUSEL", "REELS", "STORIES", "SHORTS"]);
+const mediaTypeSchema = z.enum([
+  "TEXT",
+  "IMAGE",
+  "VIDEO",
+  "CAROUSEL",
+  "REELS",
+  "STORIES",
+  "SHORTS",
+]);
 
 // n8n's per-platform workflows only implement these branches — reject
 // anything else before dispatching instead of relying on the workflow's
@@ -38,7 +47,21 @@ const SUPPORTED_MEDIA_TYPES: Partial<Record<Platform, readonly string[]>> = {
 // hardcoded rather than fetched per channel since this list has been stable
 // for years; frontend composer.tsx mirrors it with labels.
 const YOUTUBE_CATEGORY_IDS = [
-  "1", "2", "10", "15", "17", "19", "20", "22", "23", "24", "25", "26", "27", "28", "29",
+  "1",
+  "2",
+  "10",
+  "15",
+  "17",
+  "19",
+  "20",
+  "22",
+  "23",
+  "24",
+  "25",
+  "26",
+  "27",
+  "28",
+  "29",
 ] as const;
 
 const youtubeOptionsSchema = z
@@ -108,9 +131,12 @@ const listPosts = createRoute({
   path: "/",
   tags: ["Posts"],
   summary: "List posts with their dispatch logs",
+  request: {
+    params: workspaceParamsSchema,
+  },
   responses: {
     200: {
-      description: "Posts for the current user",
+      description: "Posts in the workspace",
       content: { "application/json": { schema: z.array(postSchema) } },
     },
   },
@@ -122,6 +148,7 @@ const createPost = createRoute({
   tags: ["Posts"],
   summary: "Create a post and immediately dispatch it to n8n",
   request: {
+    params: workspaceParamsSchema,
     body: { content: { "application/json": { schema: createPostSchema } } },
   },
   responses: {
@@ -132,7 +159,10 @@ const createPost = createRoute({
   },
 });
 
-function serializePost({ platformOptions, ...post }: {
+function serializePost({
+  platformOptions,
+  ...post
+}: {
   id: string;
   caption: string;
   mediaType: string;
@@ -163,17 +193,18 @@ function serializePost({ platformOptions, ...post }: {
       executedAt: log.executedAt.toISOString(),
     })),
     connectedAccount: {
-      platform: post.connectedAccount.platform as z.infer<typeof postSchema>["connectedAccount"]["platform"],
+      platform: post.connectedAccount.platform as z.infer<
+        typeof postSchema
+      >["connectedAccount"]["platform"],
       accountName: post.connectedAccount.accountName,
     },
   };
 }
 
-export const postsRoute = new OpenAPIHono()
+export const postsRoute = new OpenAPIHono<WorkspaceEnv>()
   .openapi(listPosts, async (c) => {
-    const user = await getOrCreateDefaultUser();
     const posts = await prisma.post.findMany({
-      where: { userId: user.id },
+      where: { workspaceId: c.var.workspaceId },
       include: { logs: true, connectedAccount: { select: { platform: true, accountName: true } } },
       orderBy: { createdAt: "desc" },
     });
@@ -182,10 +213,9 @@ export const postsRoute = new OpenAPIHono()
   })
   .openapi(createPost, async (c) => {
     const body = c.req.valid("json");
-    const user = await getOrCreateDefaultUser();
 
     const connectedAccount = await prisma.connectedAccount.findFirst({
-      where: { id: body.connectedAccountId, userId: user.id, disconnectedAt: null },
+      where: { id: body.connectedAccountId, workspaceId: c.var.workspaceId, disconnectedAt: null },
     });
 
     if (!connectedAccount) {
@@ -194,7 +224,9 @@ export const postsRoute = new OpenAPIHono()
 
     const supportedMediaTypes = SUPPORTED_MEDIA_TYPES[connectedAccount.platform];
     if (!supportedMediaTypes) {
-      throw new HTTPException(400, { message: `${connectedAccount.platform} accounts can't be dispatched yet` });
+      throw new HTTPException(400, {
+        message: `${connectedAccount.platform} accounts can't be dispatched yet`,
+      });
     }
     if (!supportedMediaTypes.includes(body.mediaType)) {
       throw new HTTPException(400, {
@@ -207,7 +239,8 @@ export const postsRoute = new OpenAPIHono()
 
     const post = await prisma.post.create({
       data: {
-        userId: user.id,
+        workspaceId: c.var.workspaceId,
+        createdByUserId: c.var.userId,
         connectedAccountId: connectedAccount.id,
         caption: body.caption,
         mediaType: body.mediaType,

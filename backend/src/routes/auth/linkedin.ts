@@ -1,52 +1,30 @@
-import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { getOrCreateDefaultUser } from "../../db/users";
 import { prisma } from "../../db/client";
-import { buildAuthUrl, exchangeCodeForToken, fetchProfile } from "../../lib/linkedin";
+import { beginConnect, connectRedirect, finishConnect } from "../../lib/connect-state";
 import { encrypt } from "../../lib/crypto";
-import { env } from "../../lib/env";
-import { redis } from "../../lib/redis";
-
-const STATE_TTL_SECONDS = 300;
-
-function stateKey(state: string): string {
-  return `oauth:state:linkedin:${state}`;
-}
+import { buildAuthUrl, exchangeCodeForToken, fetchProfile } from "../../lib/linkedin";
 
 export const linkedinAuthRoute = new Hono();
 
 linkedinAuthRoute.get("/", async (c) => {
-  const state = randomBytes(16).toString("hex");
-  await redis.set(stateKey(state), "1", "EX", STATE_TTL_SECONDS);
-  return c.redirect(buildAuthUrl(state));
+  const started = await beginConnect(c, "linkedin");
+  if ("response" in started) return started.response;
+  return c.redirect(buildAuthUrl(started.state));
 });
 
 linkedinAuthRoute.get("/callback", async (c) => {
-  const code = c.req.query("code");
-  const state = c.req.query("state");
-  const deniedError = c.req.query("error");
-
-  if (deniedError || !code || !state) {
-    return c.redirect(`${env.FRONTEND_URL}/?error=linkedin_connect_denied`);
-  }
-
-  const key = stateKey(state);
-  const validState = await redis.get(key);
-  await redis.del(key);
-
-  if (!validState) {
-    return c.redirect(`${env.FRONTEND_URL}/?error=linkedin_connect_invalid_state`);
-  }
+  const finished = await finishConnect(c, "linkedin");
+  if ("response" in finished) return finished.response;
+  const { ctx } = finished;
 
   try {
-    const token = await exchangeCodeForToken(code);
+    const token = await exchangeCodeForToken(ctx.code);
     const profile = await fetchProfile(token.access_token);
-    const user = await getOrCreateDefaultUser();
 
     await prisma.connectedAccount.upsert({
       where: {
-        userId_platform_platformAccountId_connectionMethod: {
-          userId: user.id,
+        workspaceId_platform_platformAccountId_connectionMethod: {
+          workspaceId: ctx.workspaceId,
           platform: "LINKEDIN",
           platformAccountId: profile.sub,
           connectionMethod: "LINKEDIN_LOGIN",
@@ -63,7 +41,7 @@ linkedinAuthRoute.get("/callback", async (c) => {
         disconnectedAt: null,
       },
       create: {
-        userId: user.id,
+        workspaceId: ctx.workspaceId,
         platform: "LINKEDIN",
         platformAccountId: profile.sub,
         accountName: profile.name,
@@ -76,9 +54,9 @@ linkedinAuthRoute.get("/callback", async (c) => {
       },
     });
 
-    return c.redirect(`${env.FRONTEND_URL}/?connected=linkedin`);
+    return c.redirect(connectRedirect("connected=linkedin", ctx.workspaceId));
   } catch (err) {
     console.error("LinkedIn OAuth callback failed:", err);
-    return c.redirect(`${env.FRONTEND_URL}/?error=linkedin_connect_failed`);
+    return c.redirect(connectRedirect("error=linkedin_connect_failed", ctx.workspaceId));
   }
 });

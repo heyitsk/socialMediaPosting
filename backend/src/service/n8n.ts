@@ -43,7 +43,7 @@ export function buildFacebookPayload(
 
   return {
     post_id: post.id,
-    user_id: post.userId,
+    user_id: post.createdByUserId,
     platform: "facebook",
     content: post.caption,
     media_type: N8N_MEDIA_TYPE[post.mediaType],
@@ -91,7 +91,7 @@ export function buildInstagramPayload(
 
   return {
     post_id: post.id,
-    user_id: post.userId,
+    user_id: post.createdByUserId,
     platform: "instagram",
     content: post.caption,
     // Unlike Facebook's PHOTO/MULTI_PHOTO renaming, instagram-poster.json's
@@ -104,7 +104,8 @@ export function buildInstagramPayload(
       access_token: accessToken,
       // connectionMethod is only ever FACEBOOK_PAGE/INSTAGRAM_LOGIN for an
       // Instagram-platform account — THREADS_LOGIN never reaches here.
-      graph_host: GRAPH_HOST[connectedAccount.connectionMethod as "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN"],
+      graph_host:
+        GRAPH_HOST[connectedAccount.connectionMethod as "FACEBOOK_PAGE" | "INSTAGRAM_LOGIN"],
     },
     callback_url: `${env.PUBLIC_BACKEND_URL}/api/webhooks/n8n-callback`,
   };
@@ -141,7 +142,7 @@ export function buildThreadsPayload(
 
   return {
     post_id: post.id,
-    user_id: post.userId,
+    user_id: post.createdByUserId,
     platform: "threads",
     content: post.caption,
     media_type: post.mediaType,
@@ -185,7 +186,7 @@ export function buildLinkedInPayload(
 
   return {
     post_id: post.id,
-    user_id: post.userId,
+    user_id: post.createdByUserId,
     platform: "linkedin",
     content: post.caption,
     media_type: post.mediaType,
@@ -240,13 +241,17 @@ export async function buildYouTubePayload(
   const options = post.platformOptions as unknown as YouTubeOptions;
   const accessToken = await getFreshYouTubeAccessToken(connectedAccount);
 
-  const alreadyTagged = `${options.title} ${post.caption}`.toLowerCase().includes(SHORTS_TAG.toLowerCase());
+  const alreadyTagged = `${options.title} ${post.caption}`
+    .toLowerCase()
+    .includes(SHORTS_TAG.toLowerCase());
   const description =
-    post.mediaType === "SHORTS" && !alreadyTagged ? `${post.caption}\n\n${SHORTS_TAG}`.trim() : post.caption;
+    post.mediaType === "SHORTS" && !alreadyTagged
+      ? `${post.caption}\n\n${SHORTS_TAG}`.trim()
+      : post.caption;
 
   return {
     post_id: post.id,
-    user_id: post.userId,
+    user_id: post.createdByUserId,
     platform: "youtube",
     media_type: post.mediaType,
     media_urls: post.mediaUrls as string[],

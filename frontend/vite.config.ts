@@ -11,4 +11,13 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
+  // Single origin in dev (websitePlan.md §9.2): the one free ngrok domain
+  // points here, and /api/* — including every OAuth callback — is proxied to
+  // the backend, so the session cookie is first-party everywhere.
+  server: {
+    allowedHosts: [".ngrok-free.dev"],
+    proxy: {
+      "/api": { target: "http://localhost:4000", xfwd: true },
+    },
+  },
 });

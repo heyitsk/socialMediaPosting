@@ -1,7 +1,7 @@
-import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { getOrCreateDefaultUser } from "../../db/users";
 import { prisma } from "../../db/client";
+import { beginConnect, connectRedirect, finishConnect } from "../../lib/connect-state";
+import { encrypt } from "../../lib/crypto";
 import {
   buildAuthUrl,
   exchangeCodeForToken,
@@ -9,54 +9,32 @@ import {
   fetchInstagramBusinessAccount,
   fetchPages,
 } from "../../lib/facebook";
-import { encrypt } from "../../lib/crypto";
-import { env } from "../../lib/env";
-import { redis } from "../../lib/redis";
-
-const STATE_TTL_SECONDS = 300;
-
-function stateKey(state: string): string {
-  return `oauth:state:facebook:${state}`;
-}
 
 export const facebookAuthRoute = new Hono();
 
 facebookAuthRoute.get("/", async (c) => {
-  const state = randomBytes(16).toString("hex");
-  await redis.set(stateKey(state), "1", "EX", STATE_TTL_SECONDS);
-  return c.redirect(buildAuthUrl(state));
+  const started = await beginConnect(c, "facebook");
+  if ("response" in started) return started.response;
+  return c.redirect(buildAuthUrl(started.state));
 });
 
 facebookAuthRoute.get("/callback", async (c) => {
-  const code = c.req.query("code");
-  const state = c.req.query("state");
-  const deniedError = c.req.query("error");
-
-  if (deniedError || !code || !state) {
-    return c.redirect(`${env.FRONTEND_URL}/?error=facebook_connect_denied`);
-  }
-
-  const key = stateKey(state);
-  const validState = await redis.get(key);
-  await redis.del(key);
-
-  if (!validState) {
-    return c.redirect(`${env.FRONTEND_URL}/?error=facebook_connect_invalid_state`);
-  }
+  const finished = await finishConnect(c, "facebook");
+  if ("response" in finished) return finished.response;
+  const { ctx } = finished;
 
   try {
-    const shortLivedToken = await exchangeCodeForToken(code);
+    const shortLivedToken = await exchangeCodeForToken(ctx.code);
     const longLivedToken = await exchangeForLongLivedToken(shortLivedToken);
     const pages = await fetchPages(longLivedToken);
-    const user = await getOrCreateDefaultUser();
 
     for (const page of pages) {
       const encryptedPageToken = encrypt(page.access_token, 1);
 
       await prisma.connectedAccount.upsert({
         where: {
-          userId_platform_platformAccountId_connectionMethod: {
-            userId: user.id,
+          workspaceId_platform_platformAccountId_connectionMethod: {
+            workspaceId: ctx.workspaceId,
             platform: "FACEBOOK",
             platformAccountId: page.id,
             connectionMethod: "FACEBOOK_PAGE",
@@ -70,7 +48,7 @@ facebookAuthRoute.get("/callback", async (c) => {
           disconnectedAt: null,
         },
         create: {
-          userId: user.id,
+          workspaceId: ctx.workspaceId,
           platform: "FACEBOOK",
           platformAccountId: page.id,
           accountName: page.name,
@@ -85,8 +63,8 @@ facebookAuthRoute.get("/callback", async (c) => {
       if (instagramAccount) {
         await prisma.connectedAccount.upsert({
           where: {
-            userId_platform_platformAccountId_connectionMethod: {
-              userId: user.id,
+            workspaceId_platform_platformAccountId_connectionMethod: {
+              workspaceId: ctx.workspaceId,
               platform: "INSTAGRAM",
               platformAccountId: instagramAccount.id,
               connectionMethod: "FACEBOOK_PAGE",
@@ -100,7 +78,7 @@ facebookAuthRoute.get("/callback", async (c) => {
             disconnectedAt: null,
           },
           create: {
-            userId: user.id,
+            workspaceId: ctx.workspaceId,
             platform: "INSTAGRAM",
             platformAccountId: instagramAccount.id,
             connectionMethod: "FACEBOOK_PAGE",
@@ -114,9 +92,9 @@ facebookAuthRoute.get("/callback", async (c) => {
       }
     }
 
-    return c.redirect(`${env.FRONTEND_URL}/?connected=facebook`);
+    return c.redirect(connectRedirect("connected=facebook", ctx.workspaceId));
   } catch (err) {
     console.error("Facebook OAuth callback failed:", err);
-    return c.redirect(`${env.FRONTEND_URL}/?error=facebook_connect_failed`);
+    return c.redirect(connectRedirect("error=facebook_connect_failed", ctx.workspaceId));
   }
 });

@@ -67,18 +67,77 @@ model User {
   id        String   @id @default(uuid())
   email     String   @unique
   name      String
-  createdAt DateTime @default(now()) @map("created_at")
+  // Google's stable account id — users are matched on this, not email
+  // (emails can change/be reassigned). Null only for the pre-login seeded
+  // user until its first Google sign-in links it (websitePlan.md §9.4).
+  googleSub   String?   @unique @map("google_sub")
+  avatarUrl   String?   @map("avatar_url")
+  lastLoginAt DateTime? @map("last_login_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
 
-  connectedAccounts ConnectedAccount[]
-  posts             Post[]
+  memberships     Membership[]
+  ownedWorkspaces Workspace[]       @relation("WorkspaceOwner")
+  sentInvites     WorkspaceInvite[]
+  posts           Post[]
 
   @@map("users")
 }
 
+// The tenant. Connected accounts and posts belong to a workspace, not a user,
+// so an agency employee can be a member of several client workspaces. Every
+// signup gets an auto-created "Personal" one — websitePlan.md §9.
+model Workspace {
+  id          String   @id @default(uuid())
+  name        String
+  // Only the owner may remove members or delete the workspace. No other roles in V1.
+  ownerUserId String   @map("owner_user_id")
+  owner       User     @relation("WorkspaceOwner", fields: [ownerUserId], references: [id])
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  memberships       Membership[]
+  invites           WorkspaceInvite[]
+  connectedAccounts ConnectedAccount[]
+  posts             Post[]
+
+  @@map("workspaces")
+}
+
+model Membership {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String    @map("workspace_id")
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@unique([userId, workspaceId])
+  @@index([workspaceId])
+  @@map("memberships")
+}
+
+// Accepted automatically when someone signs in with Google using this
+// (verified) email. Re-inviting the same email refreshes the same row.
+model WorkspaceInvite {
+  id              String    @id @default(uuid())
+  workspaceId     String    @map("workspace_id")
+  workspace       Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  // Stored lowercased.
+  email           String
+  invitedByUserId String    @map("invited_by_user_id")
+  invitedBy       User      @relation(fields: [invitedByUserId], references: [id])
+  createdAt       DateTime  @default(now()) @map("created_at")
+  expiresAt       DateTime  @map("expires_at")
+  acceptedAt      DateTime? @map("accepted_at")
+
+  @@unique([workspaceId, email])
+  @@index([email])
+  @@map("workspace_invites")
+}
+
 model ConnectedAccount {
   id                    String          @id @default(uuid())
-  userId                String          @map("user_id")
-  user                  User            @relation(fields: [userId], references: [id])
+  workspaceId           String          @map("workspace_id")
+  workspace             Workspace       @relation(fields: [workspaceId], references: [id])
   platform              Platform
   accountName           String          @map("account_name")
   platformAccountId     String          @map("platform_account_id")
@@ -109,14 +168,17 @@ model ConnectedAccount {
   // account (it's a stable per-account ID in Meta's API, not per-auth-method)
   // — connectionMethod must be part of the key or one flow's upsert clobbers
   // the other's token.
-  @@unique([userId, platform, platformAccountId, connectionMethod])
+  @@unique([workspaceId, platform, platformAccountId, connectionMethod])
   @@map("connected_accounts")
 }
 
 model Post {
   id                 String           @id @default(uuid())
-  userId             String           @map("user_id")
-  user               User             @relation(fields: [userId], references: [id])
+  workspaceId        String           @map("workspace_id")
+  workspace          Workspace        @relation(fields: [workspaceId], references: [id])
+  // Which member posted — the workspace owns the post, this is attribution.
+  createdByUserId    String           @map("created_by_user_id")
+  createdBy          User             @relation(fields: [createdByUserId], references: [id])
   connectedAccountId String           @map("connected_account_id")
   connectedAccount   ConnectedAccount @relation(fields: [connectedAccountId], references: [id])
   caption            String

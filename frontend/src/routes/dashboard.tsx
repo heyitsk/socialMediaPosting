@@ -4,24 +4,30 @@ import { useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { api, API_URL } from "@/lib/api";
+import { API_URL, api } from "@/lib/api";
+import { useWorkspaceId } from "@/lib/session";
 
 const CONNECT_ERROR_MESSAGES: Record<string, string> = {
   facebook_connect_denied: "Facebook connection was cancelled.",
   facebook_connect_invalid_state: "Facebook connection expired — please try again.",
   facebook_connect_failed: "Failed to connect Facebook account.",
+  facebook_connect_forbidden: "You no longer have access to that workspace.",
   instagram_connect_denied: "Instagram connection was cancelled.",
   instagram_connect_invalid_state: "Instagram connection expired — please try again.",
   instagram_connect_failed: "Failed to connect Instagram account.",
+  instagram_connect_forbidden: "You no longer have access to that workspace.",
   threads_connect_denied: "Threads connection was cancelled.",
   threads_connect_invalid_state: "Threads connection expired — please try again.",
   threads_connect_failed: "Failed to connect Threads account.",
+  threads_connect_forbidden: "You no longer have access to that workspace.",
   linkedin_connect_denied: "LinkedIn connection was cancelled.",
   linkedin_connect_invalid_state: "LinkedIn connection expired — please try again.",
   linkedin_connect_failed: "Failed to connect LinkedIn account.",
+  linkedin_connect_forbidden: "You no longer have access to that workspace.",
   youtube_connect_denied: "YouTube connection was cancelled.",
   youtube_connect_invalid_state: "YouTube connection expired — please try again.",
   youtube_connect_failed: "Failed to connect YouTube account.",
+  youtube_connect_forbidden: "You no longer have access to that workspace.",
   youtube_connect_missing_scope:
     "YouTube connected without upload permission — reconnect and keep the upload checkbox ticked.",
   youtube_connect_no_channel:
@@ -100,7 +106,8 @@ export function DashboardPage() {
         <CardContent className="text-sm text-muted-foreground">
           {isPending && "Checking backend…"}
           {isError && "Could not reach the backend API."}
-          {data && `Backend is ${data.status} as of ${new Date(data.timestamp).toLocaleTimeString()}`}
+          {data &&
+            `Backend is ${data.status} as of ${new Date(data.timestamp).toLocaleTimeString()}`}
         </CardContent>
       </Card>
 
@@ -113,6 +120,8 @@ export function DashboardPage() {
 // re-runs the same OAuth flow, which upserts onto the same unique key and
 // clears disconnectedAt, so it works for both a fresh connect and a
 // REQUIRES_RECONNECT/SLIDING_WINDOW token refresh.
+// The workspaceId query param tells the backend which workspace the new
+// account belongs to — it re-checks membership before redirecting out.
 const CONNECT_PATH: Partial<Record<string, string>> = {
   FACEBOOK: "/api/auth/facebook",
   INSTAGRAM: "/api/auth/instagram",
@@ -123,11 +132,22 @@ const CONNECT_PATH: Partial<Record<string, string>> = {
 
 function ConnectedAccountsCard() {
   const queryClient = useQueryClient();
+  const workspaceId = useWorkspaceId() ?? "";
+  const connect = (path: string) => {
+    window.location.href = `${API_URL}${path}?workspaceId=${encodeURIComponent(workspaceId)}`;
+  };
 
-  const { data: accounts, isPending, isError } = useQuery({
-    queryKey: ["integrations"],
+  const {
+    data: accounts,
+    isPending,
+    isError,
+  } = useQuery({
+    queryKey: ["integrations", workspaceId],
+    enabled: !!workspaceId,
     queryFn: async () => {
-      const { data, error } = await api.GET("/api/integrations");
+      const { data, error } = await api.GET("/api/workspaces/{workspaceId}/integrations", {
+        params: { path: { workspaceId } },
+      });
       if (error) throw error;
       return data;
     },
@@ -135,11 +155,13 @@ function ConnectedAccountsCard() {
 
   const disconnect = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await api.DELETE("/api/integrations/{id}", { params: { path: { id } } });
+      const { error } = await api.DELETE("/api/workspaces/{workspaceId}/integrations/{id}", {
+        params: { path: { workspaceId, id } },
+      });
       if (error) throw error;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["integrations", workspaceId] });
       toast.success("Account disconnected.");
     },
     onError: () => toast.error("Failed to disconnect account."),
@@ -176,9 +198,7 @@ function ConnectedAccountsCard() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => {
-                    window.location.href = `${API_URL}${CONNECT_PATH[account.platform]}`;
-                  }}
+                  onClick={() => connect(CONNECT_PATH[account.platform]!)}
                 >
                   Reconnect
                 </Button>
@@ -194,49 +214,19 @@ function ConnectedAccountsCard() {
             </div>
           </div>
         ))}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            window.location.href = `${API_URL}/api/auth/facebook`;
-          }}
-        >
+        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/facebook")}>
           Connect / Add Facebook Pages
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            window.location.href = `${API_URL}/api/auth/instagram`;
-          }}
-        >
+        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/instagram")}>
           Connect Instagram
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            window.location.href = `${API_URL}/api/auth/threads`;
-          }}
-        >
+        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/threads")}>
           Connect Threads
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            window.location.href = `${API_URL}/api/auth/linkedin`;
-          }}
-        >
+        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/linkedin")}>
           Connect LinkedIn
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            window.location.href = `${API_URL}/api/auth/youtube`;
-          }}
-        >
+        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/youtube")}>
           Connect YouTube
         </Button>
       </CardContent>

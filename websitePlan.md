@@ -21,6 +21,7 @@
 6. [Notification & Reporting System](#6-notification--reporting-system)
 7. [Database Schema Design](#7-database-schema-design)
 8. [Implementation Roadmap](#8-implementation-roadmap)
+9. [App Authentication, Sessions & Workspaces](#9-app-authentication-sessions--workspaces)
 
 ---
 
@@ -199,9 +200,37 @@ Built as `lib/threads.ts`/`routes/auth/threads.ts`, on the same Meta App as §2.
 
 All images and videos uploaded by users are stored in an **S3 Bucket**, accessed from the backend via **Bun's native S3 client** (see the Backend Tech Stack table in §1 — no `@aws-sdk/client-s3` dependency needed).
 
-### In-App Cropper & Editor
-* **Images**: Integrated frontend JS library (`Cropper.js`) allows users to crop/resize images to standard social aspect ratios (1:1 Square, 4:5 Portrait, 9:16 Vertical Story/Reel, 16:9 Landscape) before uploading.
-* **Videos**: Frontend previewer checks aspect ratio and duration.
+### Per-Platform Media Fitting (Crop / Pad / Preview) — planned Sep 23, 2026, not built
+
+**Problem (seen in real testing across platforms):** the same photo/video posted to different platforms/surfaces renders differently, because each surface expects a different aspect ratio. A mismatch leads to one of three things: the platform **crops** it (subject cut off), **pads** it (black/white bars), or **rejects** it outright (Instagram errors on out-of-range ratios). Goal: every post fits its target surface cleanly, with the user in control.
+
+**Reference targets** (re-verify against each platform's current docs at build time, since these change):
+
+| Surface | Aspect ratio | Recommended size |
+|---|---|---|
+| IG feed / carousel | 4:5 – 1.91:1 (4:5 best) | 1080×1350 |
+| IG / FB Story, IG Reels, YT Shorts | 9:16 | 1080×1920 |
+| FB feed | 4:5 – 1.91:1 | 1080×1350 |
+| LinkedIn | 1.91:1 – 4:5 | 1200×627 / 1080×1350 |
+| Threads | flexible; 4:5 displays best | 1080×1350 |
+| YouTube video | 16:9 | 1920×1080 |
+
+Gotcha: Instagram crops **every carousel item to the first item's aspect ratio**, so the cropper must enforce one ratio across a carousel.
+
+**Decisions:**
+* **Not an LLM.** Resizing/cropping is deterministic work, and an LLM is slow, expensive and unreliable for it. Use `sharp` (images) and `ffmpeg` (video). "AI" is used only where it adds real value (smart crop placement, optional outpainting — see below).
+* **Keep one master file and store per-platform crop settings, not copies.** The original upload stays untouched in S3. Each target (e.g. `INSTAGRAM/STORY`, `THREADS/POST`) stores only `{ x, y, w, h, mode: "crop" | "blur_pad" }` in relative 0–1 coordinates. It's non-destructive, so users can re-edit anytime, and the actual files are rendered on demand.
+* **Smart default crop.** Images: `sharp`'s attention/entropy strategy (`position: sharp.strategy.attention`), `smartcrop.js`, or face detection. Video: center crop to start; subject-tracking reframing (MediaPipe AutoFlip-style) as a later upgrade for 16:9 → 9:16.
+* **Per-platform preview grid + user adjust.** The composer shows how the media will look on each selected platform. Each tile opens a ratio-locked cropper (`react-easy-crop` or `Cropper.js`) so the user can drag/zoom. Stories/Reels/Shorts previews overlay a **safe zone** (the top and bottom ~14% are covered by platform UI).
+* **Blurred-background padding instead of black bars.** When the user doesn't want to crop (e.g. a wide group photo into a 9:16 story), the media sits on a blurred, zoomed copy of itself. Easy in both `sharp` and `ffmpeg`.
+* **Render in a worker at publish time.** A BullMQ job reads the master + crop settings, runs `sharp`/`ffmpeg`, writes each version to S3, and sends that version's URL to the platform's n8n workflow. Video rendering goes in its **own queue** (ffmpeg is CPU-heavy) and can later scale on queue depth via KEDA (§5), separately from the API.
+* **Optional, later — generative outpainting** to extend backgrounds instead of cropping/padding. The results look great, but it costs real money and can invent strange details, so it's offered as a premium feature, not the default.
+
+**Build order:**
+1. **Now (pre-S3, works with today's public-URL input):** probe media dimensions before dispatch (`probe-image-size` for images, `ffprobe` on the URL for video), compare against each selected platform's allowed range, and warn in the composer (e.g. "This is 16:9 — Instagram Story will crop it"). Rough previews via CSS `object-fit: cover` on the hosted URL (no pixel reads, so no CORS issues).
+2. **After S3 upload lands:** cropper UI + stored per-platform crop settings (new column/table keyed by post + platform + surface).
+3. `sharp`/`ffmpeg` render worker + its own BullMQ queue; dispatch sends the rendered-version URLs.
+4. Smart crop defaults, AutoFlip-style video reframing, optional outpainting.
 
 ### How S3 Solves the YouTube Binary Requirement vs. Meta Public URLs
 
@@ -401,6 +430,8 @@ The backend, not n8n, owns turning N independent per-platform callbacks (or `Pro
 
 ### Core Tables (PostgreSQL, via Prisma)
 
+> **Planned Sep 24, 2026 (§9):** `ConnectedAccounts` and `Posts` move from `user_id` to `workspace_id` ownership, `Users` gains `google_sub`/`avatar_url`/`last_login_at`, and new `Workspaces`/`Memberships`/`WorkspaceInvites` tables are added. The tables below still describe the current single-user schema until that migration lands.
+
 #### `Users` Table
 * `id` (UUID, Primary Key)
 * `email` (String, Unique)
@@ -469,10 +500,14 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 - [x] Configure database schema (PostgreSQL, Docker-hosted) via Prisma (driver adapter) with AES-256-GCM token encryption (versioned keys, per §7 Token Encryption Scheme).
 - [x] Implement OAuth 2.0 handler for Meta Facebook (Sep 16), both Instagram connection methods (Sep 17), and Threads Login (Sep 21) — Google/Pinterest callback routes still pending, per §2.
 - [x] Build Integration Dashboard with "Connect / Disconnect" buttons (Facebook, both Instagram methods, Threads; duplicate-connect guard + disconnect toasts added Sep 16-17). "Disconnect" is a soft-delete (Sep 21) so accounts with post history can be disconnected/reconnected without hitting the `Posts` FK constraint.
+- [ ] App authentication & workspaces (§9, planned Sep 24): (A) workspace schema + data migration, (B) Google sign-in via OIDC + PKCE with Redis sessions, (C) `requireAuth` + workspace-membership middleware replacing `getOrCreateDefaultUser()`, platform connect flows bound to session + workspace, (D) frontend login/route guard/workspace switcher, (E) invites, (F) single-origin dev setup + docs.
 
 ### Phase 2 — Media Engine & Post Composer
 - [ ] Set up AWS S3 bucket and presigned URL upload handler.
-- [ ] Integrate frontend image cropper (`Cropper.js`) and video previewer.
+- [ ] Pre-dispatch media dimension probe + per-platform aspect-ratio warnings in the composer (§3 "Per-Platform Media Fitting", step 1 — doable before S3).
+- [ ] Per-platform preview grid + ratio-locked cropper with safe-zone overlays; store per-platform crop settings against a single master upload (§3, step 2 — needs S3).
+- [ ] `sharp`/`ffmpeg` render worker on its own BullMQ queue (crop or blurred-background pad), dispatching rendered-version S3 URLs to n8n (§3, step 3).
+- [ ] Smart-crop defaults, video auto-reframing, optional generative outpainting (§3, step 4 — later).
 - [ ] Build Post Composer UI with real-time platform validation rules.
 
 ### Phase 3 — n8n Webhook & Execution Workflow
@@ -496,6 +531,115 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 - [ ] Implement "One-Click Retry" for failed post attempts.
 
 ---
+
+## 9. App Authentication, Sessions & Workspaces
+
+> **Status (Sep 24, 2026):** Phase A (workspace schema, migration `20260924060000_add_workspaces_and_login`) applied. Phase B (Google sign-in, Redis sessions, `/api/me`, `/api/logout[-all]`, Vite `/api` proxy) live-tested. Phase C done: data routes moved under `/api/workspaces/:workspaceId/*` behind `requireAuth` + `requireWorkspace` (non-members get 404); connect flows take `?workspaceId=`, check session + membership at start, and at the callback the state must belong to the same signed-in user (`lib/connect-state.ts`); PKCE added to YouTube connect (Meta/LinkedIn unchanged); `csrf()` on `/api/*`; per-IP rate limit on `/api/login/*`; `/docs` + `/openapi.json` dev-only; single-user mode (`DEFAULT_USER_*`, `getDefaultWorkspaceContext`) removed. Frontend has a minimal `RequireAuth` guard and uses the first workspace; Phase D (workspace URLs, switcher, avatar/logout) through F not started. Rules follow the [OWASP OAuth 2.0 Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/OAuth2_Cheat_Sheet.html).
+
+This is **app login** ("who is using smPosting"), which is a different thing from the §2 **platform connect** flows ("which Facebook Page may smPosting post to"). They share nothing except the OAuth mechanics.
+
+### 9.1 Decisions (Sep 24, 2026)
+
+| Decision | Choice | Why |
+|---|---|---|
+| Login methods | **Sign in with Google only** (OpenID Connect) | No password storage, reset flows or MFA to build. Other methods may come later. |
+| Who can sign up | **Anyone** | Open SaaS. |
+| Google project | **Separate Google Cloud project** from the YouTube one | Login only needs `openid email profile` (non-sensitive), so this project can be published to Production without Google verification. The YouTube project stays in Testing (100 test users, 7-day refresh tokens) without blocking signups. |
+| Session type | **Opaque session token in a cookie, session stored in Redis** — not stateless JWTs | Logout, "log out everywhere", account deletion and removing someone from a workspace must take effect immediately. JWTs can't be revoked without a denylist, which is a per-request lookup anyway. A Redis `GET` is sub-millisecond, and every route already queries Postgres, so the lookup is negligible. JWTs pay off when many services verify tokens without a shared store; we have one backend. |
+| Session lifetime | **7 days sliding** (reset on activity), **30-day absolute cap** | |
+| Tenancy | **Workspaces** — connected accounts and posts belong to a workspace, users access it through membership | Agencies: one employee manages several clients. Individuals get an auto-created "Personal" workspace and never see the concept (switcher hidden when there's only one). Doing this before real users exist is one migration; retrofitting later touches every query and unique key under live data. |
+| Authorization | **No roles in V1.** Only tenant isolation: "is this user a member of this workspace?" on every request. One exception: the workspace **owner** (creator) is the only one who can remove members or delete the workspace, so any member can't lock out everyone else. | |
+| Invites | **In V1.** An existing member enters an email → pending invite → accepted automatically when that person signs in with Google using that (verified) email. | |
+| Seeded user | `DEFAULT_USER_EMAIL` is the owner's own Google account → linked on first login, keeping all existing connected accounts and history. | |
+
+### 9.2 Single-origin dev setup (solves the one-ngrok-domain limit)
+
+Login cookies are set for one origin. Today the frontend is `localhost:5173`, the API is `localhost:4000`, and OAuth callbacks arrive on the ngrok domain (`PUBLIC_BACKEND_URL`). A cookie set on `localhost` never reaches the callback, so a connect callback couldn't know which user or workspace started it. Putting the user id in `state` is not safe (OWASP: `state` must be bound to the user agent, otherwise an attacker can attach their Page to a victim's account, or the reverse). `SameSite=None` cookies across origins weaken CSRF protection.
+
+Fix: the same single free ngrok domain, pointed at Vite instead of the backend.
+
+```
+Before:  https://<ngrok-domain> ──► :4000 backend
+After:   https://<ngrok-domain> ──► :5173 Vite ──(proxy /api/*)──► :4000 backend
+```
+
+- Callback URLs stay `https://<ngrok-domain>/api/auth/{platform}/callback`, so **no redirect URI changes** in the Meta/LinkedIn/Google dashboards. Only the new login redirect URI `https://<ngrok-domain>/api/login/google/callback` is registered, in the new Google project.
+- `FRONTEND_URL` becomes the ngrok domain too. The app is opened at the ngrok URL in dev (HTTPS, which the `Secure` cookie needs).
+- Vite needs `server.proxy['/api']` (with `xfwd` so the backend sees the client IP) and `server.allowedHosts` including the ngrok host.
+- n8n keeps calling `localhost:4000` directly for callbacks (no browser, no cookies).
+- Production: a reverse proxy / ingress does the same job as Vite (one origin, `/api` → backend).
+
+### 9.3 Schema (Phase A)
+
+```
+User ──< Membership >── Workspace ──< ConnectedAccount
+  │                        │     └──< Post (workspace_id + created_by_user_id)
+  └── invited_by ──< WorkspaceInvite >──┘
+```
+
+- **`users`**: add `google_sub` (unique, nullable until first login — only the seeded user is ever null), `avatar_url`, `last_login_at`. Users are matched by Google `sub`, not email (emails can change or be reassigned).
+- **`workspaces`**: `id`, `name`, `owner_user_id`, `created_at`.
+- **`memberships`**: `user_id`, `workspace_id`, `created_at`, unique `(user_id, workspace_id)`.
+- **`workspace_invites`**: `id`, `workspace_id`, `email` (lowercased), `invited_by_user_id`, `created_at`, `expires_at` (7 days), `accepted_at`. Unique `(workspace_id, email)` — re-inviting refreshes the same row.
+- **`connected_accounts`**: `user_id` → `workspace_id`. Unique key becomes `(workspace_id, platform, platform_account_id, connection_method)`.
+- **`posts`**: `user_id` → `workspace_id`, plus `created_by_user_id` (which member posted). The n8n payload's `user_id` stays and carries `created_by_user_id`; the workflows only pass it through, so they need no changes.
+- **Data migration**: create a "Personal" workspace for the seeded user, add them as owner/member, move every existing row into it.
+- **Sessions are not a table** — Redis keys `session:<sha256(token)>` → `{userId, createdAt}` with a 7-day TTL refreshed on use, plus a per-user set `user-sessions:<userId>` for "log out everywhere". Only the hash is stored, so a Redis dump doesn't leak usable sessions.
+
+### 9.4 Google sign-in flow (Phase B)
+
+Authorization Code flow + **PKCE (S256)** + **`nonce`**, confidential client (client secret sent at token exchange). Never the implicit grant, never Google One Tap / a JS SDK, so no token ever passes through browser JavaScript.
+
+**`GET /api/login/google?next=/composer`**
+1. Generate `state`, `nonce` and a PKCE `code_verifier` (32 random bytes each). Store `{codeVerifier, nonce, next}` in Redis at `oauth:state:login:<state>`, 5-minute TTL.
+2. Set a short-lived `HttpOnly; Secure; SameSite=Lax` cookie containing `state` — binds the flow to this browser (OWASP §Essential Basics #2).
+3. Redirect to Google with `response_type=code`, `scope=openid email profile`, `code_challenge`, `code_challenge_method=S256`, `nonce`, `state`, `prompt=select_account`.
+
+**`GET /api/login/google/callback`**
+1. Require the query `state` to equal the cookie's `state`; read the Redis entry and delete it immediately (single use).
+2. Exchange the code at `https://oauth2.googleapis.com/token`, sending `code_verifier` and the client secret.
+3. Verify the `id_token` with `jose` against Google's JWKS: signature, `iss` ∈ {`https://accounts.google.com`, `accounts.google.com`}, `aud == LOGIN_GOOGLE_CLIENT_ID`, `exp`, `nonce` match, `email_verified === true`.
+4. Find the user by `sub`. If none, and a user with that email exists with `google_sub = NULL` (the seeded user only), link it. Otherwise create the user + a "Personal" workspace + owner membership.
+5. Accept any unexpired pending invites for that email (create memberships, stamp `accepted_at`).
+6. Rotate the session (delete the old one if a cookie came in — prevents session fixation), create a new one, set `__Host-sid=<token>; HttpOnly; Secure; SameSite=Lax; Path=/`. `Lax` (not `Strict`) so the cookie still comes along when Meta/Google/LinkedIn redirect the browser back to the connect callbacks.
+7. Discard Google's access/refresh tokens — login doesn't need them.
+8. Redirect to `next` only if it's a relative path starting with `/` and not `//` or `/\` — no open redirect (OWASP #1). Otherwise `/`.
+
+**Other endpoints**: `POST /api/logout` (delete session + clear cookie), `POST /api/logout-all`, `GET /api/me` (user + their workspaces). Any failure redirects to `/login?error=<code>` and never echoes provider error text.
+
+### 9.5 Authorization (Phase C)
+
+- **`requireAuth`** middleware: hash the cookie, look up the session in Redis, refresh its TTL (respecting the 30-day cap), `c.set("user", …)`. Applied to all `/api/*` except `/api/login/*`, `/api/webhooks/*` (already guarded by `N8N_CALLBACK_SECRET`) and `/health`. `/docs` + `/openapi.json` disabled in production.
+- **`requireWorkspace`** middleware: data routes move under `/api/workspaces/:workspaceId/…` (`integrations`, `posts`); checks a `Membership` exists, else **404** (not 403 — doesn't reveal the workspace exists). Every query filters by the verified `workspaceId`, same as today's `userId` filters.
+- **Platform connect flows** (`/api/auth/{platform}?workspaceId=…`): require a session and membership at the start; store `{userId, workspaceId, codeVerifier?}` alongside `state`; at the callback require the session's user equals the stored user before writing the `ConnectedAccount`. Add PKCE to the Google/YouTube connect flow (and to Meta/LinkedIn where they support it).
+- **CSRF**: `SameSite=Lax` + Hono's `csrf()` (Origin check) on every state-changing method + CORS locked to `FRONTEND_URL`.
+- **Rate limiting**: per-IP Redis counter on `/api/login/*`.
+- **Logging**: never log `code`, `state`, `id_token`, or cookies.
+- **Cleanup**: remove `getOrCreateDefaultUser()` and `DEFAULT_USER_EMAIL`/`DEFAULT_USER_NAME`.
+- **Tests**: user B gets 404 on user A's workspace, integrations, `connectedAccountId` in a post, disconnect and history; a connect callback with a mismatched session is rejected.
+
+### 9.6 Frontend (Phase D)
+
+- `useMe()` (`useQuery(["me"])`) and a `<RequireAuth>` wrapper around `AppLayout` → `/login?next=…` on 401.
+- Login button = full-page navigation to `/api/login/google` (no popup, no SDK).
+- `openapi-fetch` middleware: any 401 → `/login`.
+- Routes move under `/w/:workspaceId/…`; the workspace switcher sits in the sidebar, hidden with one workspace; avatar + logout at the bottom.
+- `API_URL` becomes relative (same origin via the Vite proxy).
+- **Remember**: `composer.tsx` keeps its own platform allowlist — the workspace refactor must not drop anything from it.
+
+### 9.7 Invites (Phase E)
+
+- `POST /api/workspaces/:id/invites {email}` (any member), `GET` list, `DELETE` (revoke). `POST /api/workspaces` to create a workspace, `DELETE /api/workspaces/:id/members/:userId` (owner only), `POST …/leave`.
+- If the invited email already belongs to a user, the membership is created at once; otherwise it waits for their first Google sign-in (§9.4 step 5).
+- V1 sends no invite email — the inviter shares the app link. Email delivery rides on the Phase 4 Resend/SendGrid item.
+
+### 9.8 Later / not V1
+
+- Roles beyond owner/member, audit log.
+- Account deletion (`DELETE /api/me`: revoke platform tokens, delete data) — needed before Meta App Review, which requires a data-deletion callback URL and a privacy policy.
+- Other login methods (would move `google_sub` into an `auth_identities` table).
+
+---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
 *Updated: 2026-09-10 | Facebook `MULTI_PHOTO` (carousel) confirmed tested/working (§5). Full §2 OAuth detail added for all 5 platforms. `ConnectedAccounts` schema (§7) revised for the three token refresh shapes (`NONE`/`SLIDING_WINDOW`/`ON_DEMAND`). Backend tech stack finalized (§1): Bun + Hono, Docker Postgres + Prisma (driver adapter), Vite + React, BullMQ + ioredis (bunqueue as fallback), Bun native Redis client for pub/sub, Bun native S3 client for object storage. UploadThing evaluated and rejected.*  
@@ -509,4 +653,6 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 *Updated: 2026-09-22 | `linkedin-poster.json` built and standalone-tested (personal-profile text/image/video posts via the LinkedIn Posts API, `LinkedIn-Version: 202609`) — not yet wired to the backend dispatcher, since LinkedIn is a V2-deferred platform (see header). Its image/video branches were initially built on the same `Download` → `Merge` → `Upload Binary` pattern as `youtube-poster.json`. Planning-only session (no code changes retained): discussed applying the §3 streaming-relay fix to LinkedIn's video branch, locked in the decision (video-only; redirect-following built in from the start; both LinkedIn and YouTube eventually get it) documented in §3's new "Streaming-Relay Decision" subsection, and Phase 3 roadmap updated — implementation deliberately deferred until a real S3 bucket exists (Phase 2, currently blocked on AWS account setup) to test the relay against real presigned URLs.*
 *Updated: 2026-09-22 | Real end-to-end testing of `linkedin-poster.json` surfaced (and fixed) a genuine correctness bug beyond the planning-only streaming discussion above: LinkedIn's `initializeUpload` returns one `uploadInstructions` byte-range entry per part, capped at exactly 4,194,304 bytes (4 MiB) — a video over that size needs a real multi-part PUT, not just a single-shot upload. Implemented via two new Code nodes (`Split Video Into Parts`, `Collect Video Part ETags`) using n8n's documented `this.helpers.getBinaryDataBuffer`/`prepareBinaryData` API, letting the existing single-part PUT node run once per item unchanged; confirmed working end-to-end on a 27 MB test video. This landed the now-confirmed 4 MiB-per-part limit, which **revised §3's "Streaming-Relay Decision"**: rather than one whole-file streaming relay, LinkedIn's version is now planned as one ranged-S3-GET-to-PUT stream *per part* (`Range: bytes=firstByte-lastByte`), so at most one part (≤4 MiB) is ever buffered at once regardless of total video size — a strict improvement over both the original whole-file-relay plan and the currently-shipped whole-file-buffer-then-slice implementation. Still not built — still blocked on an S3 bucket existing (§3, Phase 2). See `history.md` Session 24 for the full debugging trail.*
 *Updated: 2026-09-23 | Threads' Sep 22 OAuth redirect-URI blocker (§2.3) cleared — a real Threads account connected end-to-end for the first time, which surfaced a genuine frontend bug rather than an OAuth problem: `frontend/src/routes/composer.tsx` maintains its own hardcoded platform allowlist (`PostablePlatform` union, `MEDIA_TYPES_BY_PLATFORM`, `PLATFORM_LABELS`, the `postableAccounts` filter) completely separate from the backend's `SUPPORTED_MEDIA_TYPES` — Threads' OAuth/dispatch/n8n-workflow support was already complete, but the connected account never appeared in the "Post as" dropdown because composer.tsx simply never listed `THREADS`. Fixed by adding Threads to all four spots. **Added `CAROUSEL` support to Threads** the same day (§4/§5): `threads-poster.json` gained a carousel branch (split media URLs → per-image child containers with `is_carousel_item=true` → aggregate IDs → parent container with `media_type=CAROUSEL&children=...` → publish), `backend/src/routes/posts.ts`'s `SUPPORTED_MEDIA_TYPES.THREADS` and the composer's Threads media-type list both updated to match — image-only, mirroring the existing Facebook/Instagram carousel scope. **Documented, not built**: confirmed via Meta's own API guidance that the Instagram Reels/Threads Video fixed-`Wait`-then-publish pattern (in place since the original standalone workflows, `history.md` Session 8/13) is a real failure mode, not just a theoretical one — a near-size-limit video (Threads: 1GB/5min) on a slow connection can still be mid-processing when the fixed wait expires, and the publish call fails outright rather than degrading gracefully. Full gap writeup and planned poll-loop fix added to §6 ("Known Gap: Container-Status Polling Before Publish"); Phase 3 roadmap updated. No code changes for this part — deliberately deferred per Kushagra's instruction to document only.*
+*Updated: 2026-09-23 | Planning only: added §3 "Per-Platform Media Fitting" to replace the old one-line cropper note — keep one master upload and store per-platform crop settings, `sharp`/`ffmpeg` rendering (explicitly not an LLM), a per-platform preview grid with a ratio-locked cropper and safe zones, blurred-background padding instead of black bars, a render worker on its own BullMQ queue, and optional outpainting later. Phase 2 roadmap split into four matching items; step 1 (dimension probe + warnings) can be built before S3.*
 *Updated: 2026-09-23 | **YouTube becomes the fifth platform wired to the real backend** (§2.4, §5, §6, §7). Google OAuth connect flow (`lib/youtube.ts`, `routes/auth/youtube.ts`) with `access_type=offline&prompt=consent`, `youtube.upload` + `youtube.readonly` scopes, and callback guards for an unticked upload scope or a channel-less Google account. First real `ON_DEMAND` refresh implementation (`service/youtube-token.ts`): stored access token reused while >5 min from expiry, otherwise refreshed and persisted; an `invalid_grant` nulls the refresh token and surfaces `needsReconnect`. Schema: `ConnectionMethod.YOUTUBE_LOGIN`, `MediaType.SHORTS`, new nullable `Posts.platform_options` JSON column (migration `20260923040000_add_youtube`, hand-written and applied via `migrate deploy` to avoid the pre-existing `_prisma_migrations` drift forcing a reset). `youtube-poster.json` gained the `x-callback-secret` header plus `made_for_kids`/`tags`/`category_id` payload fields (category no longer hardcoded to 22). YouTube joins Facebook/LinkedIn on the **single shared video-status queue** — kept shared rather than split per platform (§6) — refactored to a per-platform status-check table and a `POLL_POLICY` record with a custom BullMQ backoff; YouTube polls on capped exponential backoff (~11 checks / ~33 min vs. 60 fixed). Frontend: Connect YouTube button + error toasts, composer YouTube fields (title, visibility, category, made-for-kids, tags; caption relabelled "Description"), and the history page shows the video title. Not yet confirmed with a live end-to-end post; unaudited-project uploads are forced private (§2.4).*
+*Updated: 2026-09-24 | Planning only: new §9 "App Authentication, Sessions & Workspaces". Google-only sign-in (OIDC, auth code + PKCE + nonce, separate Google Cloud project), opaque session cookies backed by Redis rather than stateless JWTs (immediate revocation), 7-day sliding sessions. Workspace tenancy for agencies (individuals get an auto-created Personal workspace), email invites auto-accepted on Google sign-in, no roles in V1 beyond workspace owner. Single-origin dev setup — the one free ngrok domain repointed at Vite, which proxies `/api` to the backend, so no platform redirect URIs change. §7 flagged as pending the workspace migration; Phase 1 roadmap item added.*
