@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
 import { env } from "../lib/env";
 import { enqueueVideoStatusPoll } from "../queue/video-status-queue";
+import { markTargetFailed, markTargetPublished } from "../service/post-groups";
 
 const PLATFORM_VALUES = ["FACEBOOK", "INSTAGRAM", "THREADS", "YOUTUBE", "PINTEREST", "LINKEDIN"] as const;
 
@@ -31,8 +32,9 @@ const n8nCallback = createRoute({
     body: { content: { "application/json": { schema: n8nCallbackSchema } } },
   },
   responses: {
-    204: { description: "Callback processed" },
+    204: { description: "Callback processed (a duplicate is a no-op)" },
     401: { description: "Invalid or missing callback secret" },
+    404: { description: "Unknown post_id" },
   },
 });
 
@@ -65,12 +67,16 @@ export const webhooksRoute = new OpenAPIHono().openapi(n8nCallback, async (c) =>
   // calls back as soon as the upload PUT finishes — uploadStatus is still
   // "uploaded", not "processed", and YouTube can still reject it (duplicate,
   // copyright, etc.), so it always goes through the same poller.
+  const post = await prisma.post.findUnique({ where: { id: body.post_id }, select: { mediaType: true } });
+  if (!post) {
+    throw new HTTPException(404, { message: "Unknown post_id" });
+  }
+
   if (
     (platform === "FACEBOOK" || platform === "LINKEDIN" || platform === "YOUTUBE") &&
     body.status === "SUCCESS" &&
     body.platform_post_id
   ) {
-    const post = await prisma.post.findUniqueOrThrow({ where: { id: body.post_id } });
     if (platform === "YOUTUBE" || post.mediaType === "VIDEO") {
       const mediaId = platform === "LINKEDIN" ? (body.media_urn ?? body.platform_post_id) : body.platform_post_id;
       await enqueueVideoStatusPoll(body.post_id, platform, body.platform_post_id, mediaId);
@@ -78,20 +84,15 @@ export const webhooksRoute = new OpenAPIHono().openapi(n8nCallback, async (c) =>
     }
   }
 
-  await prisma.postLog.create({
-    data: {
-      postId: body.post_id,
-      platform: platform as Platform,
-      status: body.status,
-      platformPostId: body.platform_post_id ?? null,
-      errorMessage: body.error ?? null,
-    },
-  });
-
-  await prisma.post.update({
-    where: { id: body.post_id },
-    data: { status: body.status === "SUCCESS" ? "PUBLISHED" : "FAILED" },
-  });
+  // Both are no-ops when they don't apply (duplicate callback, target already
+  // final) — see service/post-groups.ts.
+  if (body.status === "SUCCESS") {
+    await markTargetPublished(body.post_id, platform as Platform, body.platform_post_id ?? null);
+  } else {
+    await markTargetFailed(body.post_id, platform as Platform, body.error ?? "Posting failed", {
+      platformPostId: body.platform_post_id,
+    });
+  }
 
   return c.body(null, 204);
 });

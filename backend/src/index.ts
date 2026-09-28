@@ -7,18 +7,20 @@ import { requireAuth, requireWorkspace } from "./middleware/auth";
 import { corsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/error-handler";
 import { rateLimit } from "./middleware/rate-limit";
+import { startPublishWorker, startScheduleReconciler } from "./queue/publish-worker";
 import { startVideoStatusWorker } from "./queue/video-status-worker";
 import { facebookAuthRoute } from "./routes/auth/facebook";
 import { instagramAuthRoute } from "./routes/auth/instagram";
 import { linkedinAuthRoute } from "./routes/auth/linkedin";
 import { threadsAuthRoute } from "./routes/auth/threads";
 import { youtubeAuthRoute } from "./routes/auth/youtube";
+import { capabilitiesRoute } from "./routes/capabilities";
 import { healthRoute } from "./routes/health";
 import { integrationsRoute } from "./routes/integrations";
 import { invitesRoute } from "./routes/invites";
 import { loginRoute } from "./routes/login";
 import { membersRoute } from "./routes/members";
-import { postsRoute } from "./routes/posts";
+import { postGroupsRoute } from "./routes/post-groups";
 import { sessionRoute } from "./routes/session";
 import { webhooksRoute } from "./routes/webhooks";
 import { workspaceRoute, workspacesRoute } from "./routes/workspaces";
@@ -36,7 +38,8 @@ app.onError(errorHandler);
 // Access rules (websitePlan.md §9.5):
 // - public: /health, /api/login/* (rate-limited), /api/webhooks/* (n8n,
 //   guarded by N8N_CALLBACK_SECRET)
-// - session only: /api/me, /api/logout-all (requireAuth inside sessionRoute);
+// - session only: /api/me, /api/logout-all (requireAuth inside sessionRoute),
+//   /api/capabilities;
 //   /api/auth/* connect flows check the session + membership themselves,
 //   since they're browser navigations that must redirect, not 401
 // - session + membership: everything under /api/workspaces/:workspaceId/*
@@ -53,13 +56,15 @@ app.route("/api/auth/instagram", instagramAuthRoute);
 app.route("/api/auth/threads", threadsAuthRoute);
 app.route("/api/auth/linkedin", linkedinAuthRoute);
 app.route("/api/auth/youtube", youtubeAuthRoute);
+app.use("/api/capabilities", requireAuth);
+app.route("/api/capabilities", capabilitiesRoute);
 app.route("/api/workspaces", workspacesRoute);
 app.use("/api/workspaces/:workspaceId/*", requireAuth, requireWorkspace);
 app.route("/api/workspaces/:workspaceId", workspaceRoute);
 app.route("/api/workspaces/:workspaceId/members", membersRoute);
 app.route("/api/workspaces/:workspaceId/invites", invitesRoute);
 app.route("/api/workspaces/:workspaceId/integrations", integrationsRoute);
-app.route("/api/workspaces/:workspaceId/posts", postsRoute);
+app.route("/api/workspaces/:workspaceId/post-groups", postGroupsRoute);
 app.route("/api/webhooks", webhooksRoute);
 
 // The full API map is no business of the public internet — dev only.
@@ -79,6 +84,8 @@ const server = Bun.serve({
 // Same process as the API for now (no separate worker deployment yet — see
 // websitePlan.md Phase 3 queue-mode/K8s roadmap item).
 startVideoStatusWorker();
+startPublishWorker();
+startScheduleReconciler();
 
 console.log(`smPosting backend listening on ${server.url}`);
 if (env.NODE_ENV !== "production") {
