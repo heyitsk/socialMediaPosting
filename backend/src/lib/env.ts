@@ -45,6 +45,12 @@ const envSchema = z.object({
   LOGIN_GOOGLE_CLIENT_ID: z.string().min(1),
   LOGIN_GOOGLE_CLIENT_SECRET: z.string().min(1),
 
+  // Private bucket for composer uploads (infra/media-bucket.yaml). Credentials
+  // come from the SDK's default chain — AWS_PROFILE in dev, the instance/task
+  // role in production — never from this file. See lib/s3.ts.
+  S3_MEDIA_BUCKET: z.string().min(1),
+  AWS_REGION: z.string().default("ap-south-1"),
+
   N8N_BASE_URL: z.url(),
   N8N_CALLBACK_SECRET: z.string().min(1),
 });

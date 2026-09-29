@@ -504,7 +504,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 - [ ] App authentication & workspaces (§9, planned Sep 24): (A) workspace schema + data migration, (B) Google sign-in via OIDC + PKCE with Redis sessions, (C) `requireAuth` + workspace-membership middleware replacing `getOrCreateDefaultUser()`, platform connect flows bound to session + workspace, (D) frontend login/route guard/workspace switcher, (E) invites, (F) single-origin dev setup + docs.
 
 ### Phase 2 — Media Engine & Post Composer
-- [ ] Set up AWS S3 bucket and presigned URL upload handler.
+- [x] Set up AWS S3 bucket and presigned URL upload handler (§11, Sep 29 2026 — code done; bucket deploy + live test pending).
 - [ ] Pre-dispatch media dimension probe + per-platform aspect-ratio warnings in the composer (§3 "Per-Platform Media Fitting", step 1 — doable before S3).
 - [ ] Per-platform preview grid + ratio-locked cropper with safe-zone overlays; store per-platform crop settings against a single master upload (§3, step 2 — needs S3).
 - [ ] `sharp`/`ffmpeg` render worker on its own BullMQ queue (crop or blurred-background pad), dispatching rendered-version S3 URLs to n8n (§3, step 3).
@@ -822,6 +822,55 @@ POST   /api/workspaces/:ws/post-groups/:id/targets/:postId/retry  FAILED targets
 6. Frontend: new composer flow and results panel, then grouped History with retry and cancel.
 7. Remove the old `POST /posts` and old composer code; update history.md.
 
+## 11. Media Uploads to S3 (Sep 29, 2026)
+
+The composer's "public URL" fields are gone: users pick files, the browser uploads them straight to a private S3 bucket, and the backend hands n8n presigned GET URLs in the same `media_urls` field as before — **no n8n workflow changes**. Cropping/per-platform fitting (§3 steps 2-4) and the YouTube/LinkedIn streaming relay (§3) are deliberately later phases.
+
+### 11.1 Decisions (Kushagra, Sep 29)
+
+| Question | Decision |
+|---|---|
+| URL input | Replaced completely — uploads only (old posts keep their `media_urls`) |
+| Limits | Images 8 MB, videos 1 GB |
+| Types | JPEG / PNG / WebP, MP4 / MOV. HEIC rejected with an "export as JPEG" hint |
+| Library | None — uploads are scoped to the post being composed |
+| Retention | 15 days after the post is sent |
+| Resilience | Multipart with per-part retries; no resume across page reloads |
+| Part size | `max(16 MiB, ceil(size / 10,000))` — always 16 MiB (≤ 64 parts) at the 1 GB cap |
+
+### 11.2 Storage client
+
+AWS SDK v3 (`@aws-sdk/client-s3`, `s3-request-presigner`, `s3-presigned-post`) rather than Bun's native S3 client (§1): Bun's client can presign a plain PUT but not a POST policy (needed to enforce `content-length-range`) nor multipart `UploadPart` URLs. The client sets `requestChecksumCalculation: "WHEN_REQUIRED"` so the SDK's default CRC32 isn't baked into presigned URLs the browser can't satisfy. Credentials come from the default chain — `AWS_PROFILE` in dev, the instance/task role in production; no keys in `.env`.
+
+### 11.3 Bucket (`infra/media-bucket.yaml`, CloudFormation)
+
+Private (public access blocked, `BucketOwnerEnforced`, SSE-S3, TLS-only policy). CORS allows the frontend origin(s) GET/HEAD/PUT/POST and **exposes `ETag`** (the browser needs each part's ETag to complete a multipart upload). Lifecycle: abort incomplete multipart uploads after 1 day; a 120-day backstop expiration (must stay above 90-day scheduling + 15-day retention). A managed policy (`s3:PutObject/GetObject/DeleteObject/AbortMultipartUpload` on objects, `s3:ListBucket` so HEAD on a missing key is 404 not 403) is output for the backend's runtime role.
+
+### 11.4 Upload flow (two-phase)
+
+1. `POST /api/workspaces/:id/media` `{filename, contentType, sizeBytes}` → creates a `media_assets` row (`PENDING`) with a server-generated key `<workspaceId>/<assetId>.<ext>` (the filename is only a column). Returns either
+   - images: a presigned **POST** whose policy pins the exact size and content type, or
+   - videos: a multipart upload with one presigned PUT URL per part (URLs valid 2 h).
+2. The browser uploads (XHR for progress; 4 parts in parallel; retries 1 s / 3 s / 8 s on network errors, 429 and 5xx).
+3. `POST /media/:assetId/complete` (with part ETags for videos) → completes the multipart upload, HEADs the object (size must match), sniffs the first 16 bytes (magic bytes must match the declared type — catches a renamed HEIC), marks the row `READY`. Any mismatch deletes the object.
+4. `DELETE /media/:assetId` removes an unattached upload (the composer's remove button).
+
+Rate limit: 120 upload starts per user per 10 min.
+
+### 11.5 Posting, dispatch and retention
+
+- `POST /post-groups` takes `mediaAssetIds` (ordered) instead of `mediaUrls`. Validation requires READY, unattached assets of this workspace, the right kind (video vs image), and adds a per-target error for **Instagram + non-JPEG** (its publishing API is JPEG-only). The Shorts ffprobe runs against a 15-minute presigned URL.
+- The group create and the asset attach (`group_id`, `position`, `expires_at`) run in one transaction; the attach is a conditional update so two posts can't claim the same file.
+- The publish worker signs fresh GET URLs (6 h) **at dispatch time**, so scheduled posts and retries never carry stale URLs. A post whose files were already deleted fails with a readable error.
+- Retention: `expires_at = (scheduledFor ?? now) + 15 days`, counted from send time — an S3 lifecycle rule counted from upload time would delete media of posts scheduled more than 15 days out.
+- Hourly cleaner (`service/media.ts`): PENDING rows older than 24 h (aborting their multipart upload), READY-but-never-attached rows older than 24 h, and expired rows whose group has nothing SCHEDULED or PROCESSING. Postgres, not an S3 listing, is the index of what exists.
+
+### 11.6 Known limits / follow-ups
+
+- WebP on Facebook, LinkedIn and Threads is untested.
+- In dev, presigned URLs signed with temporary `aws login` credentials stop working when that session expires (scheduled posts need long-lived credentials — a role in production).
+- Next: per-platform media fitting (§3 steps 2-4) and the streaming relay for YouTube/LinkedIn video (§3).
+
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
@@ -841,3 +890,4 @@ POST   /api/workspaces/:ws/post-groups/:id/targets/:postId/retry  FAILED targets
 *Updated: 2026-09-24 | Planning only: new §9 "App Authentication, Sessions & Workspaces". Google-only sign-in (OIDC, auth code + PKCE + nonce, separate Google Cloud project), opaque session cookies backed by Redis rather than stateless JWTs (immediate revocation), 7-day sliding sessions. Workspace tenancy for agencies (individuals get an auto-created Personal workspace), email invites auto-accepted on Google sign-in, no roles in V1 beyond workspace owner. Single-origin dev setup — the one free ngrok domain repointed at Vite, which proxies `/api` to the backend, so no platform redirect URIs change. §7 flagged as pending the workspace migration; Phase 1 roadmap item added.*
 *Updated: 2026-09-29 | §9.7 Phase E backend built: OWNER/ADMIN/MEMBER roles (owner derived from `owner_user_id`, `memberships.role` = ADMIN|MEMBER), owner-only member/invite management, ADMIN manages connected accounts, one non-transferable owner who cannot leave, single-user undeletable Personal workspace (`is_personal`), soft delete (`deleted_at`) hiding a workspace everywhere via the membership check, invites to existing accounts applied immediately, 20/hour per-user invite rate limit. §9.1 rows revised (no longer "no roles in V1"); §9.8 gains a V2 per-tier member cap and a list of possible future roles.*
 *Updated: 2026-09-29 | Planning only: new §10 "Multi-Posting (Post Groups) & Scheduling" — `PostGroup` parent over per-target `Post` rows, media-kind-first composer replacing the old one, per-platform caption overrides, all-or-nothing validation with one-click deselect, per-target BullMQ publish jobs (also used for scheduling), locked `recomputeGroupStatus` aggregation, callback-deadline jobs, webhook idempotency, manual per-target retry, ffprobe-verified YouTube Shorts, silent Instagram double-connection dedupe.*
+*Updated: 2026-09-29 | New §11 "Media Uploads to S3": composer URL fields replaced by direct browser-to-S3 uploads (presigned POST for images, presigned multipart for videos), `media_assets` table, magic-byte verification, presigned GETs signed at dispatch time, 15-day retention counted from send time with an hourly cleaner, CloudFormation template for the bucket. Storage client switched from Bun's native S3 client to AWS SDK v3 (§11.2). Phase 2 S3 item ticked.*

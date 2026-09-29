@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  smPosting media bucket - private S3 bucket for composer uploads. The browser
+  uploads with presigned URLs and n8n downloads with presigned GETs; see
+  websitePlan.md section 11.
+
+Parameters:
+  AllowedOrigins:
+    Type: CommaDelimitedList
+    Default: http://localhost:5173
+    Description: Frontend origins allowed to upload from the browser (CORS).
+  BackstopExpirationDays:
+    Type: Number
+    Default: 120
+    Description: >-
+      Safety net only. The backend's media cleaner deletes each file 15 days
+      after its post is sent; posts can be scheduled up to 90 days ahead, so
+      this must stay above 90 + 15.
+
+Resources:
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub smposting-media-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: !Ref AllowedOrigins
+            # POST: image form uploads. PUT: video multipart parts.
+            AllowedMethods: [GET, HEAD, PUT, POST]
+            AllowedHeaders: ["*"]
+            # The browser must read each part's ETag to complete a multipart upload.
+            ExposedHeaders: [ETag]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          # Parts of an abandoned multipart upload are invisible in listings
+          # but still billed until aborted.
+          - Id: abort-incomplete-multipart-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: backstop-expiration
+            Status: Enabled
+            ExpirationInDays: !Ref BackstopExpirationDays
+
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt MediaBucket.Arn
+              - !Sub ${MediaBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # Attach to whatever runs the backend (the production instance/task role).
+  # Presigned URLs carry the signer's permissions, so this is also everything
+  # a browser or n8n can do with one.
+  BackendMediaPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub smposting-backend-media-${AWS::Region}
+      Description: smPosting backend - read, write and delete objects in the media bucket.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: MediaObjects
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:AbortMultipartUpload
+            Resource: !Sub ${MediaBucket.Arn}/*
+          # Lets HEAD on a missing key return 404 rather than 403. The backend
+          # never lists the bucket - Postgres is the index of what exists.
+          - Sid: MediaBucketNotFound
+            Effect: Allow
+            Action: s3:ListBucket
+            Resource: !GetAtt MediaBucket.Arn
+
+Outputs:
+  MediaBucketName:
+    Description: Set as S3_MEDIA_BUCKET in backend/.env.
+    Value: !Ref MediaBucket
+  BackendMediaPolicyArn:
+    Description: Attach to the backend's runtime role.
+    Value: !Ref BackendMediaPolicy

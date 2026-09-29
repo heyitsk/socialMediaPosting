@@ -77,6 +77,12 @@ enum ContentKind {
   STORY
 }
 
+enum MediaAssetStatus {
+  PENDING // Upload URL handed out, bytes not verified yet
+  READY // HEAD + content check passed
+  DELETED // Object removed from S3 — row kept for history
+}
+
 enum PostLogStatus {
   SUCCESS
   FAILED
@@ -99,6 +105,7 @@ model User {
   sentInvites     WorkspaceInvite[]
   posts           Post[]
   postGroups      PostGroup[]
+  mediaAssets     MediaAsset[]
 
   @@map("users")
 }
@@ -126,6 +133,7 @@ model Workspace {
   connectedAccounts ConnectedAccount[]
   posts             Post[]
   postGroups        PostGroup[]
+  mediaAssets       MediaAsset[]
 
   @@map("workspaces")
 }
@@ -227,6 +235,9 @@ model PostGroup {
   createdAt       DateTime    @default(now()) @map("created_at")
 
   posts Post[]
+  // Uploaded media, ordered by position. Empty for TEXT posts and for groups
+  // created before S3 uploads (those keep their public URLs in mediaUrls).
+  media MediaAsset[]
 
   @@unique([workspaceId, idempotencyKey])
   @@index([workspaceId, createdAt])
@@ -276,4 +287,39 @@ model PostLog {
   executedAt     DateTime      @default(now()) @map("executed_at")
 
   @@map("post_logs")
+}
+
+// One file the composer uploaded straight to S3 (websitePlan.md §11). The
+// bytes live in S3 under `key`; this row is how we know the object exists and
+// who owns it — the bucket is never listed.
+model MediaAsset {
+  id                String           @id @default(uuid())
+  workspaceId       String           @map("workspace_id")
+  workspace         Workspace        @relation(fields: [workspaceId], references: [id])
+  uploadedByUserId  String           @map("uploaded_by_user_id")
+  uploadedBy        User             @relation(fields: [uploadedByUserId], references: [id])
+  // Set when a post is created with it. An asset belongs to one post only —
+  // there's no media library yet.
+  groupId           String?          @map("group_id")
+  group             PostGroup?       @relation(fields: [groupId], references: [id])
+  position          Int?
+  // `<workspaceId>/<id>.<ext>` — generated here, never the user's filename.
+  key               String           @unique
+  // Only shown back to the user.
+  originalFilename  String           @map("original_filename")
+  contentType       String           @map("content_type")
+  sizeBytes         Int              @map("size_bytes")
+  status            MediaAssetStatus @default(PENDING)
+  // Videos upload in parts; null for images (single presigned POST).
+  multipartUploadId String?          @map("multipart_upload_id")
+  // Set when attached to a post: 15 days after it's sent. The media cleaner
+  // deletes the object after this.
+  expiresAt         DateTime?        @map("expires_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  completedAt       DateTime?        @map("completed_at")
+  deletedAt         DateTime?        @map("deleted_at")
+
+  @@index([groupId])
+  @@index([status, createdAt])
+  @@map("media_assets")
 }

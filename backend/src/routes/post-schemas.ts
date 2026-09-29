@@ -1,5 +1,12 @@
 import { z } from "@hono/zod-openapi";
-import type { ContentKind, MediaType, Platform, PostStatus, Prisma } from "@prisma/client";
+import type {
+  ContentKind,
+  MediaAssetStatus,
+  MediaType,
+  Platform,
+  PostStatus,
+  Prisma,
+} from "@prisma/client";
 
 export const platformSchema = z.enum([
   "FACEBOOK",
@@ -113,7 +120,19 @@ export const postGroupSchema = z
     id: z.string(),
     contentKind: contentKindSchema,
     caption: z.string(),
+    // Public URLs — only on posts made before S3 uploads; empty otherwise.
     mediaUrls: z.array(z.string()),
+    // Uploaded files, in order.
+    media: z.array(
+      z.object({
+        id: z.string(),
+        filename: z.string(),
+        contentType: z.string(),
+        sizeBytes: z.number(),
+        // False once the file is removed after the retention period.
+        available: z.boolean(),
+      }),
+    ),
     status: postStatusSchema,
     scheduledFor: z.iso.datetime().nullable(),
     cancelledAt: z.iso.datetime().nullable(),
@@ -125,6 +144,16 @@ export const postGroupSchema = z
 
 export const postGroupInclude = {
   createdBy: { select: { name: true } },
+  media: {
+    orderBy: { position: "asc" },
+    select: {
+      id: true,
+      originalFilename: true,
+      contentType: true,
+      sizeBytes: true,
+      status: true,
+    },
+  },
   posts: {
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     include: {
@@ -139,6 +168,13 @@ interface PostGroupRow {
   contentKind: ContentKind;
   caption: string;
   mediaUrls: unknown;
+  media: {
+    id: string;
+    originalFilename: string;
+    contentType: string;
+    sizeBytes: number;
+    status: MediaAssetStatus;
+  }[];
   status: PostStatus;
   scheduledFor: Date | null;
   cancelledAt: Date | null;
@@ -168,6 +204,13 @@ export function serializePostGroup(group: PostGroupRow): z.infer<typeof postGrou
     contentKind: group.contentKind,
     caption: group.caption,
     mediaUrls: group.mediaUrls as string[],
+    media: group.media.map((asset) => ({
+      id: asset.id,
+      filename: asset.originalFilename,
+      contentType: asset.contentType,
+      sizeBytes: asset.sizeBytes,
+      available: asset.status === "READY",
+    })),
     status: group.status,
     scheduledFor: group.scheduledFor?.toISOString() ?? null,
     cancelledAt: group.cancelledAt?.toISOString() ?? null,

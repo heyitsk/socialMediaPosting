@@ -1,6 +1,7 @@
 import { Worker } from "bullmq";
 import { prisma } from "../db/client";
 import { reconnectReason } from "../lib/capabilities";
+import { mediaUrlsForDispatch } from "../service/media";
 import { dispatchPost } from "../service/n8n";
 import {
   markTargetCancelled,
@@ -30,7 +31,12 @@ async function publish({ postId, attempt }: PublishJobData): Promise<void> {
     where: { id: postId },
     include: {
       connectedAccount: true,
-      group: { include: { workspace: { select: { deletedAt: true } } } },
+      group: {
+        include: {
+          workspace: { select: { deletedAt: true } },
+          media: { orderBy: { position: "asc" }, select: { key: true, status: true } },
+        },
+      },
     },
   });
   // Superseded by a retry, or already handled (cancelled, duplicate job).
@@ -80,7 +86,9 @@ async function publish({ postId, attempt }: PublishJobData): Promise<void> {
   if (post.status === "SCHEDULED" && !(await markTargetProcessing(postId, attempt))) return;
 
   try {
-    await dispatchPost(post, account);
+    // Uploaded media gets freshly signed S3 URLs on every attempt.
+    const mediaUrls = await mediaUrlsForDispatch(group.media, post.mediaUrls);
+    await dispatchPost({ ...post, mediaUrls }, account);
   } catch (err) {
     console.error(`publish ${postId} (${platform}) failed:`, err);
     const message =

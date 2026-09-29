@@ -960,3 +960,25 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 ---
 
 *Update this file at the end of each session.*
+
+### Session 30 — 2026-09-29
+
+**What we did:** **S3 media uploads** (`websitePlan.md` §11), branch `worktree-s3-media-uploads`. Composer URL fields replaced by direct uploads; n8n still receives `media_urls` (now presigned S3 GETs), so no workflow changes.
+
+- **Schema** (migration `20260929150000_add_media_assets`, hand-written, **not yet applied**): `MediaAsset` (`PENDING`/`READY`/`DELETED`, key, size, type, `group_id` + `position`, `multipart_upload_id`, `expires_at`).
+- **Backend**: `lib/s3.ts` (AWS SDK v3 client, presigned POST/multipart/GET), `lib/media-files.ts` (types, limits, part size, magic-byte sniff), `routes/media.ts` (start / complete / delete), `service/media.ts` (dispatch-time URL signing, hourly cleaner). `post-groups.ts` takes `mediaAssetIds`, attaches assets in the create transaction, IG JPEG-only check, Shorts probe via presigned URL; `checkMediaUrl` removed. Publish worker signs URLs per attempt.
+- **Frontend**: `lib/media-upload.ts` (XHR uploads with progress, 4 parallel parts, retries), `components/media-picker.tsx` (drag and drop, thumbnails, progress, retry, remove, carousel reorder), composer rewired.
+- **Infra**: `infra/media-bucket.yaml` (private bucket, CORS exposing ETag, abort-multipart + backstop lifecycle, backend managed policy).
+
+**Decisions made:** (Kushagra, Sep 29) replace URL input completely; 8 MB images / 1 GB videos; JPEG/PNG/WebP + MP4/MOV, HEIC rejected; no media library; keep files 15 days; per-part retries without resume; dynamic part size (16 MiB floor).
+
+**Still to do:**
+- `aws login --profile smposting`, deploy `infra/media-bucket.yaml` (ap-south-1), set `S3_MEDIA_BUCKET` + `AWS_PROFILE` in `backend/.env`, `prisma migrate deploy`.
+- Live test: image upload, video multipart upload, a post to every platform.
+- Then: per-platform media fitting (§3) and the YouTube/LinkedIn streaming relay.
+
+**Files modified this session:**
+- `backend/prisma/schema.prisma`, `backend/prisma/migrations/20260929150000_add_media_assets/migration.sql` (new)
+- `backend/src/lib/s3.ts`, `backend/src/lib/media-files.ts`, `backend/src/routes/media.ts`, `backend/src/service/media.ts` (new); `backend/src/index.ts`, `backend/src/lib/env.ts`, `backend/src/lib/media-probe.ts`, `backend/src/routes/post-groups.ts`, `backend/src/routes/post-schemas.ts`, `backend/src/queue/publish-worker.ts`, `backend/.env.example`, `backend/package.json`
+- `frontend/src/lib/media-upload.ts`, `frontend/src/components/media-picker.tsx` (new); `frontend/src/routes/composer.tsx`, `frontend/src/lib/api-schema.d.ts`
+- `infra/media-bucket.yaml` (new), `websitePlan.md` §11, `history.md`
