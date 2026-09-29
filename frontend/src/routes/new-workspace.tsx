@@ -39,8 +39,14 @@ export function NewWorkspacePage() {
   };
 
   return (
-    <div className="flex max-w-lg flex-col gap-6">
-      <h1 className="text-2xl font-semibold">New workspace</h1>
+    <div className="flex max-w-lg flex-col gap-8">
+      <div>
+        <p className="text-sm font-medium text-primary">Workspace</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">New workspace</h1>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+          A separate space with its own accounts, posts, and members.
+        </p>
+      </div>
       <Card>
         <CardHeader>
           <CardTitle>Create a workspace</CardTitle>
