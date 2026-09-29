@@ -569,18 +569,28 @@
         320
       ],
       "parameters": {
-        "method": "HEAD",
+        "method": "GET",
         "url": "={{ $('Parse Request').first().json.media_urls[0] }}",
         "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Range",
+              "value": "bytes=0-0"
+            }
+          ]
+        },
         "options": {
           "response": {
             "response": {
-              "fullResponse": true
+              "fullResponse": true,
+              "responseFormat": "text"
             }
           }
         }
       },
-      "notes": "HEAD request just to read Content-Length — LinkedIn's videos initializeUpload requires fileSizeBytes upfront, unlike YouTube's resumable upload.",
+      "notes": "Fetches only the first byte to learn the file size from Content-Range (bytes 0-0/<total>) — LinkedIn's videos initializeUpload requires fileSizeBytes upfront, unlike YouTube's resumable upload. Not a HEAD: media_urls are presigned S3 GET URLs, and S3 rejects a HEAD on a GET-signed URL with 403.",
       "onError": "continueErrorOutput"
     },
     {
@@ -619,7 +629,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn, fileSizeBytes: parseInt($json.headers['content-length'] || $json.headers['Content-Length'] || '0', 10), uploadCaptions: false, uploadThumbnail: false } }) }}",
+        "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn, fileSizeBytes: parseInt(String($json.headers['content-range'] || '').split('/')[1] || $json.headers['content-length'] || '0', 10), uploadCaptions: false, uploadThumbnail: false } }) }}",
         "options": {}
       },
       "notes": "Returns 1+ uploadInstructions entries — 1 for files under LinkedIn's 4,194,304-byte single-part limit, more (byte-range parts) for larger files. Split Video Into Parts handles both cases uniformly.",
