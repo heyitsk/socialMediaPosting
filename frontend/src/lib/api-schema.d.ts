@@ -1339,6 +1339,7 @@ export interface components {
             /** @enum {string} */
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
             attempt: number;
+            canRetry: boolean;
             youtubeTitle: string | null;
             logs: components["schemas"]["PostLog"][];
         };

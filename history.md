@@ -982,3 +982,18 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 - `backend/src/lib/s3.ts`, `backend/src/lib/media-files.ts`, `backend/src/routes/media.ts`, `backend/src/service/media.ts` (new); `backend/src/index.ts`, `backend/src/lib/env.ts`, `backend/src/lib/media-probe.ts`, `backend/src/routes/post-groups.ts`, `backend/src/routes/post-schemas.ts`, `backend/src/queue/publish-worker.ts`, `backend/.env.example`, `backend/package.json`
 - `frontend/src/lib/media-upload.ts`, `frontend/src/components/media-picker.tsx` (new); `frontend/src/routes/composer.tsx`, `frontend/src/lib/api-schema.d.ts`
 - `infra/media-bucket.yaml` (new), `websitePlan.md` §11, `history.md`
+
+### Session 31 — 2026-09-30
+
+**What we did:** follow-ups on branch `worktree-s3-media-uploads` after provisioning and the first live tests.
+
+- **Bucket provisioned by CLI**, not CloudFormation (the `smPost` IAM user has full S3 access but no CloudFormation/IAM rights): `smposting-media-675474620265-ap-south-1`, same settings as `infra/media-bucket.yaml`. Migration applied with `bunx prisma migrate deploy`.
+- **LinkedIn video 403 fixed** (`linkedin-poster.json`, `LI Probe Video Size`): it sent HEAD to a GET-presigned S3 URL, and the method is part of the signature. It now sends a ranged GET (`Range: bytes=0-0`), and `LI Init Video Upload` reads the size from `Content-Range`. Also merged to main (2757016).
+- **Kushagra applied both n8n changes by hand in the live editor** (did not re-import the workflow): the probe fix above, plus `Build Error Result (Node Failure)` in the LinkedIn workflow now appends `err.stack` instead of `err.description`, because n8n put the useful detail in the stack. The repo `linkedin-poster.json` was updated to match. The other four workflows still use `err.description`.
+- **Readable failure messages** (`backend/src/lib/platform-error.ts`, `websitePlan.md` §10.9): an `ERROR_RULES` table maps raw n8n errors to one short sentence at serialization time; stacks and node names are stripped; `PostLog` keeps the raw text.
+- **Retry cap of 5 sends per target** (`MAX_ATTEMPTS`, `canRetry` in the API; 409 past the cap; History shows "Retry limit reached" instead of the button).
+- Merged `origin/main` (frontend redesign) into the branch; the media picker was re-applied onto the redesigned composer.
+
+**Still to do:** live end-to-end test from the worktree (image + video to every platform); WebP on Facebook/LinkedIn/Threads untested; then per-platform media fitting.
+
+**Files modified this session:** `backend/src/lib/platform-error.ts`, `backend/src/routes/post-schemas.ts`, `backend/src/routes/post-groups.ts`, `backend/src/service/post-groups.ts`, `frontend/src/components/post-group-card.tsx`, `frontend/src/lib/api-schema.d.ts`, `frontend/src/routes/composer.tsx` (merge), `workflows/linkedin-poster.json`, `websitePlan.md`, `history.md`

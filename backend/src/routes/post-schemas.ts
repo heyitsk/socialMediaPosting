@@ -8,6 +8,7 @@ import type {
   Prisma,
 } from "@prisma/client";
 import { friendlyPlatformError } from "../lib/platform-error";
+import { canRetry } from "../service/post-groups";
 
 export const platformSchema = z.enum([
   "FACEBOOK",
@@ -108,6 +109,8 @@ const postTargetSchema = z
     caption: z.string(),
     status: postStatusSchema,
     attempt: z.number(),
+    // FAILED and under the attempt limit.
+    canRetry: z.boolean(),
     // YouTube targets only — the caption is the video's description, so the
     // title is what History leads with instead.
     youtubeTitle: z.string().nullable(),
@@ -226,11 +229,14 @@ export function serializePostGroup(group: PostGroupRow): z.infer<typeof postGrou
       caption: post.caption,
       status: post.status,
       attempt: post.attempt,
+      canRetry: canRetry(post),
       youtubeTitle: (post.platformOptions as { title?: string } | null)?.title ?? null,
       logs: post.logs.map((log) => ({
         status: log.status,
         platformPostId: log.platformPostId,
-        errorMessage: log.errorMessage && friendlyPlatformError(log.errorMessage),
+        errorMessage:
+          log.errorMessage &&
+          friendlyPlatformError(log.errorMessage, post.connectedAccount.platform),
         executedAt: log.executedAt.toISOString(),
       })),
     })),

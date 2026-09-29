@@ -932,7 +932,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Reached via the error output of any API/Code node. Runs once for all\n// items so a failed carousel child sends a single FAILED callback.\nconst req = $('Parse Request').first().json;\nconst err = $input.first().json.error;\nconst msg = (typeof err === 'string' ? err : err?.message) || 'Unknown error';\nconst detail = typeof err === 'object' && err?.description ? ' - ' + err.description : '';\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: msg + detail + ' (node: ' + $prevNode.name + ')',\n    callback_url: req.callback_url\n  }\n}];"
+        "jsCode": "// Reached via the error output of any API/Code node. Runs once for all\n// items so a failed carousel child sends a single FAILED callback.\nconst req = $('Parse Request').first().json;\nconst err = $input.first().json.error;\nconst msg = (typeof err === 'string' ? err : err?.message) || 'Unknown error';\nconst detail = typeof err === 'object' && err?.stack ? ' - ' + err.stack : '';\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: msg + detail + ' (node: ' + $prevNode.name + ')',\n    callback_url: req.callback_url\n  }\n}];"
       },
       "id": "build-error-node-failure",
       "name": "Build Error Result (Node Failure)",

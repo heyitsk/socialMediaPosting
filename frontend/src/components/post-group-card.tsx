@@ -140,11 +140,16 @@ function TargetRow({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {target.status === "FAILED" && (
+          {target.canRetry && (
             <Button variant="outline" size="sm" disabled={retrying} onClick={onRetry}>
               <RotateCw className="size-3.5" />
               {retrying ? "Retrying…" : "Retry"}
             </Button>
+          )}
+          {target.status === "FAILED" && !target.canRetry && (
+            <span className="text-xs text-muted-foreground">
+              Retry limit reached — create the post again
+            </span>
           )}
           <Badge variant={STATUS_VARIANT[target.status]}>{STATUS_LABELS[target.status]}</Badge>
         </div>

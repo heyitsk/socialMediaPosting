@@ -20,7 +20,12 @@ import { presignDownload } from "../lib/s3";
 import type { WorkspaceEnv } from "../middleware/auth";
 import { enqueuePublish, removePublishJob } from "../queue/publish-queue";
 import { mediaExpiry } from "../service/media";
-import { markTargetCancelled, markTargetFailed, prepareRetry } from "../service/post-groups";
+import {
+  MAX_ATTEMPTS,
+  markTargetCancelled,
+  markTargetFailed,
+  prepareRetry,
+} from "../service/post-groups";
 import {
   contentKindSchema,
   mediaTypeSchema,
@@ -518,8 +523,13 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     }
 
     const attempt = await prepareRetry(postId);
-    if (attempt === null) {
+    if (attempt === "NOT_FAILED") {
       throw new HTTPException(409, { message: "Only failed posts can be retried" });
+    }
+    if (attempt === "LIMIT_REACHED") {
+      throw new HTTPException(409, {
+        message: `This post was already tried ${MAX_ATTEMPTS} times — create it again instead`,
+      });
     }
     try {
       await enqueuePublish(postId, attempt);
