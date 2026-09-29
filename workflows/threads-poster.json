@@ -43,7 +43,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'threads',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'threads',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url\n  }\n}];"
       }
     },
     {
@@ -193,7 +193,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-wait-text",
@@ -237,7 +238,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-create-image",
@@ -274,7 +276,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-wait-image",
@@ -318,7 +321,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-create-video",
@@ -356,7 +360,8 @@
         },
         "options": {}
       },
-      "notes": "Video needs transcoding on Meta's side \u2014 60s blind wait before publish. Bump higher if longer clips start failing."
+      "notes": "Video needs transcoding on Meta's side \u2014 60s blind wait before publish. Bump higher if longer clips start failing.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-wait-video",
@@ -400,7 +405,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-split-media",
@@ -451,7 +457,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-aggregate-children",
@@ -510,7 +517,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "th-wait-carousel",
@@ -554,7 +562,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "build-error-unsupported",
@@ -580,7 +589,8 @@
       ],
       "parameters": {
         "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'threads',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "send-callback",
@@ -612,30 +622,6 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "error-trigger",
-      "name": "Error Trigger",
-      "type": "n8n-nodes-base.errorTrigger",
-      "typeVersion": 1,
-      "position": [
-        -260,
-        700
-      ],
-      "parameters": {}
-    },
-    {
-      "id": "build-error-from-trigger",
-      "name": "Build Error Result (From Trigger)",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -40,
-        700
-      ],
-      "parameters": {
-        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'threads',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
-      }
-    },
-    {
       "id": "send-error-callback",
       "name": "Send Error Callback",
       "type": "n8n-nodes-base.httpRequest",
@@ -663,6 +649,19 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reached via the error output of any API/Code node. Runs once for all\n// items so a failed carousel child sends a single FAILED callback.\nconst req = $('Parse Request').first().json;\nconst err = $input.first().json.error;\nconst msg = (typeof err === 'string' ? err : err?.message) || 'Unknown error';\nconst detail = typeof err === 'object' && err?.description ? ' - ' + err.description : '';\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'threads',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: msg + detail + ' (node: ' + $prevNode.name + ')',\n    callback_url: req.callback_url\n  }\n}];"
+      },
+      "id": "build-error-node-failure",
+      "name": "Build Error Result (Node Failure)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        700
+      ]
     }
   ],
   "connections": {
@@ -735,6 +734,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -757,6 +763,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -765,6 +778,13 @@
         [
           {
             "node": "Wait 10s (Image)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -790,6 +810,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -798,6 +825,13 @@
         [
           {
             "node": "Wait 60s (Video)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -823,6 +857,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -845,25 +886,10 @@
             "type": "main",
             "index": 0
           }
-        ]
-      ]
-    },
-    "Error Trigger": {
-      "main": [
+        ],
         [
           {
-            "node": "Build Error Result (From Trigger)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build Error Result (From Trigger)": {
-      "main": [
-        [
-          {
-            "node": "Send Error Callback",
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -889,6 +915,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -911,6 +944,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -930,6 +970,24 @@
         [
           {
             "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Result (Node Failure)": {
+      "main": [
+        [
+          {
+            "node": "Send Error Callback",
             "type": "main",
             "index": 0
           }

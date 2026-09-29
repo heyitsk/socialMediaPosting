@@ -43,7 +43,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst meta = body.youtube_metadata || {};\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'youtube',\n    media_type: String(body.media_type || 'VIDEO').toUpperCase(),\n    media_urls: body.media_urls || [],\n    title: meta.title || '',\n    description: meta.description || '',\n    privacy: meta.privacy || 'private',\n    made_for_kids: meta.made_for_kids === true,\n    tags: Array.isArray(meta.tags) ? meta.tags : [],\n    category_id: String(meta.category_id || '22'),\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst meta = body.youtube_metadata || {};\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'youtube',\n    media_type: String(body.media_type || 'VIDEO').toUpperCase(),\n    media_urls: body.media_urls || [],\n    title: meta.title || '',\n    description: meta.description || '',\n    privacy: meta.privacy || 'private',\n    made_for_kids: meta.made_for_kids === true,\n    tags: Array.isArray(meta.tags) ? meta.tags : [],\n    category_id: String(meta.category_id || '22'),\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url\n  }\n}];"
       }
     },
     {
@@ -99,7 +99,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "initiate-upload",
@@ -150,7 +151,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "build-error-invalid",
@@ -207,7 +209,8 @@
         "contentType": "binaryData",
         "inputDataFieldName": "data",
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "build-success-result",
@@ -220,7 +223,8 @@
       ],
       "parameters": {
         "jsCode": "// YouTube returns the video resource as soon as the bytes land —\n// status.uploadStatus is still 'uploaded' here, not 'processed'. SUCCESS only\n// means \"upload accepted\"; the backend's video-status poller decides when\n// the post is actually PUBLISHED (or FAILED, e.g. rejected as a duplicate).\nconst req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "send-callback",
@@ -252,30 +256,6 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "error-trigger",
-      "name": "Error Trigger",
-      "type": "n8n-nodes-base.errorTrigger",
-      "typeVersion": 1,
-      "position": [
-        -260,
-        700
-      ],
-      "parameters": {}
-    },
-    {
-      "id": "build-error-from-trigger",
-      "name": "Build Error Result (From Trigger)",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -40,
-        700
-      ],
-      "parameters": {
-        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'youtube',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
-      }
-    },
-    {
       "id": "send-error-callback",
       "name": "Send Error Callback",
       "type": "n8n-nodes-base.httpRequest",
@@ -303,6 +283,19 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reached via the error output of any API/Code node. Runs once for all\n// items so a failed carousel child sends a single FAILED callback.\nconst req = $('Parse Request').first().json;\nconst err = $input.first().json.error;\nconst msg = (typeof err === 'string' ? err : err?.message) || 'Unknown error';\nconst detail = typeof err === 'object' && err?.description ? ' - ' + err.description : '';\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: msg + detail + ' (node: ' + $prevNode.name + ')',\n    callback_url: req.callback_url\n  }\n}];"
+      },
+      "id": "build-error-node-failure",
+      "name": "Build Error Result (Node Failure)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        700
+      ]
     }
   ],
   "connections": {
@@ -359,6 +352,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -369,6 +369,13 @@
             "node": "Merge",
             "type": "main",
             "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -389,6 +396,13 @@
         [
           {
             "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -414,21 +428,17 @@
             "type": "main",
             "index": 0
           }
-        ]
-      ]
-    },
-    "Error Trigger": {
-      "main": [
+        ],
         [
           {
-            "node": "Build Error Result (From Trigger)",
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Build Error Result (From Trigger)": {
+    "Build Error Result (Node Failure)": {
       "main": [
         [
           {
