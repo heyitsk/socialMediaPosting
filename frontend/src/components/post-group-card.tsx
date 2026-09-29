@@ -145,7 +145,11 @@ function TargetRow({
       {target.caption !== sharedCaption && (
         <p className="line-clamp-2 text-xs text-muted-foreground">Own caption: {target.caption}</p>
       )}
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error && (
+        <p className="line-clamp-3 break-words text-xs text-destructive" title={error}>
+          {error}
+        </p>
+      )}
       {target.attempt > 1 && (
         <p className="text-xs text-muted-foreground">Attempt {target.attempt}</p>
       )}
