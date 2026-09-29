@@ -158,6 +158,42 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What each platform can post, and its limits */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Per-platform capabilities */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["Capabilities"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces": {
         parameters: {
             query?: never;
@@ -725,17 +761,19 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/workspaces/{workspaceId}/posts": {
+    "/api/workspaces/{workspaceId}/post-groups": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** List posts with their dispatch logs */
+        /** List post groups with their targets and logs, newest first */
         get: {
             parameters: {
-                query?: never;
+                query?: {
+                    limit?: number;
+                };
                 header?: never;
                 path: {
                     workspaceId: string;
@@ -744,19 +782,19 @@ export interface paths {
             };
             requestBody?: never;
             responses: {
-                /** @description Posts in the workspace */
+                /** @description Post groups in the workspace */
                 200: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Post"][];
+                        "application/json": components["schemas"]["PostGroup"][];
                     };
                 };
             };
         };
         put?: never;
-        /** Create a post and immediately dispatch it to n8n */
+        /** Post to one or more connected accounts, now or scheduled */
         post: {
             parameters: {
                 query?: never;
@@ -768,18 +806,189 @@ export interface paths {
             };
             requestBody?: {
                 content: {
-                    "application/json": components["schemas"]["CreatePostRequest"];
+                    "application/json": components["schemas"]["CreatePostGroupRequest"];
                 };
             };
             responses: {
-                /** @description Post created and dispatch attempted */
+                /** @description Same idempotencyKey as an earlier request — that group, unchanged */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PostGroup"];
+                    };
+                };
+                /** @description Group created and every target queued */
                 201: {
                     headers: {
                         [name: string]: unknown;
                     };
                     content: {
-                        "application/json": components["schemas"]["Post"];
+                        "application/json": components["schemas"]["PostGroup"];
                     };
+                };
+                /** @description Validation failed — nothing was created */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PostGroupValidationError"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/post-groups/{groupId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One post group — the composer's live results panel polls this */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The group */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PostGroup"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/post-groups/{groupId}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel the not-yet-sent targets of a scheduled post */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                    groupId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The group after cancelling */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PostGroup"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Nothing left to cancel */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/post-groups/{groupId}/targets/{postId}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send one FAILED target again, now */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                    groupId: string;
+                    postId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description The group after queueing the retry */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PostGroup"];
+                    };
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Target isn't FAILED */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
                 };
             };
         };
@@ -812,7 +1021,7 @@ export interface paths {
                 };
             };
             responses: {
-                /** @description Callback processed */
+                /** @description Callback processed (a duplicate is a no-op) */
                 204: {
                     headers: {
                         [name: string]: unknown;
@@ -821,6 +1030,13 @@ export interface paths {
                 };
                 /** @description Invalid or missing callback secret */
                 401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Unknown post_id */
+                404: {
                     headers: {
                         [name: string]: unknown;
                     };
@@ -860,6 +1076,24 @@ export interface components {
         };
         /** @enum {string} */
         WorkspaceRole: "OWNER" | "ADMIN" | "MEMBER";
+        Capabilities: {
+            platforms: {
+                /** @enum {string} */
+                platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+                captionLimit: number;
+                carousel: {
+                    min: number;
+                    max: number;
+                };
+                mediaTypes: {
+                    /** @enum {string} */
+                    kind: "TEXT" | "IMAGE" | "CAROUSEL" | "VIDEO" | "STORY";
+                    mediaTypes: ("TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS")[];
+                }[];
+            }[];
+            instagramMaxHashtags: number;
+            shortsMaxDurationSeconds: number;
+        };
         WorkspaceBody: {
             name: string;
         };
@@ -904,27 +1138,41 @@ export interface components {
             lastRefreshedAt: string | null;
             needsReconnect: boolean;
         };
-        Post: {
+        PostGroup: {
             id: string;
-            caption: string;
             /** @enum {string} */
-            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
+            contentKind: "TEXT" | "IMAGE" | "CAROUSEL" | "VIDEO" | "STORY";
+            caption: string;
             mediaUrls: string[];
             /** @enum {string} */
-            status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED";
+            status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
+            /** Format: date-time */
+            scheduledFor: string | null;
+            /** Format: date-time */
+            cancelledAt: string | null;
             /** Format: date-time */
             createdAt: string;
-            logs: components["schemas"]["PostLog"][];
-            youtubeTitle: string | null;
-            connectedAccount: {
-                /** @enum {string} */
-                platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
-                accountName: string;
+            createdBy: {
+                name: string;
             };
+            targets: components["schemas"]["PostTarget"][];
         };
-        PostLog: {
+        PostTarget: {
+            id: string;
+            connectedAccountId: string;
             /** @enum {string} */
             platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+            accountName: string;
+            /** @enum {string} */
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
+            caption: string;
+            /** @enum {string} */
+            status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
+            attempt: number;
+            youtubeTitle: string | null;
+            logs: components["schemas"]["PostLog"][];
+        };
+        PostLog: {
             /** @enum {string} */
             status: "SUCCESS" | "FAILED";
             platformPostId: string | null;
@@ -932,14 +1180,30 @@ export interface components {
             /** Format: date-time */
             executedAt: string;
         };
-        CreatePostRequest: {
-            connectedAccountId: string;
-            caption: string;
+        PostGroupValidationError: {
+            message: string;
+            errors: string[];
+            targets: {
+                connectedAccountId: string;
+                errors: string[];
+            }[];
+        };
+        CreatePostGroupRequest: {
+            idempotencyKey: string;
             /** @enum {string} */
-            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
+            contentKind: "TEXT" | "IMAGE" | "CAROUSEL" | "VIDEO" | "STORY";
+            caption: string;
             /** @default [] */
             mediaUrls: string[];
-            youtubeOptions?: components["schemas"]["YouTubeOptions"];
+            /** Format: date-time */
+            scheduledFor?: string;
+            targets: {
+                connectedAccountId: string;
+                captionOverride?: string;
+                /** @enum {string} */
+                mediaType?: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
+                youtubeOptions?: components["schemas"]["YouTubeOptions"];
+            }[];
         };
         YouTubeOptions: {
             title: string;

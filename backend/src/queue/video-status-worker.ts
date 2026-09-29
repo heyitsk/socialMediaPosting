@@ -5,6 +5,7 @@ import { decrypt } from "../lib/crypto";
 import { getVideoStatus as getFacebookVideoStatus } from "../lib/facebook";
 import { getVideoStatus as getLinkedInVideoStatus } from "../lib/linkedin";
 import { getVideoStatus as getYouTubeVideoStatus } from "../lib/youtube";
+import { markTargetFailed, markTargetPublished } from "../service/post-groups";
 import { getFreshYouTubeAccessToken } from "../service/youtube-token";
 import { redisConnection } from "./connection";
 import {
@@ -80,34 +81,24 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
       const result = await check(post.connectedAccount, mediaId);
 
       if (result.state === "ready") {
-        await prisma.postLog.create({
-          data: { postId, platform, status: "SUCCESS", platformPostId },
-        });
-        await prisma.post.update({ where: { id: postId }, data: { status: "PUBLISHED" } });
+        await markTargetPublished(postId, platform, platformPostId);
         return;
       }
 
       if (result.state === "error") {
-        await prisma.postLog.create({
-          data: { postId, platform, status: "FAILED", platformPostId, errorMessage: result.reason },
-        });
-        await prisma.post.update({ where: { id: postId }, data: { status: "FAILED" } });
+        await markTargetFailed(postId, platform, result.reason, { platformPostId });
         return;
       }
 
       // still "processing"
       const isLastAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
       if (isLastAttempt) {
-        await prisma.postLog.create({
-          data: {
-            postId,
-            platform,
-            status: "FAILED",
-            platformPostId,
-            errorMessage: `Video processing timed out after ${Math.round(pollTimeoutMs(platform) / 60_000)} minutes — check ${label} manually`,
-          },
-        });
-        await prisma.post.update({ where: { id: postId }, data: { status: "FAILED" } });
+        await markTargetFailed(
+          postId,
+          platform,
+          `Video processing timed out after ${Math.round(pollTimeoutMs(platform) / 60_000)} minutes — check ${label} manually`,
+          { platformPostId },
+        );
         return;
       }
 

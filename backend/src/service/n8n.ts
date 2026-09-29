@@ -1,5 +1,6 @@
 import type { ConnectedAccount, ConnectionMethod, MediaType, Post } from "@prisma/client";
 import { decrypt } from "../lib/crypto";
+import { TOKEN_EXPIRY_BUFFER_MS } from "../lib/capabilities";
 import { env } from "../lib/env";
 import { getFreshYouTubeAccessToken } from "./youtube-token";
 
@@ -70,10 +71,8 @@ export interface InstagramDispatchPayload {
 // Standalone Instagram Login tokens expire after ~60 days and there's no
 // proactive refresh worker yet — fail fast with a clear error here rather
 // than dispatching a doomed request to n8n (see websitePlan.md token
-// refresh notes; SLIDING_WINDOW refresh automation is a follow-up). Exported
-// so routes/integrations.ts can flag the same "needs reconnect" window to
-// the frontend before the user even tries to post.
-export const TOKEN_EXPIRY_BUFFER_MS = 24 * 60 * 60 * 1000;
+// refresh notes; SLIDING_WINDOW refresh automation is a follow-up). The same
+// window is checked at submit time via reconnectReason (lib/capabilities.ts).
 
 export function buildInstagramPayload(
   post: Post,
@@ -236,7 +235,7 @@ export async function buildYouTubePayload(
   post: Post,
   connectedAccount: ConnectedAccount,
 ): Promise<YouTubeDispatchPayload> {
-  // routes/posts.ts rejects YouTube posts without these before the Post row
+  // routes/post-groups.ts rejects YouTube targets without these before the Post row
   // is created, so this is always set here.
   const options = post.platformOptions as unknown as YouTubeOptions;
   const accessToken = await getFreshYouTubeAccessToken(connectedAccount);
@@ -268,11 +267,17 @@ export async function buildYouTubePayload(
   };
 }
 
+// Every workflow's webhook responds on receipt (responseMode: onReceived), so
+// a healthy n8n answers in well under a second — this only stops a hung n8n
+// from holding a publish-worker slot forever.
+const N8N_DISPATCH_TIMEOUT_MS = 15_000;
+
 async function postToN8n(webhookPath: string, payload: unknown): Promise<void> {
   const response = await fetch(`${env.N8N_BASE_URL}/webhook/${webhookPath}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(N8N_DISPATCH_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -298,4 +303,23 @@ export async function dispatchLinkedInToN8n(payload: LinkedInDispatchPayload): P
 
 export async function dispatchYouTubeToN8n(payload: YouTubeDispatchPayload): Promise<void> {
   await postToN8n("youtube-poster", payload);
+}
+
+// One target → its platform's workflow. Throws on anything that means the
+// post never reached n8n (expired token, n8n down/timeout).
+export async function dispatchPost(post: Post, connectedAccount: ConnectedAccount): Promise<void> {
+  switch (connectedAccount.platform) {
+    case "FACEBOOK":
+      return dispatchToN8n(buildFacebookPayload(post, connectedAccount));
+    case "INSTAGRAM":
+      return dispatchInstagramToN8n(buildInstagramPayload(post, connectedAccount));
+    case "THREADS":
+      return dispatchThreadsToN8n(buildThreadsPayload(post, connectedAccount));
+    case "LINKEDIN":
+      return dispatchLinkedInToN8n(buildLinkedInPayload(post, connectedAccount));
+    case "YOUTUBE":
+      return dispatchYouTubeToN8n(await buildYouTubePayload(post, connectedAccount));
+    default:
+      throw new Error(`${connectedAccount.platform} accounts can't be dispatched yet`);
+  }
 }

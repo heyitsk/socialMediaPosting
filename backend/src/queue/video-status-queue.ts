@@ -60,6 +60,9 @@ export async function enqueueVideoStatusPoll(
     "poll",
     { postId, platform, platformPostId, mediaId },
     {
+      // A duplicate n8n callback for the same upload reuses this id instead
+      // of starting a second poller.
+      jobId: `video-${postId}-${mediaId}`.replace(/:/g, "_"),
       attempts: POLL_POLICY[platform].attempts,
       backoff: { type: POLL_BACKOFF_TYPE },
       removeOnComplete: true,
