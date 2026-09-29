@@ -5,29 +5,33 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { API_URL, api } from "@/lib/api";
-import { useWorkspaceId } from "@/lib/session";
+import { useWorkspace, useWorkspaceId } from "@/lib/session";
+
+// Removed from the workspace, or a plain member (only owners/admins connect).
+const FORBIDDEN_MESSAGE =
+  "Only the workspace owner or an admin can connect accounts — or you no longer have access to that workspace.";
 
 const CONNECT_ERROR_MESSAGES: Record<string, string> = {
   facebook_connect_denied: "Facebook connection was cancelled.",
   facebook_connect_invalid_state: "Facebook connection expired — please try again.",
   facebook_connect_failed: "Failed to connect Facebook account.",
-  facebook_connect_forbidden: "You no longer have access to that workspace.",
+  facebook_connect_forbidden: FORBIDDEN_MESSAGE,
   instagram_connect_denied: "Instagram connection was cancelled.",
   instagram_connect_invalid_state: "Instagram connection expired — please try again.",
   instagram_connect_failed: "Failed to connect Instagram account.",
-  instagram_connect_forbidden: "You no longer have access to that workspace.",
+  instagram_connect_forbidden: FORBIDDEN_MESSAGE,
   threads_connect_denied: "Threads connection was cancelled.",
   threads_connect_invalid_state: "Threads connection expired — please try again.",
   threads_connect_failed: "Failed to connect Threads account.",
-  threads_connect_forbidden: "You no longer have access to that workspace.",
+  threads_connect_forbidden: FORBIDDEN_MESSAGE,
   linkedin_connect_denied: "LinkedIn connection was cancelled.",
   linkedin_connect_invalid_state: "LinkedIn connection expired — please try again.",
   linkedin_connect_failed: "Failed to connect LinkedIn account.",
-  linkedin_connect_forbidden: "You no longer have access to that workspace.",
+  linkedin_connect_forbidden: FORBIDDEN_MESSAGE,
   youtube_connect_denied: "YouTube connection was cancelled.",
   youtube_connect_invalid_state: "YouTube connection expired — please try again.",
   youtube_connect_failed: "Failed to connect YouTube account.",
-  youtube_connect_forbidden: "You no longer have access to that workspace.",
+  youtube_connect_forbidden: FORBIDDEN_MESSAGE,
   youtube_connect_missing_scope:
     "YouTube connected without upload permission — reconnect and keep the upload checkbox ticked.",
   youtube_connect_no_channel:
@@ -133,6 +137,8 @@ const CONNECT_PATH: Partial<Record<string, string>> = {
 function ConnectedAccountsCard() {
   const queryClient = useQueryClient();
   const workspaceId = useWorkspaceId() ?? "";
+  // Members post with the accounts but can't change them (websitePlan.md §9.7).
+  const canManage = useWorkspace()?.role !== "MEMBER";
   const connect = (path: string) => {
     window.location.href = `${API_URL}${path}?workspaceId=${encodeURIComponent(workspaceId)}`;
   };
@@ -190,45 +196,60 @@ function ConnectedAccountsCard() {
                     : " · via Facebook Page")}
               </div>
               {account.needsReconnect && (
-                <div className="text-xs text-destructive">Token expired — reconnect below</div>
+                <div className="text-xs text-destructive">
+                  {canManage
+                    ? "Token expired — reconnect below"
+                    : "Token expired — ask the owner or an admin to reconnect"}
+                </div>
               )}
             </div>
-            <div className="flex gap-2">
-              {account.needsReconnect && CONNECT_PATH[account.platform] && (
+            {canManage && (
+              <div className="flex gap-2">
+                {account.needsReconnect && CONNECT_PATH[account.platform] && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => connect(CONNECT_PATH[account.platform]!)}
+                  >
+                    Reconnect
+                  </Button>
+                )}
                 <Button
-                  variant="outline"
+                  variant="destructive"
                   size="sm"
-                  onClick={() => connect(CONNECT_PATH[account.platform]!)}
+                  disabled={disconnect.isPending}
+                  onClick={() => disconnect.mutate(account.id)}
                 >
-                  Reconnect
+                  Disconnect
                 </Button>
-              )}
-              <Button
-                variant="destructive"
-                size="sm"
-                disabled={disconnect.isPending}
-                onClick={() => disconnect.mutate(account.id)}
-              >
-                Disconnect
-              </Button>
-            </div>
+              </div>
+            )}
           </div>
         ))}
-        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/facebook")}>
-          Connect / Add Facebook Pages
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/instagram")}>
-          Connect Instagram
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/threads")}>
-          Connect Threads
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/linkedin")}>
-          Connect LinkedIn
-        </Button>
-        <Button variant="outline" size="sm" onClick={() => connect("/api/auth/youtube")}>
-          Connect YouTube
-        </Button>
+        {!canManage && (
+          <p className="text-xs text-muted-foreground">
+            Only the workspace owner or an admin can connect or disconnect accounts.
+          </p>
+        )}
+        {canManage && (
+          <>
+            <Button variant="outline" size="sm" onClick={() => connect("/api/auth/facebook")}>
+              Connect / Add Facebook Pages
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => connect("/api/auth/instagram")}>
+              Connect Instagram
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => connect("/api/auth/threads")}>
+              Connect Threads
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => connect("/api/auth/linkedin")}>
+              Connect LinkedIn
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => connect("/api/auth/youtube")}>
+              Connect YouTube
+            </Button>
+          </>
+        )}
       </CardContent>
     </Card>
   );

@@ -3,14 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
 import { destroyAllSessions, destroySession } from "../lib/session";
 import { type AuthEnv, requireAuth } from "../middleware/auth";
-
-const workspaceSummarySchema = z
-  .object({
-    id: z.string(),
-    name: z.string(),
-    isOwner: z.boolean(),
-  })
-  .openapi("WorkspaceSummary");
+import { workspaceSummarySchema } from "./workspaces";
 
 const meSchema = z
   .object({
@@ -61,7 +54,13 @@ export const sessionRoute = new OpenAPIHono<AuthEnv>()
   .openapi(getMe, async (c) => {
     const user = await prisma.user.findUnique({
       where: { id: c.var.userId },
-      include: { memberships: { include: { workspace: true }, orderBy: { createdAt: "asc" } } },
+      include: {
+        memberships: {
+          where: { workspace: { deletedAt: null } },
+          include: { workspace: true },
+          orderBy: { createdAt: "asc" },
+        },
+      },
     });
     // Session outlived its user (e.g. deleted) — treat as signed out.
     if (!user) {
@@ -75,10 +74,11 @@ export const sessionRoute = new OpenAPIHono<AuthEnv>()
         name: user.name,
         avatarUrl: user.avatarUrl,
         createdAt: user.createdAt.toISOString(),
-        workspaces: user.memberships.map(({ workspace }) => ({
+        workspaces: user.memberships.map(({ workspace, role }) => ({
           id: workspace.id,
           name: workspace.name,
-          isOwner: workspace.ownerUserId === user.id,
+          role: workspace.ownerUserId === user.id ? ("OWNER" as const) : role,
+          isPersonal: workspace.isPersonal,
         })),
       },
       200,

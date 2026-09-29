@@ -534,7 +534,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 
 ## 9. App Authentication, Sessions & Workspaces
 
-> **Status (Sep 24, 2026):** Phase A (workspace schema, migration `20260924060000_add_workspaces_and_login`) applied. Phase B (Google sign-in, Redis sessions, `/api/me`, `/api/logout[-all]`, Vite `/api` proxy) live-tested. Phase C done: data routes moved under `/api/workspaces/:workspaceId/*` behind `requireAuth` + `requireWorkspace` (non-members get 404); connect flows take `?workspaceId=`, check session + membership at start, and at the callback the state must belong to the same signed-in user (`lib/connect-state.ts`); PKCE added to YouTube connect (Meta/LinkedIn unchanged); `csrf()` on `/api/*`; per-IP rate limit on `/api/login/*`; `/docs` + `/openapi.json` dev-only; single-user mode (`DEFAULT_USER_*`, `getDefaultWorkspaceContext`) removed. Frontend has a minimal `RequireAuth` guard and uses the first workspace; Phase D (workspace URLs, switcher, avatar/logout) through F not started. Rules follow the [OWASP OAuth 2.0 Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/OAuth2_Cheat_Sheet.html).
+> **Status (Sep 24, 2026):** Phase A (workspace schema, migration `20260924060000_add_workspaces_and_login`) applied. Phase B (Google sign-in, Redis sessions, `/api/me`, `/api/logout[-all]`, Vite `/api` proxy) live-tested. Phase C done: data routes moved under `/api/workspaces/:workspaceId/*` behind `requireAuth` + `requireWorkspace` (non-members get 404); connect flows take `?workspaceId=`, check session + membership at start, and at the callback the state must belong to the same signed-in user (`lib/connect-state.ts`); PKCE added to YouTube connect (Meta/LinkedIn unchanged); `csrf()` on `/api/*`; per-IP rate limit on `/api/login/*`; `/docs` + `/openapi.json` dev-only; single-user mode (`DEFAULT_USER_*`, `getDefaultWorkspaceContext`) removed. Phase D (workspace URLs, switcher, avatar/logout) built Sep 24. Phase E (roles, members, invites, soft delete — backend and frontend) built Sep 29, see §9.7; Phase F not started. Rules follow the [OWASP OAuth 2.0 Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/OAuth2_Cheat_Sheet.html).
 
 This is **app login** ("who is using smPosting"), which is a different thing from the §2 **platform connect** flows ("which Facebook Page may smPosting post to"). They share nothing except the OAuth mechanics.
 
@@ -548,8 +548,8 @@ This is **app login** ("who is using smPosting"), which is a different thing fro
 | Session type | **Opaque session token in a cookie, session stored in Redis** — not stateless JWTs | Logout, "log out everywhere", account deletion and removing someone from a workspace must take effect immediately. JWTs can't be revoked without a denylist, which is a per-request lookup anyway. A Redis `GET` is sub-millisecond, and every route already queries Postgres, so the lookup is negligible. JWTs pay off when many services verify tokens without a shared store; we have one backend. |
 | Session lifetime | **7 days sliding** (reset on activity), **30-day absolute cap** | |
 | Tenancy | **Workspaces** — connected accounts and posts belong to a workspace, users access it through membership | Agencies: one employee manages several clients. Individuals get an auto-created "Personal" workspace and never see the concept (switcher hidden when there's only one). Doing this before real users exist is one migration; retrofitting later touches every query and unique key under live data. |
-| Authorization | **No roles in V1.** Only tenant isolation: "is this user a member of this workspace?" on every request. One exception: the workspace **owner** (creator) is the only one who can remove members or delete the workspace, so any member can't lock out everyone else. | |
-| Invites | **In V1.** An existing member enters an email → pending invite → accepted automatically when that person signs in with Google using that (verified) email. | |
+| Authorization | Tenant isolation on every request ("is this user a member of this workspace?") plus **three roles: OWNER, ADMIN, MEMBER** (revised Sep 29 — originally "no roles in V1"). Full matrix in §9.7. | An agency needs its founder to control who's in a client workspace, and a junior shouldn't be able to disconnect the client's Page. |
+| Invites | **In V1, owner only.** The owner enters an email + role → if that email already has an account they're added at once, otherwise a pending invite (7 days) is accepted automatically when they sign in with Google using that (verified) email. No invite email — the owner shares the app link. | |
 | Seeded user | `DEFAULT_USER_EMAIL` is the owner's own Google account → linked on first login, keeping all existing connected accounts and history. | |
 
 ### 9.2 Single-origin dev setup (solves the one-ngrok-domain limit)
@@ -627,15 +627,66 @@ Authorization Code flow + **PKCE (S256)** + **`nonce`**, confidential client (cl
 - `API_URL` becomes relative (same origin via the Vite proxy).
 - **Remember**: `composer.tsx` keeps its own platform allowlist — the workspace refactor must not drop anything from it.
 
-### 9.7 Invites (Phase E)
+### 9.7 Roles, members & invites (Phase E)
 
-- `POST /api/workspaces/:id/invites {email}` (any member), `GET` list, `DELETE` (revoke). `POST /api/workspaces` to create a workspace, `DELETE /api/workspaces/:id/members/:userId` (owner only), `POST …/leave`.
-- If the invited email already belongs to a user, the membership is created at once; otherwise it waits for their first Google sign-in (§9.4 step 5).
-- V1 sends no invite email — the inviter shares the app link. Email delivery rides on the Phase 4 Resend/SendGrid item.
+> **Status (Sep 29, 2026):** backend built (migration `20260929060000_add_workspace_roles_and_soft_delete`), OpenAPI doc + `api-schema.d.ts` regenerated, 15 end-to-end permission tests passing. Frontend built the same day (typecheck + production build clean; not yet click-tested with two real Google accounts).
+
+**Decisions (Sep 29, 2026):**
+- Exactly **one owner** per workspace (`workspaces.owner_user_id`, the creator). Ownership can't be transferred and the owner can't leave.
+- **Roles** are `ADMIN | MEMBER` on `memberships.role`. OWNER is *not* a role value — it's derived from `owner_user_id`, so ownership has one source of truth.
+- Every user's auto-created **Personal** workspace (`workspaces.is_personal`, at most one per user via a partial unique index) is **single-user**: no invites, can't be deleted (rename is fine). To collaborate, create another workspace.
+- Deleting a workspace is a **soft delete** (`workspaces.deleted_at`). The membership check (`getRole()` in `db/workspaces.ts`) treats a deleted workspace as "not a member", so its posts (scheduled ones too), connected accounts and history are hidden everywhere at once; pending invites are revoked. Rows and encrypted tokens are kept — see §9.8 for the purge job. No scheduler exists yet; when one is built it must skip deleted workspaces.
+- Removing a member (or a member leaving) takes effect on their next request — membership is checked on every request, so there's no session to revoke. Accounts they connected and posts they made stay with the workspace.
+
+**Permission matrix:**
+
+| Action | OWNER | ADMIN | MEMBER |
+|---|:-:|:-:|:-:|
+| View integrations, compose/post, view history | ✅ | ✅ | ✅ |
+| Connect / disconnect platform accounts | ✅ | ✅ | ❌ |
+| Invite, revoke invites, list members & invites, remove members, change roles | ✅ | ❌ | ❌ |
+| Rename / delete workspace | ✅ | ❌ | ❌ |
+| Leave workspace | ❌ | ✅ | ✅ |
+
+**Endpoints** (non-members get 404 on everything under a workspace; members lacking the role get 403):
+
+| Endpoint | Who |
+|---|---|
+| `POST /api/workspaces {name}` — create; caller becomes owner | any signed-in user |
+| `PATCH /api/workspaces/:id {name}` — rename | owner |
+| `DELETE /api/workspaces/:id` — soft delete; 409 for Personal | owner |
+| `POST /api/workspaces/:id/leave` — 409 for the owner | admin, member |
+| `GET /api/workspaces/:id/members` | owner |
+| `PATCH /api/workspaces/:id/members/:userId {role}` — 409 on the owner | owner |
+| `DELETE /api/workspaces/:id/members/:userId` — 409 on the owner | owner |
+| `GET /api/workspaces/:id/invites` — pending, unexpired | owner |
+| `POST /api/workspaces/:id/invites {email, role}` — returns `added` (existing account, membership created now) or `invited` (pending 7 days). Re-inviting refreshes expiry + role. 409 for Personal or an existing member. **Rate-limited 20/hour per user** (`rateLimitByUser`) | owner |
+| `DELETE /api/workspaces/:id/invites/:inviteId` — revoke | owner |
+| `DELETE /api/workspaces/:id/integrations/:accountId` and `/api/auth/{platform}?workspaceId=` (start + callback) | owner, admin |
+
+- `/api/me` returns `role` (`OWNER`/`ADMIN`/`MEMBER`) and `isPersonal` per workspace instead of `isOwner`, and omits deleted workspaces.
+- V1 sends no invite email — the owner shares the app link. Email delivery rides on the Phase 4 Resend/SendGrid item.
+
+**Frontend:**
+- `/w/:workspaceId/settings` (`routes/workspace-settings.tsx`, "Settings" in the sidebar). Owner: rename, invite form (email + role, "Copy app link"), pending invites + revoke, members with role dropdown + remove, delete. Personal workspace: rename only, plus a note to create a new workspace to collaborate. Admin/member: their role and a Leave button.
+- `/workspaces/new` (`routes/new-workspace.tsx`), linked from "+ New workspace" in the sidebar and the profile page; lands on the new workspace's settings.
+- Dashboard hides Connect/Reconnect/Disconnect for MEMBERs; the `*_connect_forbidden` toast now covers "not an owner/admin" as well as "removed".
+- `useWorkspace()` (active workspace's `role`/`isPersonal` from `/api/me`) and `apiErrorMessage()` (shows the backend's `{ error }` message) are the shared helpers. Every change refetches `/api/me`; leave/delete navigate to `/`.
+- Confirmations use `window.confirm` — there's no dialog component yet.
 
 ### 9.8 Later / not V1
 
-- Roles beyond owner/member, audit log.
+- **Member cap per workspace, set by pricing tier (V2).** e.g. Free = just you, Pro = 5, Agency = 25. Enforce in `POST …/invites` (count memberships + pending invites) and return a clear "upgrade" error.
+- **More roles** (documented Sep 29, not planned yet), with when each would earn its place:
+  - **CONTRIBUTOR** — drafts only, can't publish. A freelance copywriter whose posts need sign-off.
+  - **APPROVER** — approves/rejects drafts before they go out. An agency lead reviewing the week's queue.
+  - **CLIENT / GUEST** — sees and approves posts in their own workspace only. The brand's marketing manager signing off on content.
+  - **VIEWER / ANALYST** — read-only history and analytics. A stakeholder who only wants reports.
+  - **BILLING** — plan and invoices only. The agency's accountant, once pricing tiers exist.
+  - Contributor/approver/client imply a draft → approval → publish workflow on posts, which doesn't exist yet.
+- Ownership transfer (deliberately not in V1).
+- Purge job for soft-deleted workspaces: revoke platform tokens and hard-delete rows after a grace period.
+- Audit log.
 - Account deletion (`DELETE /api/me`: revoke platform tokens, delete data) — needed before Meta App Review, which requires a data-deletion callback URL and a privacy policy.
 - Other login methods (would move `google_sub` into an `auth_identities` table).
 
@@ -656,3 +707,4 @@ Authorization Code flow + **PKCE (S256)** + **`nonce`**, confidential client (cl
 *Updated: 2026-09-23 | Planning only: added §3 "Per-Platform Media Fitting" to replace the old one-line cropper note — keep one master upload and store per-platform crop settings, `sharp`/`ffmpeg` rendering (explicitly not an LLM), a per-platform preview grid with a ratio-locked cropper and safe zones, blurred-background padding instead of black bars, a render worker on its own BullMQ queue, and optional outpainting later. Phase 2 roadmap split into four matching items; step 1 (dimension probe + warnings) can be built before S3.*
 *Updated: 2026-09-23 | **YouTube becomes the fifth platform wired to the real backend** (§2.4, §5, §6, §7). Google OAuth connect flow (`lib/youtube.ts`, `routes/auth/youtube.ts`) with `access_type=offline&prompt=consent`, `youtube.upload` + `youtube.readonly` scopes, and callback guards for an unticked upload scope or a channel-less Google account. First real `ON_DEMAND` refresh implementation (`service/youtube-token.ts`): stored access token reused while >5 min from expiry, otherwise refreshed and persisted; an `invalid_grant` nulls the refresh token and surfaces `needsReconnect`. Schema: `ConnectionMethod.YOUTUBE_LOGIN`, `MediaType.SHORTS`, new nullable `Posts.platform_options` JSON column (migration `20260923040000_add_youtube`, hand-written and applied via `migrate deploy` to avoid the pre-existing `_prisma_migrations` drift forcing a reset). `youtube-poster.json` gained the `x-callback-secret` header plus `made_for_kids`/`tags`/`category_id` payload fields (category no longer hardcoded to 22). YouTube joins Facebook/LinkedIn on the **single shared video-status queue** — kept shared rather than split per platform (§6) — refactored to a per-platform status-check table and a `POLL_POLICY` record with a custom BullMQ backoff; YouTube polls on capped exponential backoff (~11 checks / ~33 min vs. 60 fixed). Frontend: Connect YouTube button + error toasts, composer YouTube fields (title, visibility, category, made-for-kids, tags; caption relabelled "Description"), and the history page shows the video title. Not yet confirmed with a live end-to-end post; unaudited-project uploads are forced private (§2.4).*
 *Updated: 2026-09-24 | Planning only: new §9 "App Authentication, Sessions & Workspaces". Google-only sign-in (OIDC, auth code + PKCE + nonce, separate Google Cloud project), opaque session cookies backed by Redis rather than stateless JWTs (immediate revocation), 7-day sliding sessions. Workspace tenancy for agencies (individuals get an auto-created Personal workspace), email invites auto-accepted on Google sign-in, no roles in V1 beyond workspace owner. Single-origin dev setup — the one free ngrok domain repointed at Vite, which proxies `/api` to the backend, so no platform redirect URIs change. §7 flagged as pending the workspace migration; Phase 1 roadmap item added.*
+*Updated: 2026-09-29 | §9.7 Phase E backend built: OWNER/ADMIN/MEMBER roles (owner derived from `owner_user_id`, `memberships.role` = ADMIN|MEMBER), owner-only member/invite management, ADMIN manages connected accounts, one non-transferable owner who cannot leave, single-user undeletable Personal workspace (`is_personal`), soft delete (`deleted_at`) hiding a workspace everywhere via the membership check, invites to existing accounts applied immediately, 20/hour per-user invite rate limit. §9.1 rows revised (no longer "no roles in V1"); §9.8 gains a V2 per-tier member cap and a list of possible future roles.*

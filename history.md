@@ -898,6 +898,39 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 - `websitePlan.md` — §2.4 implementation notes, §5 `youtube-poster` bullet, §6 poller implementation + shared-queue decision + known gap, §7 `connection_method`/`refresh_strategy`/`media_type`/`platform_options`, Phase 3 roadmap, changelog
 - `history.md` — this entry, Quick State Snapshot, Platform Credential Reference (YouTube row), Key Technical Decisions (6 new rows, Shorts row annotated)
 
+### Session 28 — 2026-09-29
+
+**What we did:**
+- **Workspace roles, members and invites: backend** (`websitePlan.md` §9.7, Phase E). Planned with Kushagra first (two rounds of questions), then built.
+- **Schema** (migration `20260929060000_add_workspace_roles_and_soft_delete`, hand-written + `migrate deploy`): `WorkspaceRole` enum (`ADMIN | MEMBER`) on `memberships.role` and `workspace_invites.role`; `workspaces.is_personal` (backfilled on each user's oldest owned workspace, partial unique index = one per owner) and `workspaces.deleted_at`.
+- **Auth**: `db/workspaces.ts` `isMember` → `getRole()` (returns `OWNER`/`ADMIN`/`MEMBER`, or null for non-members *and* soft-deleted workspaces). `requireWorkspace` sets `c.var.role`; new `requireRole(...)` returns 403. Connect flows (`lib/connect-state.ts`) require owner/admin at start and callback; disconnect requires owner/admin.
+- **Routes**: `routes/workspaces.ts` (create, rename, soft delete, leave), `routes/members.ts` (list, change role, remove), `routes/invites.ts` (list, invite, revoke). Invites to an existing account create the membership immediately; others are accepted on Google sign-in (`db/users.ts`, now skipping deleted workspaces and copying the invite's role). `rateLimitByUser` (20 invites/hour/user). `/api/me` returns `role` + `isPersonal` instead of `isOwner` and hides deleted workspaces.
+- Confirmed Hono's `/api/workspaces/:workspaceId/*` middleware also matches the bare `/api/workspaces/:workspaceId`, so rename/delete sit behind the same auth + membership guard, mounted explicitly.
+- `api-schema.d.ts` regenerated.
+- **Frontend** (second half of the session): workspace settings page `/w/:id/settings` (owner: rename, invite with role + copy app link, pending invites/revoke, members with role dropdown/remove, delete; Personal: rename + "create a workspace to collaborate" note; admin/member: role + Leave), create-workspace page `/workspaces/new` ("+ New workspace" in the sidebar and on the profile page), dashboard hides Connect/Reconnect/Disconnect for members, profile badges show Owner/Admin/Member + a Personal tag. New helpers `useWorkspace()` and `apiErrorMessage()`. `tsc -b` and `vite build` clean; **not yet click-tested** with two real Google accounts.
+- **Verified**: backend `tsc --noEmit` and frontend `tsc -b` clean, Biome clean on changed files; a 15-test end-to-end suite (in-process app, real dev Postgres + Redis, throwaway `zz-test-*` users cleaned up afterwards) covering Personal rules, immediate vs pending invites, owner-only 403s, member-can't-disconnect, owner protections, removal/leave → 404, soft delete, non-member 404 probing, per-user rate limit. Hono's `csrf()` rejects bodyless DELETE/POST without `Origin`/`Sec-Fetch-Site`, which browsers always send — the tests send `Sec-Fetch-Site: same-origin`.
+
+**Decisions made:** (Kushagra, Sep 29)
+- Owner-only people management; ADMIN = manage connected accounts; MEMBER loses disconnect.
+- One owner, no transfer, owner can't leave. Personal workspace single-user and undeletable.
+- Soft delete (scheduled posts hidden with it). Removed members' connected accounts stay.
+- No invite email yet (no SES); 7-day expiry; member cap per pricing tier goes to V2 (§9.8).
+- Future roles (contributor, approver, client, viewer, billing) documented in §9.8, not built.
+
+**Still to do:**
+- Click-test with two Google accounts: create a workspace, invite the second account as Admin/Member, check what each sees, remove/leave, delete.
+- Replace `window.confirm` with a proper dialog component.
+- Purge job for soft-deleted workspaces (§9.8).
+
+**Files modified this session:**
+- `backend/prisma/schema.prisma`, `backend/prisma/migrations/20260929060000_add_workspace_roles_and_soft_delete/migration.sql` (new)
+- `backend/src/db/workspaces.ts`, `backend/src/db/users.ts`, `backend/src/middleware/auth.ts`, `backend/src/middleware/rate-limit.ts`, `backend/src/lib/connect-state.ts`
+- `backend/src/routes/workspaces.ts`, `backend/src/routes/members.ts`, `backend/src/routes/invites.ts` (new), `backend/src/routes/session.ts`, `backend/src/routes/integrations.ts`, `backend/src/index.ts`
+- `frontend/src/lib/api-schema.d.ts`, `frontend/src/lib/api.ts`, `frontend/src/lib/session.ts`, `frontend/src/App.tsx`
+- `frontend/src/routes/workspace-settings.tsx`, `frontend/src/routes/new-workspace.tsx` (new), `frontend/src/routes/layout.tsx`, `frontend/src/routes/dashboard.tsx`, `frontend/src/routes/profile.tsx`
+- `websitePlan.md` — §9 status, §9.1 Authorization/Invites rows, §9.7 rewritten, §9.8 member cap + future roles, changelog
+- `history.md` — this entry
+
 ---
 
 *Update this file at the end of each session.*

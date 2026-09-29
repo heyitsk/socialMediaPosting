@@ -15,10 +15,13 @@ import { threadsAuthRoute } from "./routes/auth/threads";
 import { youtubeAuthRoute } from "./routes/auth/youtube";
 import { healthRoute } from "./routes/health";
 import { integrationsRoute } from "./routes/integrations";
+import { invitesRoute } from "./routes/invites";
 import { loginRoute } from "./routes/login";
+import { membersRoute } from "./routes/members";
 import { postsRoute } from "./routes/posts";
 import { sessionRoute } from "./routes/session";
 import { webhooksRoute } from "./routes/webhooks";
+import { workspaceRoute, workspacesRoute } from "./routes/workspaces";
 
 const app = new OpenAPIHono();
 
@@ -37,6 +40,10 @@ app.onError(errorHandler);
 //   /api/auth/* connect flows check the session + membership themselves,
 //   since they're browser navigations that must redirect, not 401
 // - session + membership: everything under /api/workspaces/:workspaceId/*
+//   and the bare /api/workspaces/:workspaceId (rename/delete) — Hono's
+//   trailing /* also matches the path without it. Owner/admin checks are
+//   per-route requireRole().
+// - session only: POST /api/workspaces (create) checks it itself
 app.route("/health", healthRoute);
 app.use("/api/login/*", rateLimit("login", 20, 60));
 app.route("/api/login", loginRoute);
@@ -46,7 +53,11 @@ app.route("/api/auth/instagram", instagramAuthRoute);
 app.route("/api/auth/threads", threadsAuthRoute);
 app.route("/api/auth/linkedin", linkedinAuthRoute);
 app.route("/api/auth/youtube", youtubeAuthRoute);
+app.route("/api/workspaces", workspacesRoute);
 app.use("/api/workspaces/:workspaceId/*", requireAuth, requireWorkspace);
+app.route("/api/workspaces/:workspaceId", workspaceRoute);
+app.route("/api/workspaces/:workspaceId/members", membersRoute);
+app.route("/api/workspaces/:workspaceId/invites", invitesRoute);
 app.route("/api/workspaces/:workspaceId/integrations", integrationsRoute);
 app.route("/api/workspaces/:workspaceId/posts", postsRoute);
 app.route("/api/webhooks", webhooksRoute);

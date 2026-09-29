@@ -10,6 +10,15 @@ export const api = createClient<paths>({
   credentials: "include",
 });
 
+// The backend's error body is `{ error: string }` (error-handler.ts) — its
+// messages are written to be shown to the user as-is.
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object" && "error" in error && typeof error.error === "string") {
+    return error.error;
+  }
+  return fallback;
+}
+
 // Session expired or was revoked mid-use (logout elsewhere, 7-day idle) —
 // bounce to /login and come back here afterwards. /api/me is excluded: its
 // 401 is how the RequireAuth guard learns there's no session at all.
