@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { PostGroupCard } from "@/components/post-group-card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import { useWorkspaceId } from "@/lib/session";
 
@@ -26,20 +27,53 @@ export function HistoryPage() {
   });
 
   return (
-    <div className="flex flex-col gap-6">
-      <h1 className="text-2xl font-semibold">History & Error Center</h1>
+    <div className="flex flex-col gap-8">
+      <div>
+        <p className="text-sm font-medium text-primary">Publishing activity</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">History &amp; Error Center</h1>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+          Track your posts, their per-account publishing status, and delivery errors.
+        </p>
+      </div>
 
-      {isPending && <p className="text-sm text-muted-foreground">Loading posts…</p>}
-      {isError && <p className="text-sm text-destructive">Could not load post history.</p>}
-      {groups?.length === 0 && (
-        <p className="text-sm text-muted-foreground">No posts yet — create one in the Composer.</p>
+      {isPending && (
+        <Card>
+          <CardContent className="flex items-center gap-3 py-8">
+            <div className="size-2.5 animate-pulse rounded-full bg-primary" />
+            <p className="text-sm text-muted-foreground">Loading post history…</p>
+          </CardContent>
+        </Card>
       )}
 
-      <div className="flex flex-col gap-3">
-        {groups?.map((group) => (
-          <PostGroupCard key={group.id} group={group} workspaceId={workspaceId} />
-        ))}
-      </div>
+      {isError && (
+        <Card>
+          <CardContent className="py-8">
+            <p className="text-sm font-medium text-destructive">Could not load post history.</p>
+            <p className="mt-1 text-sm text-muted-foreground">Please try again in a moment.</p>
+          </CardContent>
+        </Card>
+      )}
+
+      {groups?.length === 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>No posts yet</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Create your first post in the Composer to see your publishing activity here.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {groups && groups.length > 0 && (
+        <div className="flex flex-col gap-4">
+          {groups.map((group) => (
+            <PostGroupCard key={group.id} group={group} workspaceId={workspaceId} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

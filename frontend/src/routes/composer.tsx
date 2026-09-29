@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { PlatformMark } from "@/components/platform-mark";
 import { PostGroupCard } from "@/components/post-group-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -434,13 +435,19 @@ export function ComposerPage() {
       }`;
 
   return (
-    <div className="flex flex-col gap-6">
-      <h1 className="text-2xl font-semibold">Post Composer</h1>
+    <div className="flex max-w-4xl flex-col gap-8">
+      <div>
+        <p className="text-sm font-medium text-primary">Publishing workspace</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">Create a post</h1>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+          Write once and publish to several connected accounts, now or on a schedule.
+        </p>
+      </div>
 
       {resultGroup && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between max-w-2xl">
-            <h2 className="text-lg font-medium">Latest post</h2>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <h2 className="text-base font-semibold">Latest post</h2>
             <Button variant="ghost" size="sm" onClick={() => setResultGroupId(null)}>
               Dismiss
             </Button>
@@ -449,248 +456,330 @@ export function ComposerPage() {
         </div>
       )}
 
-      <Card className="max-w-2xl">
-        <CardHeader>
-          <CardTitle>1. What are you posting?</CardTitle>
+      <Card className="overflow-hidden">
+        <CardHeader className="border-b bg-muted/20">
+          <CardTitle className="text-base">New post</CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Pick a format, choose accounts, then add content and publishing options.
+          </p>
         </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-          {CONTENT_KINDS.map((option) => (
-            <button
-              key={option.kind}
-              type="button"
-              onClick={() => chooseKind(option.kind)}
-              className={cn(
-                "flex flex-col items-start rounded-md border p-3 text-left text-sm transition-colors hover:bg-muted",
-                kind === option.kind && "border-primary bg-muted",
-              )}
-            >
-              <span className="font-medium">{option.label}</span>
-              <span className="text-xs text-muted-foreground">{option.description}</span>
-            </button>
-          ))}
-        </CardContent>
-      </Card>
 
-      {kind && (
-        <Card className="max-w-2xl">
-          <CardHeader>
-            <CardTitle>2. Where?</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-1">
-            {isPending && <p className="text-sm text-muted-foreground">Loading accounts…</p>}
-            {isError && (
-              <p className="text-sm text-destructive">Could not load connected accounts.</p>
-            )}
-            {!isPending && !isError && allAccounts.length === 0 && (
-              <p className="text-sm text-muted-foreground">
-                Connect an account from the Dashboard before posting.
-              </p>
-            )}
-            {allAccounts.map((account) => {
-              const reason = unavailableReason(account);
-              const checked = selectedIds.includes(account.id) && reason === null;
-              return (
-                <label
-                  key={account.id}
-                  className={cn(
-                    "flex items-center gap-3 rounded-md px-2 py-1.5 text-sm",
-                    reason ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-muted",
-                  )}
-                >
-                  <input
-                    type="checkbox"
-                    className="size-4 accent-primary"
-                    checked={checked}
-                    disabled={reason !== null}
-                    onChange={() => toggleAccount(account.id)}
-                  />
-                  <span>
-                    <span className="font-medium">{PLATFORM_LABELS[account.platform]}</span> ·{" "}
-                    {account.accountName}
-                    {account.connectionMethod === "FACEBOOK_PAGE" &&
-                      account.platform === "INSTAGRAM" && (
-                        <span className="text-xs text-muted-foreground"> (via Facebook Page)</span>
-                      )}
-                  </span>
-                  {reason && (
-                    <span className="ml-auto text-xs text-muted-foreground">{reason}</span>
-                  )}
-                </label>
-              );
-            })}
-          </CardContent>
-        </Card>
-      )}
-
-      {kind && selectedAccounts.length > 0 && (
-        <Card className="max-w-2xl">
-          <CardHeader>
-            <CardTitle>3. Content</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              <Label htmlFor="caption">Caption</Label>
-              <Textarea
-                id="caption"
-                value={caption}
-                onChange={(e) => setCaption(e.target.value)}
-                placeholder="What do you want to post?"
-                rows={4}
+        <CardContent className="p-0">
+          <div className="divide-y">
+            <section className="space-y-4 p-6">
+              <SectionHeading
+                step="1"
+                eyebrow="Format"
+                title="What are you posting?"
+                description="The format decides which accounts can take the post."
               />
-              {tightest && Number.isFinite(tightest.limit) && (
-                <p
-                  className={cn(
-                    "text-xs text-muted-foreground",
-                    captionLength(caption.trim()) > tightest.limit && "text-destructive",
-                  )}
-                >
-                  {captionLength(caption.trim())}/{tightest.limit} ({tightest.label} is the
-                  strictest you picked)
-                </p>
-              )}
-            </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                {CONTENT_KINDS.map((option) => (
+                  <button
+                    key={option.kind}
+                    type="button"
+                    onClick={() => chooseKind(option.kind)}
+                    className={cn(
+                      "flex flex-col items-start rounded-lg border p-3 text-left text-sm transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                      kind === option.kind && "border-primary bg-primary/5 ring-1 ring-primary",
+                    )}
+                  >
+                    <span className="font-medium">{option.label}</span>
+                    <span className="text-xs text-muted-foreground">{option.description}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
 
-            {(kind === "IMAGE" || kind === "VIDEO" || kind === "STORY") && (
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="media-url">
-                  {kind === "VIDEO" ? "Video URL" : "Image URL"} (public link)
-                </Label>
-                <Input
-                  id="media-url"
-                  value={mediaUrl}
-                  onChange={(e) => setMediaUrl(e.target.value)}
-                  placeholder="https://res.cloudinary.com/..."
+            {kind && (
+              <section className="space-y-4 p-6">
+                <SectionHeading
+                  step="2"
+                  eyebrow="Accounts"
+                  title="Choose where to publish"
+                  description="Select one or more connected accounts."
                 />
-                {kind === "VIDEO" &&
-                  selectedAccounts.some((account) => account.platform === "INSTAGRAM") && (
-                    <p className="text-xs text-muted-foreground">
-                      Instagram posts videos as Reels.
+                {isPending && (
+                  <div className="flex items-center gap-3">
+                    <div className="size-2.5 animate-pulse rounded-full bg-primary" />
+                    <p className="text-sm text-muted-foreground">Loading connected accounts…</p>
+                  </div>
+                )}
+                {isError && (
+                  <p className="text-sm font-medium text-destructive">
+                    Could not load connected accounts.
+                  </p>
+                )}
+                {!isPending && !isError && allAccounts.length === 0 && (
+                  <p className="text-sm text-muted-foreground">
+                    Connect an account from the Dashboard before posting.
+                  </p>
+                )}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {allAccounts.map((account) => {
+                    const reason = unavailableReason(account);
+                    const checked = selectedIds.includes(account.id) && reason === null;
+                    return (
+                      <label
+                        key={account.id}
+                        className={cn(
+                          "flex items-center gap-3 rounded-lg border p-3 text-sm transition-colors",
+                          reason
+                            ? "cursor-not-allowed opacity-60"
+                            : "cursor-pointer hover:bg-muted",
+                          checked && "border-primary bg-primary/5",
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          className="size-4 accent-primary"
+                          checked={checked}
+                          disabled={reason !== null}
+                          onChange={() => toggleAccount(account.id)}
+                        />
+                        <PlatformMark platform={account.platform} className="size-9" />
+                        <span className="min-w-0">
+                          <span className="block text-xs font-medium text-muted-foreground">
+                            {PLATFORM_LABELS[account.platform]}
+                            {account.connectionMethod === "FACEBOOK_PAGE" &&
+                              account.platform === "INSTAGRAM" &&
+                              " · via Facebook Page"}
+                          </span>
+                          <span className="block truncate font-medium">{account.accountName}</span>
+                          {reason && (
+                            <span className="block text-xs text-muted-foreground">{reason}</span>
+                          )}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
+
+            {kind && selectedAccounts.length > 0 && (
+              <section className="space-y-5 p-6">
+                <SectionHeading
+                  step="3"
+                  eyebrow="Content"
+                  title="Write your post"
+                  description="Shared by every account unless you override it below."
+                />
+                <div>
+                  <Label htmlFor="caption">Caption</Label>
+                  <Textarea
+                    id="caption"
+                    className="mt-2 resize-y"
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value)}
+                    placeholder="What do you want to post?"
+                    rows={5}
+                  />
+                  {tightest && Number.isFinite(tightest.limit) && (
+                    <p
+                      className={cn(
+                        "mt-2 text-xs text-muted-foreground",
+                        captionLength(caption.trim()) > tightest.limit && "text-destructive",
+                      )}
+                    >
+                      {captionLength(caption.trim())}/{tightest.limit} ({tightest.label} is the
+                      strictest you picked)
                     </p>
                   )}
-              </div>
-            )}
+                </div>
 
-            {kind === "CAROUSEL" && (
-              <div className="flex flex-col gap-2">
-                <Label>Image URLs (public links, in order)</Label>
-                {carouselUrls.map((url, index) => (
-                  <div key={index} className="flex gap-2">
+                {(kind === "IMAGE" || kind === "VIDEO" || kind === "STORY") && (
+                  <div>
+                    <Label htmlFor="media-url">
+                      {kind === "VIDEO" ? "Video URL" : "Image URL"} (public link)
+                    </Label>
                     <Input
-                      value={url}
-                      onChange={(e) =>
-                        setCarouselUrls((urls) =>
-                          urls.map((other, i) => (i === index ? e.target.value : other)),
-                        )
-                      }
+                      id="media-url"
+                      className="mt-2 h-11"
+                      value={mediaUrl}
+                      onChange={(e) => setMediaUrl(e.target.value)}
                       placeholder="https://res.cloudinary.com/..."
                     />
+                    {kind === "VIDEO" &&
+                      selectedAccounts.some((account) => account.platform === "INSTAGRAM") && (
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          Instagram posts videos as Reels.
+                        </p>
+                      )}
+                  </div>
+                )}
+
+                {kind === "CAROUSEL" && (
+                  <div className="space-y-2">
+                    <Label>Image URLs (public links, in order)</Label>
+                    {carouselUrls.map((url, index) => (
+                      <div key={index} className="flex gap-2">
+                        <Input
+                          className="h-11"
+                          value={url}
+                          onChange={(e) =>
+                            setCarouselUrls((urls) =>
+                              urls.map((other, i) => (i === index ? e.target.value : other)),
+                            )
+                          }
+                          placeholder="https://res.cloudinary.com/..."
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon"
+                          className="size-11"
+                          disabled={carouselUrls.length <= MIN_CAROUSEL_URL_FIELDS}
+                          onClick={() =>
+                            setCarouselUrls((urls) => urls.filter((_, i) => i !== index))
+                          }
+                        >
+                          <X className="size-4" />
+                        </Button>
+                      </div>
+                    ))}
                     <Button
                       type="button"
                       variant="outline"
-                      size="icon"
-                      disabled={carouselUrls.length <= MIN_CAROUSEL_URL_FIELDS}
-                      onClick={() => setCarouselUrls((urls) => urls.filter((_, i) => i !== index))}
+                      size="sm"
+                      onClick={() => setCarouselUrls((urls) => [...urls, ""])}
                     >
-                      <X className="size-4" />
+                      <Plus className="size-4" />
+                      Add image
                     </Button>
                   </div>
+                )}
+              </section>
+            )}
+
+            {kind && selectedAccounts.length > 0 && (
+              <section className="space-y-4 bg-muted/10 p-6">
+                <SectionHeading
+                  step="4"
+                  eyebrow="Per account"
+                  title="Account settings"
+                  description="Override the caption or set platform-specific options."
+                />
+                <div className="space-y-3">
+                  {selectedAccounts.map((account) => (
+                    <TargetSettingsPanel
+                      key={account.id}
+                      account={account}
+                      settings={settingsFor(account.id)}
+                      onChange={(patch) => updateSettings(account.id, patch)}
+                      captionLimit={capabilitiesByPlatform.get(account.platform)?.captionLimit}
+                      errors={targetErrors.get(account.id) ?? []}
+                      kind={kind}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {kind && selectedAccounts.length > 0 && (
+              <section className="space-y-4 p-6">
+                <SectionHeading
+                  step="5"
+                  eyebrow="Timing"
+                  title="When should it go out?"
+                  description="Publish right away or pick a time."
+                />
+                <div className="flex gap-2">
+                  {(["now", "later"] as const).map((mode) => (
+                    <label
+                      key={mode}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2 rounded-lg border px-4 py-2.5 text-sm transition-colors hover:bg-muted",
+                        scheduleMode === mode && "border-primary bg-primary/5",
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        className="accent-primary"
+                        checked={scheduleMode === mode}
+                        onChange={() => setScheduleMode(mode)}
+                      />
+                      {mode === "now" ? "Post now" : "Schedule"}
+                    </label>
+                  ))}
+                </div>
+                {scheduleMode === "later" && (
+                  <Input
+                    type="datetime-local"
+                    className="h-11 max-w-xs"
+                    value={scheduledAt}
+                    min={toLocalInputValue(new Date(Date.now() + MIN_SCHEDULE_LEAD_MS))}
+                    onChange={(e) => setScheduledAt(e.target.value)}
+                  />
+                )}
+              </section>
+            )}
+
+            {kind && selectedAccounts.length > 0 && (
+              <section className="flex flex-col gap-4 bg-muted/20 p-6">
+                {[...groupErrors, ...(serverErrors?.errors ?? [])].map((error) => (
+                  <p key={error} className="text-sm text-destructive">
+                    {error}
+                  </p>
                 ))}
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="self-start"
-                  onClick={() => setCarouselUrls((urls) => [...urls, ""])}
-                >
-                  <Plus className="size-4" />
-                  Add image
-                </Button>
-              </div>
+                {targetErrors.size > 0 && (
+                  <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm">
+                    <span className="text-destructive">
+                      {targetErrors.size} {targetErrors.size === 1 ? "account" : "accounts"} can't
+                      take this post — fix them above or leave them out.
+                    </span>
+                    <Button variant="outline" size="sm" onClick={deselectInvalid}>
+                      Deselect invalid accounts
+                    </Button>
+                  </div>
+                )}
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="text-sm font-medium">
+                      Ready to {scheduleMode === "later" ? "schedule" : "post"} to{" "}
+                      {selectedAccounts.length}{" "}
+                      {selectedAccounts.length === 1 ? "account" : "accounts"}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Each account is published separately — one failing won't block the others.
+                    </p>
+                  </div>
+                  <Button
+                    className="w-full sm:w-auto"
+                    size="lg"
+                    disabled={!canSubmit}
+                    onClick={submit}
+                  >
+                    {submitLabel}
+                  </Button>
+                </div>
+              </section>
             )}
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
 
-      {kind && selectedAccounts.length > 0 && (
-        <Card className="max-w-2xl">
-          <CardHeader>
-            <CardTitle>4. Per-account settings</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            {selectedAccounts.map((account) => (
-              <TargetSettingsPanel
-                key={account.id}
-                account={account}
-                settings={settingsFor(account.id)}
-                onChange={(patch) => updateSettings(account.id, patch)}
-                captionLimit={capabilitiesByPlatform.get(account.platform)?.captionLimit}
-                errors={targetErrors.get(account.id) ?? []}
-                kind={kind}
-              />
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {kind && selectedAccounts.length > 0 && (
-        <Card className="max-w-2xl">
-          <CardHeader>
-            <CardTitle>5. When?</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-4">
-            <div className="flex gap-4 text-sm">
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  className="accent-primary"
-                  checked={scheduleMode === "now"}
-                  onChange={() => setScheduleMode("now")}
-                />
-                Post now
-              </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  className="accent-primary"
-                  checked={scheduleMode === "later"}
-                  onChange={() => setScheduleMode("later")}
-                />
-                Schedule
-              </label>
-            </div>
-            {scheduleMode === "later" && (
-              <Input
-                type="datetime-local"
-                className="max-w-xs"
-                value={scheduledAt}
-                min={toLocalInputValue(new Date(Date.now() + MIN_SCHEDULE_LEAD_MS))}
-                onChange={(e) => setScheduledAt(e.target.value)}
-              />
-            )}
-
-            {[...groupErrors, ...(serverErrors?.errors ?? [])].map((error) => (
-              <p key={error} className="text-sm text-destructive">
-                {error}
-              </p>
-            ))}
-            {targetErrors.size > 0 && (
-              <div className="flex flex-wrap items-center gap-3 rounded-md border border-destructive/40 p-3 text-sm">
-                <span className="text-destructive">
-                  {targetErrors.size} {targetErrors.size === 1 ? "account" : "accounts"} can't take
-                  this post — fix them above or leave them out.
-                </span>
-                <Button variant="outline" size="sm" onClick={deselectInvalid}>
-                  Deselect invalid accounts
-                </Button>
-              </div>
-            )}
-
-            <Button className="self-start" disabled={!canSubmit} onClick={submit}>
-              {submitLabel}
-            </Button>
-          </CardContent>
-        </Card>
-      )}
+function SectionHeading({
+  step,
+  eyebrow,
+  title,
+  description,
+}: {
+  step: string;
+  eyebrow: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div>
+      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
+        {step} · {eyebrow}
+      </p>
+      <h2 className="mt-1 text-base font-semibold">{title}</h2>
+      <p className="mt-1 text-sm text-muted-foreground">{description}</p>
     </div>
   );
 }
@@ -715,16 +804,21 @@ function TargetSettingsPanel({
   return (
     <div
       className={cn(
-        "flex flex-col gap-3 rounded-md border p-3",
+        "flex flex-col gap-4 rounded-lg border bg-card p-4 shadow-sm",
         errors.length > 0 && "border-destructive/60",
       )}
     >
-      <div className="text-sm">
-        <span className="font-medium">{PLATFORM_LABELS[account.platform]}</span> ·{" "}
-        {account.accountName}
-        {account.platform === "INSTAGRAM" && kind === "VIDEO" && (
-          <span className="text-xs text-muted-foreground"> — {MEDIA_TYPE_LABELS.REELS}</span>
-        )}
+      <div className="flex min-w-0 items-center gap-3">
+        <PlatformMark platform={account.platform} className="size-9" />
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-muted-foreground">
+            {PLATFORM_LABELS[account.platform]}
+            {account.platform === "INSTAGRAM" &&
+              kind === "VIDEO" &&
+              ` · ${MEDIA_TYPE_LABELS.REELS}`}
+          </p>
+          <p className="truncate text-sm font-medium">{account.accountName}</p>
+        </div>
       </div>
 
       <label className="flex items-center gap-2 text-sm">
@@ -845,11 +939,15 @@ function TargetSettingsPanel({
         </div>
       )}
 
-      {errors.map((error) => (
-        <p key={error} className="text-xs text-destructive">
-          {error}
-        </p>
-      ))}
+      {errors.length > 0 && (
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
+          {errors.map((error) => (
+            <p key={error} className="text-xs text-destructive">
+              {error}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -20,8 +20,14 @@ export function ProfilePage() {
     );
 
   return (
-    <div className="flex max-w-2xl flex-col gap-6">
-      <h1 className="text-2xl font-semibold">Profile</h1>
+    <div className="flex max-w-3xl flex-col gap-8">
+      <div>
+        <p className="text-sm font-medium text-primary">Account</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">Profile</h1>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+          Your sign-in details and workspaces.
+        </p>
+      </div>
 
       <Card>
         <CardContent className="flex items-center gap-5">

@@ -1,5 +1,6 @@
 import { z } from "@hono/zod-openapi";
 import type { ContentKind, MediaType, Platform, PostStatus, Prisma } from "@prisma/client";
+import { friendlyPlatformError } from "../lib/platform-error";
 
 export const platformSchema = z.enum([
   "FACEBOOK",
@@ -186,7 +187,7 @@ export function serializePostGroup(group: PostGroupRow): z.infer<typeof postGrou
       logs: post.logs.map((log) => ({
         status: log.status,
         platformPostId: log.platformPostId,
-        errorMessage: log.errorMessage,
+        errorMessage: log.errorMessage && friendlyPlatformError(log.errorMessage),
         executedAt: log.executedAt.toISOString(),
       })),
     })),

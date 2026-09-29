@@ -35,8 +35,14 @@ export function WorkspaceSettingsPage() {
   if (!workspace) return null;
 
   return (
-    <div className="flex max-w-2xl flex-col gap-6">
-      <h1 className="text-2xl font-semibold">Workspace settings</h1>
+    <div className="flex max-w-3xl flex-col gap-8">
+      <div>
+        <p className="text-sm font-medium text-primary">Workspace</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">Workspace settings</h1>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+          Rename the workspace, invite teammates, and manage who has access.
+        </p>
+      </div>
       {workspace.role === "OWNER" ? (
         <>
           <RenameCard workspace={workspace} />
