@@ -1,5 +1,5 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
-import { type ConnectedAccount, type MediaType, Prisma } from "@prisma/client";
+import { type ConnectedAccount, type MediaAsset, type MediaType, Prisma } from "@prisma/client";
 import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
 import {
@@ -14,10 +14,18 @@ import {
   reconnectReason,
   SHORTS_MAX_DURATION_SECONDS,
 } from "../lib/capabilities";
-import { checkMediaUrl, probeVideo } from "../lib/media-probe";
+import { isVideoType } from "../lib/media-files";
+import { probeVideo } from "../lib/media-probe";
+import { presignDownload } from "../lib/s3";
 import type { WorkspaceEnv } from "../middleware/auth";
 import { enqueuePublish, removePublishJob } from "../queue/publish-queue";
-import { markTargetCancelled, markTargetFailed, prepareRetry } from "../service/post-groups";
+import { mediaExpiry } from "../service/media";
+import {
+  MAX_ATTEMPTS,
+  markTargetCancelled,
+  markTargetFailed,
+  prepareRetry,
+} from "../service/post-groups";
 import {
   contentKindSchema,
   mediaTypeSchema,
@@ -33,6 +41,9 @@ import { workspaceParamsSchema } from "./workspace-params";
 const MIN_SCHEDULE_LEAD_MS = 60_000;
 const MAX_SCHEDULE_AHEAD_MS = 90 * 24 * 60 * 60_000;
 const MAX_TARGETS = 25;
+const MAX_MEDIA = 20;
+// Only for ffprobe's Shorts check, which reads the file right away.
+const PROBE_URL_TTL_SECONDS = 15 * 60;
 
 const targetInputSchema = z.object({
   connectedAccountId: z.string(),
@@ -52,7 +63,9 @@ const createPostGroupSchema = z
     idempotencyKey: z.string().min(8).max(100),
     contentKind: contentKindSchema,
     caption: z.string(),
-    mediaUrls: z.array(z.url()).default([]),
+    // READY uploads from POST /media, in display order. Each can be used in
+    // one post only.
+    mediaAssetIds: z.array(z.string()).max(MAX_MEDIA).default([]),
     // Omit to post now.
     scheduledFor: z.iso.datetime().optional(),
     targets: z.array(targetInputSchema).min(1).max(MAX_TARGETS),
@@ -62,7 +75,7 @@ const createPostGroupSchema = z
 const validationErrorSchema = z
   .object({
     message: z.string(),
-    // Problems with the post as a whole (media URL, schedule time).
+    // Problems with the post as a whole (media, schedule time).
     errors: z.array(z.string()),
     // Problems with individual targets — the composer offers to deselect these.
     targets: z.array(z.object({ connectedAccountId: z.string(), errors: z.array(z.string()) })),
@@ -198,16 +211,39 @@ async function validate(workspaceId: string, body: CreateBody) {
     if (lead > MAX_SCHEDULE_AHEAD_MS) errors.push("Posts can be scheduled at most 90 days ahead");
   }
 
-  const { contentKind, mediaUrls } = body;
-  if (contentKind === "TEXT" && mediaUrls.length > 0) errors.push("Text posts can't have media");
+  const { contentKind, mediaAssetIds } = body;
+  if (contentKind === "TEXT" && mediaAssetIds.length > 0)
+    errors.push("Text posts can't have media");
   if (
     (contentKind === "IMAGE" || contentKind === "VIDEO" || contentKind === "STORY") &&
-    mediaUrls.length !== 1
+    mediaAssetIds.length !== 1
   ) {
-    errors.push("Add exactly one media URL");
+    errors.push(contentKind === "VIDEO" ? "Add one video" : "Add one image");
   }
-  if (contentKind === "CAROUSEL" && mediaUrls.length < 2)
+  if (contentKind === "CAROUSEL" && mediaAssetIds.length < 2)
     errors.push("A carousel needs at least 2 images");
+  if (new Set(mediaAssetIds).size !== mediaAssetIds.length)
+    errors.push("The same file is added twice");
+
+  const found = await prisma.mediaAsset.findMany({
+    where: { workspaceId, id: { in: mediaAssetIds }, status: "READY", groupId: null },
+  });
+  const assetsById = new Map(found.map((asset) => [asset.id, asset]));
+  const media = mediaAssetIds
+    .map((id) => assetsById.get(id))
+    .filter((asset): asset is MediaAsset => asset !== undefined);
+  if (media.length !== mediaAssetIds.length) {
+    errors.push("Some files haven't finished uploading or were removed — upload them again");
+  }
+  const wantVideo = contentKind === "VIDEO";
+  for (const asset of media) {
+    if (isVideoType(asset.contentType) !== wantVideo) {
+      errors.push(
+        `${asset.originalFilename} is ${wantVideo ? "an image" : "a video"} — this post needs ${wantVideo ? "a video" : "images"}`,
+      );
+    }
+  }
+  const nonJpeg = media.filter((asset) => !wantVideo && asset.contentType !== "image/jpeg");
 
   // The same account twice in one request is posted to once.
   const inputs = [
@@ -277,9 +313,16 @@ async function validate(workspaceId: string, body: CreateBody) {
 
     if (contentKind === "CAROUSEL") {
       const { min, max } = CAROUSEL_LIMITS[platform];
-      if (mediaUrls.length < min || mediaUrls.length > max) {
+      if (mediaAssetIds.length < min || mediaAssetIds.length > max) {
         addTargetError(id, `${platform} carousels take ${min}-${max} images`);
       }
+    }
+    // Instagram's content publishing API takes JPEG images only.
+    if (platform === "INSTAGRAM" && nonJpeg.length > 0) {
+      addTargetError(
+        id,
+        `Instagram only accepts JPEG images — ${nonJpeg.map((asset) => asset.originalFilename).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
+      );
     }
     if (platform === "YOUTUBE" && !input.youtubeOptions)
       addTargetError(id, "YouTube needs a video title");
@@ -287,18 +330,12 @@ async function validate(workspaceId: string, body: CreateBody) {
     resolved.push({ input, account: account as ResolvedTarget["account"], mediaType, caption });
   }
 
-  // Network checks last, and only on otherwise-valid input. Every URL once.
-  if (errors.length === 0 && mediaUrls.length > 0) {
-    const expected = contentKind === "VIDEO" ? "video" : "image";
-    const urlErrors = await Promise.all(mediaUrls.map((url) => checkMediaUrl(url, expected)));
-    errors.push(...urlErrors.filter((error): error is string => error !== null));
-  }
-
+  // Network check last, and only on otherwise-valid input.
   const shorts = resolved.filter((target) => target.mediaType === "SHORTS");
-  const [videoUrl] = mediaUrls;
-  if (errors.length === 0 && shorts.length > 0 && videoUrl) {
+  const [video] = media;
+  if (errors.length === 0 && shorts.length > 0 && video) {
     try {
-      const shape = await probeVideo(videoUrl);
+      const shape = await probeVideo(await presignDownload(video.key, PROBE_URL_TTL_SECONDS));
       const problems: string[] = [];
       if (shape.height < shape.width)
         problems.push(
@@ -330,9 +367,13 @@ async function validate(workspaceId: string, body: CreateBody) {
       errors: messages,
     })),
     resolved,
+    media,
     scheduledFor,
   };
 }
+
+// Another post claimed one of the files between validation and create.
+class MediaTakenError extends Error {}
 
 export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
   .openapi(createPostGroup, async (c) => {
@@ -345,7 +386,10 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     });
     if (existing) return c.json(serializePostGroup(existing), 200);
 
-    const { errors, targetErrors, resolved, scheduledFor } = await validate(workspaceId, body);
+    const { errors, targetErrors, resolved, media, scheduledFor } = await validate(
+      workspaceId,
+      body,
+    );
     if (errors.length > 0 || targetErrors.length > 0) {
       return c.json(
         { message: "Some of this post can't be sent", errors, targets: targetErrors },
@@ -355,33 +399,55 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
 
     let group: Prisma.PostGroupGetPayload<{ include: typeof postGroupInclude }>;
     try {
-      group = await prisma.postGroup.create({
-        data: {
-          workspaceId,
-          createdByUserId: userId,
-          contentKind: body.contentKind,
-          caption: body.caption,
-          mediaUrls: body.mediaUrls,
-          scheduledFor,
-          idempotencyKey: body.idempotencyKey,
-          status: scheduledFor ? "SCHEDULED" : "PROCESSING",
-          posts: {
-            create: resolved.map((target) => ({
-              workspaceId,
-              createdByUserId: userId,
-              connectedAccountId: target.account.id,
-              caption: target.caption,
-              mediaType: target.mediaType,
-              mediaUrls: body.mediaUrls,
-              platformOptions:
-                target.account.platform === "YOUTUBE" ? target.input.youtubeOptions : undefined,
-              status: scheduledFor ? "SCHEDULED" : "PROCESSING",
-            })),
+      group = await prisma.$transaction(async (tx) => {
+        const created = await tx.postGroup.create({
+          data: {
+            workspaceId,
+            createdByUserId: userId,
+            contentKind: body.contentKind,
+            caption: body.caption,
+            // Uploaded media is linked below and signed at send time.
+            mediaUrls: [],
+            scheduledFor,
+            idempotencyKey: body.idempotencyKey,
+            status: scheduledFor ? "SCHEDULED" : "PROCESSING",
+            posts: {
+              create: resolved.map((target) => ({
+                workspaceId,
+                createdByUserId: userId,
+                connectedAccountId: target.account.id,
+                caption: target.caption,
+                mediaType: target.mediaType,
+                mediaUrls: [],
+                platformOptions:
+                  target.account.platform === "YOUTUBE" ? target.input.youtubeOptions : undefined,
+                status: scheduledFor ? "SCHEDULED" : "PROCESSING",
+              })),
+            },
           },
-        },
-        include: postGroupInclude,
+          include: postGroupInclude,
+        });
+        const expiresAt = mediaExpiry(scheduledFor);
+        for (const [position, asset] of media.entries()) {
+          const { count } = await tx.mediaAsset.updateMany({
+            where: { id: asset.id, groupId: null, status: "READY" },
+            data: { groupId: created.id, position, expiresAt },
+          });
+          if (count !== 1) throw new MediaTakenError();
+        }
+        return created;
       });
     } catch (err) {
+      if (err instanceof MediaTakenError) {
+        return c.json(
+          {
+            message: "Some of this post can't be sent",
+            errors: ["A file was used in another post meanwhile — upload it again"],
+            targets: [],
+          },
+          400,
+        );
+      }
       // Two concurrent submits with the same key — the other one won.
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
         const winner = await prisma.postGroup.findUniqueOrThrow({
@@ -457,8 +523,13 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     }
 
     const attempt = await prepareRetry(postId);
-    if (attempt === null) {
+    if (attempt === "NOT_FAILED") {
       throw new HTTPException(409, { message: "Only failed posts can be retried" });
+    }
+    if (attempt === "LIMIT_REACHED") {
+      throw new HTTPException(409, {
+        message: `This post was already tried ${MAX_ATTEMPTS} times — create it again instead`,
+      });
     }
     try {
       await enqueuePublish(postId, attempt);

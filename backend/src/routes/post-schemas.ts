@@ -1,6 +1,14 @@
 import { z } from "@hono/zod-openapi";
-import type { ContentKind, MediaType, Platform, PostStatus, Prisma } from "@prisma/client";
+import type {
+  ContentKind,
+  MediaAssetStatus,
+  MediaType,
+  Platform,
+  PostStatus,
+  Prisma,
+} from "@prisma/client";
 import { friendlyPlatformError } from "../lib/platform-error";
+import { canRetry } from "../service/post-groups";
 
 export const platformSchema = z.enum([
   "FACEBOOK",
@@ -101,6 +109,8 @@ const postTargetSchema = z
     caption: z.string(),
     status: postStatusSchema,
     attempt: z.number(),
+    // FAILED and under the attempt limit.
+    canRetry: z.boolean(),
     // YouTube targets only — the caption is the video's description, so the
     // title is what History leads with instead.
     youtubeTitle: z.string().nullable(),
@@ -114,7 +124,19 @@ export const postGroupSchema = z
     id: z.string(),
     contentKind: contentKindSchema,
     caption: z.string(),
+    // Public URLs — only on posts made before S3 uploads; empty otherwise.
     mediaUrls: z.array(z.string()),
+    // Uploaded files, in order.
+    media: z.array(
+      z.object({
+        id: z.string(),
+        filename: z.string(),
+        contentType: z.string(),
+        sizeBytes: z.number(),
+        // False once the file is removed after the retention period.
+        available: z.boolean(),
+      }),
+    ),
     status: postStatusSchema,
     scheduledFor: z.iso.datetime().nullable(),
     cancelledAt: z.iso.datetime().nullable(),
@@ -126,6 +148,16 @@ export const postGroupSchema = z
 
 export const postGroupInclude = {
   createdBy: { select: { name: true } },
+  media: {
+    orderBy: { position: "asc" },
+    select: {
+      id: true,
+      originalFilename: true,
+      contentType: true,
+      sizeBytes: true,
+      status: true,
+    },
+  },
   posts: {
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     include: {
@@ -140,6 +172,13 @@ interface PostGroupRow {
   contentKind: ContentKind;
   caption: string;
   mediaUrls: unknown;
+  media: {
+    id: string;
+    originalFilename: string;
+    contentType: string;
+    sizeBytes: number;
+    status: MediaAssetStatus;
+  }[];
   status: PostStatus;
   scheduledFor: Date | null;
   cancelledAt: Date | null;
@@ -169,6 +208,13 @@ export function serializePostGroup(group: PostGroupRow): z.infer<typeof postGrou
     contentKind: group.contentKind,
     caption: group.caption,
     mediaUrls: group.mediaUrls as string[],
+    media: group.media.map((asset) => ({
+      id: asset.id,
+      filename: asset.originalFilename,
+      contentType: asset.contentType,
+      sizeBytes: asset.sizeBytes,
+      available: asset.status === "READY",
+    })),
     status: group.status,
     scheduledFor: group.scheduledFor?.toISOString() ?? null,
     cancelledAt: group.cancelledAt?.toISOString() ?? null,
@@ -183,11 +229,14 @@ export function serializePostGroup(group: PostGroupRow): z.infer<typeof postGrou
       caption: post.caption,
       status: post.status,
       attempt: post.attempt,
+      canRetry: canRetry(post),
       youtubeTitle: (post.platformOptions as { title?: string } | null)?.title ?? null,
       logs: post.logs.map((log) => ({
         status: log.status,
         platformPostId: log.platformPostId,
-        errorMessage: log.errorMessage && friendlyPlatformError(log.errorMessage),
+        errorMessage:
+          log.errorMessage &&
+          friendlyPlatformError(log.errorMessage, post.connectedAccount.platform),
         executedAt: log.executedAt.toISOString(),
       })),
     })),

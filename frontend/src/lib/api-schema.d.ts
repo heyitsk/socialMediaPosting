@@ -998,6 +998,169 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/{workspaceId}/media": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start uploading a file for the composer
+         * @description JPEG/PNG/WebP images up to 8 MB, MP4/MOV videos up to 1 GB. Limited to 120 per 10 minutes per user.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["CreateMediaUploadRequest"];
+                };
+            };
+            responses: {
+                /** @description Upload the file with these instructions, then call /complete */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            asset: components["schemas"]["MediaAsset"];
+                            upload: components["schemas"]["MediaUploadInstructions"];
+                        };
+                    };
+                };
+                /** @description File too large or not an accepted type */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/media/{assetId}/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm an upload finished — checks what S3 received */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: {
+                content: {
+                    "application/json": components["schemas"]["CompleteMediaUploadRequest"];
+                };
+            };
+            responses: {
+                /** @description The asset, READY to post */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["MediaAsset"];
+                    };
+                };
+                /** @description Upload incomplete, or the file isn't what it claimed to be */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/media/{assetId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a file from the composer before posting */
+        delete: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                    assetId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Removed */
+                204: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Not found */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Already part of a post */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/webhooks/n8n-callback": {
         parameters: {
             query?: never;
@@ -1144,6 +1307,13 @@ export interface components {
             contentKind: "TEXT" | "IMAGE" | "CAROUSEL" | "VIDEO" | "STORY";
             caption: string;
             mediaUrls: string[];
+            media: {
+                id: string;
+                filename: string;
+                contentType: string;
+                sizeBytes: number;
+                available: boolean;
+            }[];
             /** @enum {string} */
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
             /** Format: date-time */
@@ -1169,6 +1339,7 @@ export interface components {
             /** @enum {string} */
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
             attempt: number;
+            canRetry: boolean;
             youtubeTitle: string | null;
             logs: components["schemas"]["PostLog"][];
         };
@@ -1194,7 +1365,7 @@ export interface components {
             contentKind: "TEXT" | "IMAGE" | "CAROUSEL" | "VIDEO" | "STORY";
             caption: string;
             /** @default [] */
-            mediaUrls: string[];
+            mediaAssetIds: string[];
             /** Format: date-time */
             scheduledFor?: string;
             targets: {
@@ -1221,6 +1392,42 @@ export interface components {
             categoryId: "1" | "2" | "10" | "15" | "17" | "19" | "20" | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29";
             /** @default [] */
             tags: string[];
+        };
+        MediaAsset: {
+            id: string;
+            filename: string;
+            contentType: string;
+            sizeBytes: number;
+            /** @enum {string} */
+            status: "PENDING" | "READY" | "DELETED";
+        };
+        MediaUploadInstructions: {
+            /** @enum {string} */
+            method: "POST";
+            url: string;
+            fields: {
+                [key: string]: string;
+            };
+        } | {
+            /** @enum {string} */
+            method: "MULTIPART";
+            partSize: number;
+            parts: {
+                partNumber: number;
+                url: string;
+            }[];
+        };
+        CreateMediaUploadRequest: {
+            filename: string;
+            /** @enum {string} */
+            contentType: "image/jpeg" | "image/png" | "image/webp" | "video/mp4" | "video/quicktime";
+            sizeBytes: number;
+        };
+        CompleteMediaUploadRequest: {
+            parts?: {
+                partNumber: number;
+                etag: string;
+            }[];
         };
         N8nCallback: {
             post_id: string;

@@ -1,50 +1,7 @@
-// Pre-submit media checks for the composer's public URLs (websitePlan.md
-// §10.4-10.5): one cheap request per URL instead of N platform failures,
-// and ffprobe for the YouTube Shorts shape check.
+// ffprobe for the YouTube Shorts shape check (websitePlan.md §10.5), run
+// against a short-lived presigned S3 URL of the uploaded video.
 
-const URL_CHECK_TIMEOUT_MS = 8_000;
 const FFPROBE_TIMEOUT_MS = 20_000;
-
-export type ExpectedMedia = "image" | "video";
-
-// Returns an error message, or null if the URL looks like the right kind of
-// media. application/octet-stream passes — some object stores serve
-// everything as that, and the platform will reject a truly wrong file anyway.
-export async function checkMediaUrl(url: string, expected: ExpectedMedia): Promise<string | null> {
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "HEAD",
-      redirect: "follow",
-      signal: AbortSignal.timeout(URL_CHECK_TIMEOUT_MS),
-    });
-    // Some hosts don't implement HEAD — ask for one byte instead.
-    if (response.status === 405 || response.status === 501) {
-      response = await fetch(url, {
-        headers: { Range: "bytes=0-0" },
-        redirect: "follow",
-        signal: AbortSignal.timeout(URL_CHECK_TIMEOUT_MS),
-      });
-      await response.body?.cancel();
-    }
-  } catch {
-    return `Couldn't reach ${url}`;
-  }
-  if (!response.ok) {
-    return `${url} returned HTTP ${response.status}`;
-  }
-
-  const contentType =
-    response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
-  if (
-    contentType === "" ||
-    contentType === "application/octet-stream" ||
-    contentType.startsWith(`${expected}/`)
-  ) {
-    return null;
-  }
-  return `${url} is ${contentType}, not ${expected === "image" ? "an image" : "a video"}`;
-}
 
 export interface VideoShape {
   width: number;

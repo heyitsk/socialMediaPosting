@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { MediaPicker, useMediaUploads } from "@/components/media-picker";
 import { PlatformMark } from "@/components/platform-mark";
 import { PostGroupCard } from "@/components/post-group-card";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api, apiErrorMessage } from "@/lib/api";
 import type { components } from "@/lib/api-schema";
+import { isVideoFile } from "@/lib/media-upload";
 import {
   CONTENT_KIND_LABELS,
   CONTENT_KINDS,
@@ -42,7 +43,6 @@ type Account = components["schemas"]["ConnectedAccountSummary"];
 // asking for 2 here keeps a quick submit from bouncing. websitePlan.md §10.6.
 const MIN_SCHEDULE_LEAD_MS = 2 * 60_000;
 const MAX_SCHEDULE_AHEAD_MS = 90 * 24 * 60 * 60_000;
-const MIN_CAROUSEL_URL_FIELDS = 2;
 
 // Per-account settings. Kept for every account ever ticked, so unticking and
 // re-ticking one doesn't lose what was typed.
@@ -108,15 +108,6 @@ function useVideoShape(url: string | null): VideoShape | null {
   return shape && shape.url === url ? shape.shape : null;
 }
 
-function isHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" || url.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
 // datetime-local wants local time without a zone.
 function toLocalInputValue(date: Date): string {
   const offset = date.getTimezoneOffset() * 60_000;
@@ -160,8 +151,7 @@ export function ComposerPage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [settings, setSettings] = useState<Record<string, TargetSettings>>({});
   const [caption, setCaption] = useState("");
-  const [mediaUrl, setMediaUrl] = useState("");
-  const [carouselUrls, setCarouselUrls] = useState<string[]>(["", ""]);
+  const media = useMediaUploads(workspaceId);
   const [scheduleMode, setScheduleMode] = useState<"now" | "later">("now");
   const [scheduledAt, setScheduledAt] = useState("");
   const [serverErrors, setServerErrors] = useState<PostGroupValidationError | null>(null);
@@ -194,6 +184,13 @@ export function ComposerPage() {
 
   function chooseKind(next: ContentKind) {
     setKind(next);
+    // Keep uploads the new kind can still use; delete the rest.
+    if (next === "TEXT") media.keepOnly(() => false);
+    else {
+      const video = next === "VIDEO";
+      const single = next !== "CAROUSEL";
+      media.keepOnly((item, index) => isVideoFile(item.file) === video && (!single || index === 0));
+    }
     setServerErrors(null);
     // Drop accounts that can't take the new kind rather than silently
     // keeping them out of the post.
@@ -211,19 +208,21 @@ export function ComposerPage() {
       ids.includes(id) ? ids.filter((other) => other !== id) : [...ids, id],
     );
 
-  const mediaUrls =
-    kind === "TEXT" || kind === null
-      ? []
-      : kind === "CAROUSEL"
-        ? carouselUrls.map((url) => url.trim()).filter((url) => url !== "")
-        : [mediaUrl.trim()].filter((url) => url !== "");
+  const mediaItems = kind === "TEXT" || kind === null ? [] : media.items;
+  const mediaAssetIds = mediaItems.flatMap((item) =>
+    item.status === "ready" && item.assetId ? [item.assetId] : [],
+  );
+  const nonJpeg = mediaItems.filter(
+    (item) => kind !== "VIDEO" && item.contentType !== "image/jpeg",
+  );
 
   const wantsShort = selectedAccounts.some(
     (account) =>
       account.platform === "YOUTUBE" && settingsFor(account.id).youtubeMediaType === "SHORTS",
   );
+  // The local file, so the check doesn't wait for the upload.
   const videoShape = useVideoShape(
-    kind === "VIDEO" && wantsShort && isHttpUrl(mediaUrl.trim()) ? mediaUrl.trim() : null,
+    kind === "VIDEO" && wantsShort ? (mediaItems[0]?.previewUrl ?? null) : null,
   );
 
   // --- Validation (mirrors the backend's; the backend has the final say) ---
@@ -234,12 +233,16 @@ export function ComposerPage() {
   // Wrong input (too long, landscape Short, ...) shows as soon as it's typed.
   // Both block the submit.
   const groupProblems: Problem[] = [];
-  if (kind === "CAROUSEL" && mediaUrls.length < 2)
-    groupProblems.push({ message: "Add at least 2 image URLs", missing: true });
-  if ((kind === "IMAGE" || kind === "VIDEO" || kind === "STORY") && mediaUrls.length === 0)
-    groupProblems.push({ message: "Add a media URL", missing: true });
-  const badUrl = mediaUrls.find((url) => !isHttpUrl(url));
-  if (badUrl) groupProblems.push({ message: `${badUrl} isn't a valid URL` });
+  if (kind === "CAROUSEL" && mediaItems.length < 2)
+    groupProblems.push({ message: "Add at least 2 images", missing: true });
+  if ((kind === "IMAGE" || kind === "STORY") && mediaItems.length === 0)
+    groupProblems.push({ message: "Add an image", missing: true });
+  if (kind === "VIDEO" && mediaItems.length === 0)
+    groupProblems.push({ message: "Add a video", missing: true });
+  if (mediaItems.some((item) => item.status === "uploading"))
+    groupProblems.push({ message: "Wait for the uploads to finish", missing: true });
+  if (mediaItems.some((item) => item.status === "error"))
+    groupProblems.push({ message: "Retry or remove the files that failed to upload" });
   if (scheduleMode === "later") {
     const at = new Date(scheduledAt);
     if (!scheduledAt || Number.isNaN(at.getTime()))
@@ -276,8 +279,14 @@ export function ComposerPage() {
     }
     if (kind === "CAROUSEL") {
       const { min, max } = platformCapabilities.carousel;
-      if (mediaUrls.length >= 2 && (mediaUrls.length < min || mediaUrls.length > max))
+      if (mediaItems.length >= 2 && (mediaItems.length < min || mediaItems.length > max))
         errors.push({ message: `${label} carousels take ${min}-${max} images` });
+    }
+    // Instagram's publishing API takes JPEG images only.
+    if (account.platform === "INSTAGRAM" && nonJpeg.length > 0) {
+      errors.push({
+        message: `Instagram only accepts JPEG images — ${nonJpeg.map((item) => item.file.name).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
+      });
     }
     if (account.platform === "YOUTUBE") {
       if (own.youtubeTitle.trim() === "")
@@ -312,7 +321,7 @@ export function ComposerPage() {
     if (problems.length > 0) clientBlocked = true;
     const errors = shown(problems);
     // Rejections from the last submit, until the next one (the backend also
-    // checks things the browser can't, like whether the URL is reachable).
+    // checks things the browser can't, like ffprobe on the uploaded video).
     const fromServer = serverErrors?.targets.find(
       (target) => target.connectedAccountId === account.id,
     )?.errors;
@@ -336,7 +345,7 @@ export function ComposerPage() {
             idempotencyKey,
             contentKind: kind,
             caption,
-            mediaUrls,
+            mediaAssetIds,
             scheduledFor:
               scheduleMode === "later" ? new Date(scheduledAt).toISOString() : undefined,
             targets: selectedAccounts.map((account) => {
@@ -377,8 +386,7 @@ export function ComposerPage() {
       // Ready for the next post; keep the account picks, which are often reused.
       setIdempotencyKey(crypto.randomUUID());
       setCaption("");
-      setMediaUrl("");
-      setCarouselUrls(["", ""]);
+      media.clear();
       setSettings({});
       setScheduleMode("now");
       setScheduledAt("");
@@ -588,65 +596,32 @@ export function ComposerPage() {
                   )}
                 </div>
 
-                {(kind === "IMAGE" || kind === "VIDEO" || kind === "STORY") && (
-                  <div>
-                    <Label htmlFor="media-url">
-                      {kind === "VIDEO" ? "Video URL" : "Image URL"} (public link)
+                {kind !== "TEXT" && (
+                  <div className="space-y-2">
+                    <Label>
+                      {kind === "VIDEO"
+                        ? "Video"
+                        : kind === "CAROUSEL"
+                          ? "Images (in order)"
+                          : "Image"}
                     </Label>
-                    <Input
-                      id="media-url"
-                      className="mt-2 h-11"
-                      value={mediaUrl}
-                      onChange={(e) => setMediaUrl(e.target.value)}
-                      placeholder="https://res.cloudinary.com/..."
+                    <MediaPicker
+                      items={mediaItems}
+                      video={kind === "VIDEO"}
+                      multiple={kind === "CAROUSEL"}
+                      onAdd={(files) =>
+                        media.add(files, { video: kind === "VIDEO", single: kind !== "CAROUSEL" })
+                      }
+                      onRemove={media.remove}
+                      onRetry={media.retry}
+                      onMove={media.move}
                     />
                     {kind === "VIDEO" &&
                       selectedAccounts.some((account) => account.platform === "INSTAGRAM") && (
-                        <p className="mt-2 text-xs text-muted-foreground">
+                        <p className="text-xs text-muted-foreground">
                           Instagram posts videos as Reels.
                         </p>
                       )}
-                  </div>
-                )}
-
-                {kind === "CAROUSEL" && (
-                  <div className="space-y-2">
-                    <Label>Image URLs (public links, in order)</Label>
-                    {carouselUrls.map((url, index) => (
-                      <div key={index} className="flex gap-2">
-                        <Input
-                          className="h-11"
-                          value={url}
-                          onChange={(e) =>
-                            setCarouselUrls((urls) =>
-                              urls.map((other, i) => (i === index ? e.target.value : other)),
-                            )
-                          }
-                          placeholder="https://res.cloudinary.com/..."
-                        />
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="icon"
-                          className="size-11"
-                          disabled={carouselUrls.length <= MIN_CAROUSEL_URL_FIELDS}
-                          onClick={() =>
-                            setCarouselUrls((urls) => urls.filter((_, i) => i !== index))
-                          }
-                        >
-                          <X className="size-4" />
-                        </Button>
-                      </div>
-                    ))}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setCarouselUrls((urls) => [...urls, ""])}
-                    >
-                      <Plus className="size-4" />
-                      Add image
-                    </Button>
                   </div>
                 )}
               </section>

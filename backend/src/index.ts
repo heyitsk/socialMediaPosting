@@ -19,11 +19,13 @@ import { healthRoute } from "./routes/health";
 import { integrationsRoute } from "./routes/integrations";
 import { invitesRoute } from "./routes/invites";
 import { loginRoute } from "./routes/login";
+import { mediaRoute } from "./routes/media";
 import { membersRoute } from "./routes/members";
 import { postGroupsRoute } from "./routes/post-groups";
 import { sessionRoute } from "./routes/session";
 import { webhooksRoute } from "./routes/webhooks";
 import { workspaceRoute, workspacesRoute } from "./routes/workspaces";
+import { startMediaCleaner } from "./service/media";
 
 const app = new OpenAPIHono();
 
@@ -65,6 +67,7 @@ app.route("/api/workspaces/:workspaceId/members", membersRoute);
 app.route("/api/workspaces/:workspaceId/invites", invitesRoute);
 app.route("/api/workspaces/:workspaceId/integrations", integrationsRoute);
 app.route("/api/workspaces/:workspaceId/post-groups", postGroupsRoute);
+app.route("/api/workspaces/:workspaceId/media", mediaRoute);
 app.route("/api/webhooks", webhooksRoute);
 
 // The full API map is no business of the public internet — dev only.
@@ -86,6 +89,7 @@ const server = Bun.serve({
 startVideoStatusWorker();
 startPublishWorker();
 startScheduleReconciler();
+startMediaCleaner();
 
 console.log(`smPosting backend listening on ${server.url}`);
 if (env.NODE_ENV !== "production") {

@@ -124,12 +124,21 @@ export function markTargetCancelled(postId: string): Promise<boolean> {
   return transitionTarget(postId, (post) => post.status === "SCHEDULED", "CANCELLED");
 }
 
-// Manual retry (decision 4 in websitePlan.md §10.1): FAILED targets only. The
-// old PostLog rows stay as attempt history. Returns the new attempt number,
-// or null if the target wasn't in a retryable state.
-export async function prepareRetry(postId: string): Promise<number | null> {
+// Sends per target, the first one included — so 4 manual retries.
+export const MAX_ATTEMPTS = 5;
+
+export function canRetry(post: { status: PostStatus; attempt: number }): boolean {
+  return post.status === "FAILED" && post.attempt < MAX_ATTEMPTS;
+}
+
+// Manual retry (decision 4 in websitePlan.md §10.1): FAILED targets only, up
+// to MAX_ATTEMPTS. The old PostLog rows stay as attempt history. Returns the
+// new attempt number, or why the target can't be retried.
+export async function prepareRetry(
+  postId: string,
+): Promise<number | "NOT_FAILED" | "LIMIT_REACHED"> {
   const target = await prisma.post.findUnique({ where: { id: postId }, select: { groupId: true } });
-  if (!target) return null;
+  if (!target) return "NOT_FAILED";
 
   return prisma.$transaction(async (tx) => {
     await lockGroup(tx, target.groupId);
@@ -137,7 +146,8 @@ export async function prepareRetry(postId: string): Promise<number | null> {
       where: { id: postId },
       select: { status: true, attempt: true },
     });
-    if (post.status !== "FAILED") return null;
+    if (post.status !== "FAILED") return "NOT_FAILED";
+    if (!canRetry(post)) return "LIMIT_REACHED";
 
     const updated = await tx.post.update({
       where: { id: postId },
