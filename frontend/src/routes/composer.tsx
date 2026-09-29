@@ -202,220 +202,375 @@ export function ComposerPage() {
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <h1 className="text-2xl font-semibold">Post Composer</h1>
+    <div className="flex flex-col gap-8">
+      <div>
+        <p className="text-sm font-medium text-primary">Publishing workspace</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight">Create a post</h1>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+          Create and publish content to one of your connected social accounts.
+        </p>
+      </div>
 
-      <Card className="max-w-lg">
-        <CardHeader>
-          <CardTitle>New Post</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          {isPending && <p className="text-sm text-muted-foreground">Loading accounts…</p>}
-          {isError && (
-            <p className="text-sm text-destructive">Could not load connected accounts.</p>
-          )}
-          {!isPending && !isError && postableAccounts.length === 0 && (
+      {isPending && (
+        <Card>
+          <CardContent className="flex items-center gap-3 py-8">
+            <div className="size-2.5 animate-pulse rounded-full bg-primary" />
             <p className="text-sm text-muted-foreground">
-              Connect a Facebook, Instagram, Threads, LinkedIn, or YouTube account from the Dashboard
-              before posting.
+              Loading connected accounts…
             </p>
-          )}
+          </CardContent>
+        </Card>
+      )}
 
-          {postableAccounts.length > 0 && (
-            <>
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="account">Post as</Label>
-                <Select value={connectedAccountId} onValueChange={handleAccountChange}>
-                  <SelectTrigger id="account">
-                    <SelectValue placeholder="Select an account" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {postableAccounts.map((account) => (
-                      <SelectItem key={account.id} value={account.id}>
-                        {account.accountName} ({account.platform})
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+      {isError && (
+        <Card>
+          <CardContent className="py-8">
+            <p className="text-sm font-medium text-destructive">
+              Could not load connected accounts.
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Please try again or check the Dashboard for your connection status.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
-              {isYouTube && (
-                <div className="flex flex-col gap-2">
-                  <Label htmlFor="youtube-title">Video title</Label>
-                  <Input
-                    id="youtube-title"
-                    value={youtubeTitle}
-                    maxLength={YOUTUBE_TITLE_MAX}
-                    onChange={(e) => setYoutubeTitle(e.target.value)}
-                    placeholder="What's this video about?"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    {youtubeTitle.length}/{YOUTUBE_TITLE_MAX}
+      {!isPending && !isError && postableAccounts.length === 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>No publishing accounts connected</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm text-muted-foreground">
+              Connect a Facebook, Instagram, Threads, LinkedIn, or YouTube
+              account from the Dashboard before posting.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {postableAccounts.length > 0 && (
+        <Card className="overflow-hidden">
+          <CardHeader className="border-b bg-muted/20">
+            <CardTitle className="text-base">New post</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              Configure your account, content, media, and publishing options.
+            </p>
+          </CardHeader>
+
+          <CardContent className="p-0">
+            <div className="divide-y">
+              {/* Account */}
+              <section className="space-y-4 p-6">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
+                    Account
+                  </p>
+                  <h2 className="mt-1 text-base font-semibold">Choose where to publish</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Select one of your connected accounts.
                   </p>
                 </div>
-              )}
 
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="caption">{isYouTube ? "Description" : "Caption"}</Label>
-                <Textarea
-                  id="caption"
-                  value={caption}
-                  onChange={(e) => setCaption(e.target.value)}
-                  placeholder="What do you want to post?"
-                  rows={4}
-                />
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <Label htmlFor="media-type">Media type</Label>
-                <Select
-                  value={mediaType}
-                  onValueChange={(value) => setMediaType(value as MediaType)}
-                >
-                  <SelectTrigger id="media-type">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableMediaTypes.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {SINGLE_URL_MEDIA_TYPES.includes(mediaType) && (
-                <div className="flex flex-col gap-2">
-                  <Label htmlFor="media-url">Media URL (Cloudinary)</Label>
-                  <Input
-                    id="media-url"
-                    value={mediaUrl}
-                    onChange={(e) => setMediaUrl(e.target.value)}
-                    placeholder="https://res.cloudinary.com/..."
-                  />
+                <div className="max-w-xl">
+                  <Label htmlFor="account">Post as</Label>
+                  <Select value={connectedAccountId} onValueChange={handleAccountChange}>
+                    <SelectTrigger id="account" className="mt-2 h-11">
+                      <SelectValue placeholder="Select an account" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {postableAccounts.map((account) => (
+                        <SelectItem key={account.id} value={account.id}>
+                          {account.accountName} ({account.platform})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-              )}
+              </section>
 
-              {isYouTube && (
-                <>
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="youtube-privacy">Visibility</Label>
-                    <Select
-                      value={youtubePrivacy}
-                      onValueChange={(value) => setYoutubePrivacy(value as YouTubePrivacy)}
-                    >
-                      <SelectTrigger id="youtube-privacy">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {YOUTUBE_PRIVACY_OPTIONS.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
+              {/* Content */}
+              <section className="space-y-5 p-6">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
+                    Content
+                  </p>
+                  <h2 className="mt-1 text-base font-semibold">Write your post</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Add the text that will accompany your content.
+                  </p>
+                </div>
 
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="youtube-category">Category</Label>
-                    <Select
-                      value={youtubeCategoryId}
-                      onValueChange={(value) => setYoutubeCategoryId(value as YouTubeCategoryId)}
-                    >
-                      <SelectTrigger id="youtube-category">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {YOUTUBE_CATEGORIES.map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
-                            {option.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
+                {isYouTube && (
+                  <div>
+                    <div className="flex items-center justify-between gap-4">
+                      <Label htmlFor="youtube-title">Video title</Label>
+                      <span className="text-xs text-muted-foreground">
+                        {youtubeTitle.length}/{YOUTUBE_TITLE_MAX}
+                      </span>
+                    </div>
 
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="youtube-kids">Made for kids?</Label>
-                    <Select
-                      value={youtubeMadeForKids ? "yes" : "no"}
-                      onValueChange={(value) => setYoutubeMadeForKids(value === "yes")}
-                    >
-                      <SelectTrigger id="youtube-kids">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="no">No, it's not made for kids</SelectItem>
-                        <SelectItem value="yes">Yes, it's made for kids</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    <Label htmlFor="youtube-tags">Tags (optional, comma-separated)</Label>
                     <Input
-                      id="youtube-tags"
-                      value={youtubeTags}
-                      onChange={(e) => setYoutubeTags(e.target.value)}
-                      placeholder="tutorial, product launch"
+                      id="youtube-title"
+                      value={youtubeTitle}
+                      maxLength={YOUTUBE_TITLE_MAX}
+                      onChange={(e) => setYoutubeTitle(e.target.value)}
+                      placeholder="What's this video about?"
+                      className="mt-2 h-11"
                     />
                   </div>
-                </>
-              )}
+                )}
 
-              {mediaType === "CAROUSEL" && (
-                <div className="flex flex-col gap-2">
-                  <Label>Photo URLs (Cloudinary, min {MIN_CAROUSEL_PHOTOS})</Label>
-                  {carouselUrls.map((url, index) => (
-                    <div key={index} className="flex gap-2">
-                      <Input
-                        value={url}
-                        onChange={(e) =>
-                          setCarouselUrls((urls) =>
-                            urls.map((u, i) => (i === index ? e.target.value : u)),
-                          )
-                        }
-                        placeholder="https://res.cloudinary.com/..."
-                      />
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        disabled={carouselUrls.length <= MIN_CAROUSEL_PHOTOS}
-                        onClick={() =>
-                          setCarouselUrls((urls) => urls.filter((_, i) => i !== index))
+                <div>
+                  <Label htmlFor="caption">
+                    {isYouTube ? "Description" : "Caption"}
+                  </Label>
+                  <Textarea
+                    id="caption"
+                    value={caption}
+                    onChange={(e) => setCaption(e.target.value)}
+                    placeholder={
+                      isYouTube
+                        ? "Describe your video..."
+                        : "What do you want to post?"
+                    }
+                    rows={6}
+                    className="mt-2 resize-y"
+                  />
+                </div>
+              </section>
+
+              {/* Media */}
+              <section className="space-y-5 p-6">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
+                    Media
+                  </p>
+                  <h2 className="mt-1 text-base font-semibold">Choose your format</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Select the media type supported by this platform.
+                  </p>
+                </div>
+
+                <div className="max-w-xl">
+                  <Label htmlFor="media-type">Media type</Label>
+                  <Select
+                    value={mediaType}
+                    onValueChange={(value) => setMediaType(value as MediaType)}
+                  >
+                    <SelectTrigger id="media-type" className="mt-2 h-11">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {availableMediaTypes.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {SINGLE_URL_MEDIA_TYPES.includes(mediaType) && (
+                  <div>
+                    <Label htmlFor="media-url">Media URL (Cloudinary)</Label>
+                    <Input
+                      id="media-url"
+                      value={mediaUrl}
+                      onChange={(e) => setMediaUrl(e.target.value)}
+                      placeholder="https://res.cloudinary.com/..."
+                      className="mt-2 h-11"
+                    />
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Paste the Cloudinary URL for the media you want to publish.
+                    </p>
+                  </div>
+                )}
+
+                {mediaType === "CAROUSEL" && (
+                  <div className="space-y-3">
+                    <div>
+                      <Label>
+                        Photo URLs (Cloudinary, min {MIN_CAROUSEL_PHOTOS})
+                      </Label>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Add at least {MIN_CAROUSEL_PHOTOS} photo URLs.
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      {carouselUrls.map((url, index) => (
+                        <div key={index} className="flex gap-2">
+                          <Input
+                            value={url}
+                            onChange={(e) =>
+                              setCarouselUrls((urls) =>
+                                urls.map((u, i) =>
+                                  i === index ? e.target.value : u,
+                                ),
+                              )
+                            }
+                            placeholder={`Photo ${index + 1} — https://res.cloudinary.com/...`}
+                            className="h-11"
+                          />
+
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            disabled={carouselUrls.length <= MIN_CAROUSEL_PHOTOS}
+                            onClick={() =>
+                              setCarouselUrls((urls) =>
+                                urls.filter((_, i) => i !== index),
+                              )
+                            }
+                            aria-label={`Remove photo ${index + 1}`}
+                          >
+                            <X className="size-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setCarouselUrls((urls) => [...urls, ""])}
+                    >
+                      <Plus className="size-4" />
+                      Add photo
+                    </Button>
+                  </div>
+                )}
+              </section>
+
+              {/* YouTube options */}
+              {isYouTube && (
+                <section className="space-y-5 bg-muted/10 p-6">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">
+                      YouTube options
+                    </p>
+                    <h2 className="mt-1 text-base font-semibold">
+                      Publishing settings
+                    </h2>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      Configure how your YouTube video will be published.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-5 md:grid-cols-2">
+                    <div>
+                      <Label htmlFor="youtube-privacy">Visibility</Label>
+                      <Select
+                        value={youtubePrivacy}
+                        onValueChange={(value) =>
+                          setYoutubePrivacy(value as YouTubePrivacy)
                         }
                       >
-                        <X className="size-4" />
-                      </Button>
+                        <SelectTrigger id="youtube-privacy" className="mt-2 h-11">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {YOUTUBE_PRIVACY_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
-                  ))}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="self-start"
-                    onClick={() => setCarouselUrls((urls) => [...urls, ""])}
-                  >
-                    <Plus className="size-4" />
-                    Add photo
-                  </Button>
-                </div>
+
+                    <div>
+                      <Label htmlFor="youtube-category">Category</Label>
+                      <Select
+                        value={youtubeCategoryId}
+                        onValueChange={(value) =>
+                          setYoutubeCategoryId(value as YouTubeCategoryId)
+                        }
+                      >
+                        <SelectTrigger id="youtube-category" className="mt-2 h-11">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {YOUTUBE_CATEGORIES.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="youtube-kids">Made for kids?</Label>
+                      <Select
+                        value={youtubeMadeForKids ? "yes" : "no"}
+                        onValueChange={(value) =>
+                          setYoutubeMadeForKids(value === "yes")
+                        }
+                      >
+                        <SelectTrigger id="youtube-kids" className="mt-2 h-11">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="no">
+                            No, it's not made for kids
+                          </SelectItem>
+                          <SelectItem value="yes">
+                            Yes, it's made for kids
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="youtube-tags">
+                        Tags (optional, comma-separated)
+                      </Label>
+                      <Input
+                        id="youtube-tags"
+                        value={youtubeTags}
+                        onChange={(e) => setYoutubeTags(e.target.value)}
+                        placeholder="tutorial, product launch"
+                        className="mt-2 h-11"
+                      />
+                    </div>
+                  </div>
+                </section>
               )}
 
-              <Button disabled={!canSubmit} onClick={() => createPost.mutate()}>
-                {createPost.isPending
-                  ? "Posting…"
-                  : selectedPlatform
-                    ? `Post to ${PLATFORM_LABELS[selectedPlatform]}`
-                    : "Post"}
-              </Button>
-            </>
-          )}
-        </CardContent>
-      </Card>
+              {/* Action */}
+              <section className="flex flex-col gap-4 bg-muted/20 p-6 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-medium">
+                    {selectedPlatform
+                      ? `Ready to post to ${PLATFORM_LABELS[selectedPlatform]}`
+                      : "Select an account to continue"}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Your post will be submitted using the connected account above.
+                  </p>
+                </div>
+
+                <Button
+                  className="w-full sm:w-auto"
+                  size="lg"
+                  disabled={!canSubmit}
+                  onClick={() => createPost.mutate()}
+                >
+                  {createPost.isPending
+                    ? "Posting…"
+                    : selectedPlatform
+                      ? `Post to ${PLATFORM_LABELS[selectedPlatform]}`
+                      : "Post"}
+                </Button>
+              </section>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
