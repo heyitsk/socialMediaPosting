@@ -67,6 +67,12 @@ const DEFAULT_SETTINGS: TargetSettings = {
   youtubeTags: "",
 };
 
+interface Problem {
+  message: string;
+  // Not filled in yet, as opposed to filled in wrong.
+  missing?: boolean;
+}
+
 interface VideoShape {
   width: number;
   height: number;
@@ -159,6 +165,7 @@ export function ComposerPage() {
   const [scheduledAt, setScheduledAt] = useState("");
   const [serverErrors, setServerErrors] = useState<PostGroupValidationError | null>(null);
   const [resultGroupId, setResultGroupId] = useState<string | null>(null);
+  const [submitAttempted, setSubmitAttempted] = useState(false);
 
   const capabilitiesByPlatform = new Map(
     capabilities?.platforms.map((platform) => [platform.platform, platform]) ?? [],
@@ -220,67 +227,89 @@ export function ComposerPage() {
 
   // --- Validation (mirrors the backend's; the backend has the final say) ---
 
-  const groupErrors: string[] = [];
-  if (kind === "CAROUSEL" && mediaUrls.length < 2) groupErrors.push("Add at least 2 image URLs");
+  // "Not filled in yet" problems (missing: true) stay hidden until the first
+  // submit attempt — otherwise a fresh form, or the one just cleared after a
+  // successful post, is covered in red before the user has typed anything.
+  // Wrong input (too long, landscape Short, ...) shows as soon as it's typed.
+  // Both block the submit.
+  const groupProblems: Problem[] = [];
+  if (kind === "CAROUSEL" && mediaUrls.length < 2)
+    groupProblems.push({ message: "Add at least 2 image URLs", missing: true });
   if ((kind === "IMAGE" || kind === "VIDEO" || kind === "STORY") && mediaUrls.length === 0)
-    groupErrors.push("Add a media URL");
+    groupProblems.push({ message: "Add a media URL", missing: true });
   const badUrl = mediaUrls.find((url) => !isHttpUrl(url));
-  if (badUrl) groupErrors.push(`${badUrl} isn't a valid URL`);
+  if (badUrl) groupProblems.push({ message: `${badUrl} isn't a valid URL` });
   if (scheduleMode === "later") {
     const at = new Date(scheduledAt);
-    if (!scheduledAt || Number.isNaN(at.getTime())) groupErrors.push("Pick a date and time");
+    if (!scheduledAt || Number.isNaN(at.getTime()))
+      groupProblems.push({ message: "Pick a date and time", missing: true });
     else if (at.getTime() - Date.now() < MIN_SCHEDULE_LEAD_MS)
-      groupErrors.push("Schedule at least 2 minutes from now");
+      groupProblems.push({ message: "Schedule at least 2 minutes from now" });
     else if (at.getTime() - Date.now() > MAX_SCHEDULE_AHEAD_MS)
-      groupErrors.push("Posts can be scheduled at most 90 days ahead");
+      groupProblems.push({ message: "Posts can be scheduled at most 90 days ahead" });
   }
 
-  function targetErrorsFor(account: Account, platformCapabilities: PlatformCapabilities): string[] {
-    const errors: string[] = [];
+  function targetProblemsFor(
+    account: Account,
+    platformCapabilities: PlatformCapabilities,
+  ): Problem[] {
+    const errors: Problem[] = [];
     const own = settingsFor(account.id);
     const effectiveCaption = (own.overrideCaption ? own.caption : caption).trim();
     const label = PLATFORM_LABELS[account.platform];
-    if (effectiveCaption === "") errors.push("Caption is empty");
+    if (effectiveCaption === "") errors.push({ message: "Caption is empty", missing: true });
     const length = captionLength(effectiveCaption);
     if (length > platformCapabilities.captionLimit) {
-      errors.push(
-        `Caption is ${length} characters — ${label} allows ${platformCapabilities.captionLimit}`,
-      );
+      errors.push({
+        message: `Caption is ${length} characters — ${label} allows ${platformCapabilities.captionLimit}`,
+      });
     }
     if (
       account.platform === "INSTAGRAM" &&
       capabilities &&
       countHashtags(effectiveCaption) > capabilities.instagramMaxHashtags
     ) {
-      errors.push(`Instagram allows at most ${capabilities.instagramMaxHashtags} hashtags`);
+      errors.push({
+        message: `Instagram allows at most ${capabilities.instagramMaxHashtags} hashtags`,
+      });
     }
     if (kind === "CAROUSEL") {
       const { min, max } = platformCapabilities.carousel;
       if (mediaUrls.length >= 2 && (mediaUrls.length < min || mediaUrls.length > max))
-        errors.push(`${label} carousels take ${min}-${max} images`);
+        errors.push({ message: `${label} carousels take ${min}-${max} images` });
     }
     if (account.platform === "YOUTUBE") {
-      if (own.youtubeTitle.trim() === "") errors.push("Add a video title");
-      if (/[<>]/.test(own.youtubeTitle)) errors.push("The title can't contain < or >");
+      if (own.youtubeTitle.trim() === "")
+        errors.push({ message: "Add a video title", missing: true });
+      if (/[<>]/.test(own.youtubeTitle)) errors.push({ message: "The title can't contain < or >" });
       if (own.youtubeMediaType === "SHORTS" && videoShape && capabilities) {
         if (videoShape.height < videoShape.width)
-          errors.push(
-            `Can't post as a Short: it's landscape (${videoShape.width}x${videoShape.height}) — Shorts must be vertical or square`,
-          );
+          errors.push({
+            message: `Can't post as a Short: it's landscape (${videoShape.width}x${videoShape.height}) — Shorts must be vertical or square`,
+          });
         if (videoShape.durationSeconds > capabilities.shortsMaxDurationSeconds)
-          errors.push(
-            `Can't post as a Short: it's ${Math.round(videoShape.durationSeconds)}s long — Shorts can be at most ${capabilities.shortsMaxDurationSeconds}s`,
-          );
+          errors.push({
+            message: `Can't post as a Short: it's ${Math.round(videoShape.durationSeconds)}s long — Shorts can be at most ${capabilities.shortsMaxDurationSeconds}s`,
+          });
       }
     }
     return errors;
   }
 
+  const shown = (problems: Problem[]) =>
+    problems
+      .filter((problem) => submitAttempted || !problem.missing)
+      .map((problem) => problem.message);
+  const groupErrors = shown(groupProblems);
+
+  let clientBlocked = groupProblems.length > 0;
   const targetErrors = new Map<string, string[]>();
   for (const account of selectedAccounts) {
     const platformCapabilities = capabilitiesByPlatform.get(account.platform);
     if (!platformCapabilities) continue;
-    const errors = targetErrorsFor(account, platformCapabilities);
+    const problems = targetProblemsFor(account, platformCapabilities);
+    if (problems.length > 0) clientBlocked = true;
+    const errors = shown(problems);
     // Rejections from the last submit, until the next one (the backend also
     // checks things the browser can't, like whether the URL is reachable).
     const fromServer = serverErrors?.targets.find(
@@ -289,12 +318,6 @@ export function ComposerPage() {
     const merged = [...new Set([...errors, ...(fromServer ?? [])])];
     if (merged.length > 0) targetErrors.set(account.id, merged);
   }
-  const clientBlocked =
-    selectedAccounts.some((account) => {
-      const platformCapabilities = capabilitiesByPlatform.get(account.platform);
-      return platformCapabilities && targetErrorsFor(account, platformCapabilities).length > 0;
-    }) || groupErrors.length > 0;
-
   // Blocking, with a one-click way out (websitePlan.md §10.1 decision 3).
   const deselectInvalid = () => {
     setSelectedIds((ids) => ids.filter((id) => !targetErrors.has(id)));
@@ -358,6 +381,7 @@ export function ComposerPage() {
       setSettings({});
       setScheduleMode("now");
       setScheduledAt("");
+      setSubmitAttempted(false);
     },
     onError: (err) => {
       if (err && typeof err === "object" && "targets" in err) {
@@ -384,12 +408,14 @@ export function ComposerPage() {
     refetchInterval: (query) => (query.state.data?.status === "PROCESSING" ? 3000 : false),
   });
 
+  // Clickable even with problems left, so the click can reveal what's missing.
   const canSubmit =
-    !!kind &&
-    selectedAccounts.length > 0 &&
-    !clientBlocked &&
-    !createGroup.isPending &&
-    !!capabilities;
+    !!kind && selectedAccounts.length > 0 && !createGroup.isPending && !!capabilities;
+
+  function submit() {
+    setSubmitAttempted(true);
+    if (!clientBlocked) createGroup.mutate();
+  }
 
   // The tightest caption limit among the picks, for the shared counter.
   const tightest = selectedAccounts
@@ -659,11 +685,7 @@ export function ComposerPage() {
               </div>
             )}
 
-            <Button
-              className="self-start"
-              disabled={!canSubmit}
-              onClick={() => createGroup.mutate()}
-            >
+            <Button className="self-start" disabled={!canSubmit} onClick={submit}>
               {submitLabel}
             </Button>
           </CardContent>
