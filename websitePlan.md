@@ -22,6 +22,7 @@
 7. [Database Schema Design](#7-database-schema-design)
 8. [Implementation Roadmap](#8-implementation-roadmap)
 9. [App Authentication, Sessions & Workspaces](#9-app-authentication-sessions--workspaces)
+10. [Multi-Posting (Post Groups) & Scheduling](#10-multi-posting-post-groups--scheduling)
 
 ---
 
@@ -519,7 +520,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 - [ ] Apply the streaming-relay fix (§3, video-only) to `linkedin-poster.json` and `youtube-poster.json` — planned Sep 22, blocked on the Phase 2 S3 bucket item; `linkedin-poster.json` itself (text/image/video, standalone-tested Sep 22) is otherwise a V2-deferred platform (see header) not yet wired to the backend dispatcher.
 - [ ] Stand up n8n in **queue mode**: Postgres for shared workflow storage, Redis for the job queue, `n8n-main` + `n8n-worker` roles. (Current dev setup, Sep 16, is a single non-queue-mode n8n container in `backend/docker-compose.yml` — fine for one platform/low volume, not yet the queue-mode architecture this section describes.)
 - [ ] Deploy n8n main/worker on Kubernetes; configure **KEDA** autoscaling of worker replicas on Redis queue depth.
-- [ ] Build the backend **fan-out dispatcher** (`Promise.allSettled` over selected platforms) and **per-`(user, platform)` rate limiter** (token bucket sized to each platform's quota) — current dispatch (Sep 16) is a single synchronous call to one platform (Facebook), not the multi-platform fan-out this describes.
+- [ ] Build the backend **fan-out dispatcher** (`Promise.allSettled` over selected platforms) and **per-`(user, platform)` rate limiter** (token bucket sized to each platform's quota) — current dispatch (Sep 16) is a single synchronous call to one platform (Facebook), not the multi-platform fan-out this describes. **Planned in detail in §10 (Sep 29)** — fan-out is now per-target BullMQ `publish` jobs rather than an in-request `Promise.allSettled`, so scheduling shares the same path.
 - [x] Build Return Webhook Callback handler on backend (Sep 16) — implements per-callback `PostLogs` insert + direct `Posts.status` update for the single-platform case; cross-callback aggregation across multiple platforms (Section 6) still pending, since nothing dispatches to more than one platform yet.
 - [x] Add `CAROUSEL` support to `threads-poster.json` (Sep 23) — same split/aggregate pattern as `instagram-poster`'s carousel, image-only.
 - [ ] Replace the fixed-`Wait`-then-publish pattern in `instagram-poster.json` (Reels) and `threads-poster.json` (Video) with real container-status polling before calling `media_publish`/`threads_publish` — documented as a known gap in §6 ("Known Gap: Container-Status Polling Before Publish", added Sep 23); not yet built.
@@ -691,6 +692,137 @@ Authorization Code flow + **PKCE (S256)** + **`nonce`**, confidential client (cl
 - Other login methods (would move `google_sub` into an `auth_identities` table).
 
 ---
+
+## 10. Multi-Posting (Post Groups) & Scheduling
+
+> **Status (Sep 29, 2026):** planned, not built. Replaces the single-account composer and the single-platform `POST /api/workspaces/:id/posts`. This is the §1 "Fan-Out Dispatcher" and the §6 "Backend-Side Aggregation" made concrete, with dispatch moved onto BullMQ so scheduling uses the same path.
+
+### 10.1 Decisions (Sep 29, 2026)
+
+1. The media-type-first multi-post flow **replaces** `composer.tsx`. A single-account post is a group with one target.
+2. **Per-platform caption overrides**: one shared caption plus an optional override per target (mainly for Threads' 500-char limit).
+3. Pre-submit validation is **all-or-nothing**: if any target is invalid the whole submit is rejected, and the UI offers a one-click "deselect invalid targets".
+4. **Manual, per-target retry only.** No automatic re-publishing, because a retry after a lost callback can duplicate a live post.
+5. Video to Instagram is always a **Reel**. YouTube Shorts are **double-verified**: the user picks Video or Short, and a Short must also pass a real dimension/duration probe (§10.5).
+6. **Several accounts on the same platform** may be selected (for example two Facebook Pages). If one Instagram account is connected twice (Facebook Page login and Instagram Login share `platformAccountId`, see §2.2), it is **silently posted to once**.
+7. **Stories stay Instagram-only**: choosing "Story" only offers Instagram accounts.
+8. Dispatch goes through **BullMQ**, and **scheduling ships with this feature**.
+9. **No live-post permalinks** yet.
+
+### 10.2 Data model
+
+A new parent `PostGroup` holds what the user wrote once. The existing `Post` stays the per-target row, so the n8n payloads, the `post_id` in callbacks, and the video-status poller keep keying on `Post.id` unchanged.
+
+```
+PostGroup (new)                      Post (existing — one per target account)
+- id, workspaceId, createdByUserId   + groupId -> PostGroup
+- contentKind: TEXT|IMAGE|CAROUSEL|    connectedAccountId
+  VIDEO|STORY                          mediaType   (platform-specific, e.g. IG REELS)
+- caption (shared)                     caption     (effective: override ?? shared)
+- mediaUrls                            platformOptions (YouTube title/privacy/format…)
+- status (aggregated, §10.4)           status
+- scheduledFor (null = now)
+- idempotencyKey (unique per workspace)
+- cancelledAt
+```
+
+- `PostStatus` gains `CANCELLED`. `PostGroup.status` uses the same enum.
+- Migration: hand-written SQL plus `prisma migrate deploy` (never `migrate dev`, which asks for a DB reset here). Every existing `Post` is backfilled into a one-target group, so History reads a single shape.
+- `mediaUrls` stay on `PostGroup` only. `Post` keeps its copy for now so the n8n payload builders don't change, and it is dropped later.
+
+### 10.3 Content kind → per-platform media type
+
+| Kind | Facebook | Instagram | Threads | LinkedIn | YouTube |
+|---|---|---|---|---|---|
+| Text | TEXT | ✗ | TEXT | TEXT | ✗ |
+| Image | IMAGE | IMAGE | IMAGE | IMAGE | ✗ |
+| Carousel | CAROUSEL | CAROUSEL | CAROUSEL | CAROUSEL | ✗ |
+| Video | VIDEO | REELS | VIDEO | VIDEO | VIDEO or SHORTS (user picks, §10.5) |
+| Story | ✗ | STORIES | ✗ | ✗ | ✗ |
+
+This table replaces `SUPPORTED_MEDIA_TYPES` in `routes/posts.ts` and `MEDIA_TYPES_BY_PLATFORM` in `composer.tsx`. It lives in one backend module and is served by `GET /api/capabilities` (kinds, platforms, caption limits, carousel min/max). The frontend renders from that response, so its allowlist can't drift again.
+
+### 10.4 API & dispatch flow
+
+```
+GET    /api/capabilities
+POST   /api/workspaces/:ws/post-groups                            create (now or scheduled)
+GET    /api/workspaces/:ws/post-groups                            History
+GET    /api/workspaces/:ws/post-groups/:id                        live results panel poll
+POST   /api/workspaces/:ws/post-groups/:id/cancel                 scheduled only
+POST   /api/workspaces/:ws/post-groups/:id/targets/:postId/retry  FAILED targets only
+```
+
+**Create** (`{ idempotencyKey, contentKind, caption, mediaUrls, scheduledFor?, targets: [{ connectedAccountId, captionOverride?, youtubeOptions? }] }`):
+
+1. **Idempotency**: a repeated `(workspaceId, idempotencyKey)` returns the existing group (double-click or network retry never publishes twice).
+2. **Validate every target** and collect all errors, not only the first. Checks: account belongs to the workspace and isn't disconnected; token isn't past `tokenExpiresAt` (and for scheduled posts, won't expire before `scheduledFor`); kind supported; effective caption within that platform's limit (Instagram 2,200 chars and 30 hashtags, Threads 500, LinkedIn 3,000, YouTube description 5,000 plus title 100); carousel count within the strictest selected platform's range; YouTube options present; Shorts probe (§10.5); media URL reachable with a matching content type (one HEAD request, not N platform failures). Any error → `400 { targets: [{ connectedAccountId, errors[] }] }`, and nothing is written.
+3. **Dedupe Instagram** targets on `platformAccountId`, silently keeping the first.
+4. **One transaction** creates the group and N `Post` rows (`SCHEDULED` if `scheduledFor` is set, else `PROCESSING`).
+5. **Enqueue one BullMQ `publish` job per target** (`jobId = publish:<postId>:<attempt>`, `delay = scheduledFor - now` or 0, `attempts: 1` per decision 4). The route returns 201 immediately; the frontend polls for results.
+
+**`publish` worker** (per target; concurrency around 10, so one group's targets run in parallel):
+
+- Skip if the group is cancelled or its workspace is soft-deleted (§9.7). The target becomes `CANCELLED`.
+- Re-check the account at send time (it may have been disconnected or its token may have expired since scheduling). A failure here fails that target only.
+- Build the payload and call n8n with `AbortSignal.timeout(15s)`. A throw means a `FAILED` log for this target only.
+- On a successful hand-off, enqueue a **callback-deadline job** (`deadline:<postId>:<attempt>`, around 20 minutes for text/image, longer for video) that marks the target `FAILED — no response from platform workflow` if it is still `PROCESSING`.
+
+**Aggregation**: a single `recomputeGroupStatus(tx, groupId)` runs after every target change (dispatch failure, webhook, video poller, deadline job, cancel). It runs inside the same transaction and first takes `SELECT … FOR UPDATE` on the group row, because two callbacks arriving together would otherwise both read a stale sibling status. Rules:
+
+- any target `SCHEDULED` → `SCHEDULED`
+- any target `PROCESSING` → `PROCESSING`
+- all `CANCELLED` → `CANCELLED`
+- all `PUBLISHED` → `PUBLISHED`
+- all `FAILED` → `FAILED`
+- otherwise → `PARTIAL_FAILURE`
+
+**Webhook hardening** (`routes/webhooks.ts`):
+
+- An unknown `post_id` returns 404, not 500 from `findUniqueOrThrow`.
+- A duplicate callback (the target already has a final log with the same outcome) is a no-op.
+- A **late `SUCCESS` after the deadline job already failed the target overrides it to `PUBLISHED`**, because the post really went out.
+
+**Retry**: only for `FAILED` targets. The old `PostLog` rows are kept as attempt history, then a new `publish` job is enqueued. If the failure was the callback-deadline timeout, the UI warns first: "this may already be live — check the platform before retrying".
+
+### 10.5 YouTube Shorts double verification
+
+- **Frontend (instant feedback)**: load the URL into a hidden `<video preload="metadata">` and read `videoWidth`, `videoHeight` and `duration` on `loadedmetadata`. Reading metadata needs no CORS (only canvas pixel reads do). If the video isn't vertical/square or runs over 3 minutes, the "Short" choice shows an error.
+- **Backend (authoritative)**: `ffprobe -v error -select_streams v:0 -show_entries stream=width,height:stream_side_data=rotation:format=duration -of json <url>`, with a timeout. Swap width and height when rotation is ±90 (phone videos are often stored landscape with a rotation flag). Accept only `height >= width` and `duration <= 180s`. An unreachable URL or a probe failure is a validation error, not a silent pass.
+- ffprobe becomes a runtime dependency of the backend image.
+- The same probe later feeds §3 "Per-Platform Media Fitting" step 1 (aspect-ratio warnings for Instagram and others).
+- If the user picks "Video" but the file is vertical and at most 3 minutes, show an info note: YouTube will likely classify it as a Short anyway.
+
+### 10.6 Scheduling
+
+- **Timezone**: stored in UTC; picked and displayed in the browser's local timezone.
+- **Allowed range (default)**: at least 2 minutes and at most 90 days ahead.
+- **Durability**: Postgres is the source of truth and BullMQ delayed jobs are only the trigger. Redis should run with AOF persistence. A reconciler on startup and every 5 minutes finds `SCHEDULED` targets whose `scheduledFor` has passed and that have no pending job, then enqueues them, so a Redis flush or an overlong downtime can't silently drop posts.
+- **Late firing (default, to confirm)**: a job running more than 1 hour past `scheduledFor` (for example the backend was down) fails that target with "missed its scheduled time" instead of posting stale content.
+- **Cancel**: allowed while the group is `SCHEDULED`. It removes the pending jobs and marks the targets `CANCELLED`. A target already sent can't be cancelled.
+- **Edit (default, to confirm)**: V1 edits a scheduled post as cancel-and-recreate, with the form pre-filled.
+- **Re-checked at send time**: account connection, token expiry and media URL reachability (a hosted file may have been deleted after scheduling).
+
+### 10.7 Frontend
+
+1. **Kind**: cards for Text, Image, Carousel, Video and Story.
+2. **Accounts**: checkboxes grouped by platform. Unsupported, expired or disconnected accounts are shown disabled with the reason.
+3. **Content**: shared caption and media URL(s), then one tab per selected account for its caption override, YouTube fields (title, Video/Short, privacy, category, made-for-kids, tags) and per-platform limit counters.
+4. **When**: "Post now" or a date-time picker.
+5. **Submit**: a 400 lists the errors per target and offers "Deselect invalid targets". On success, a live results panel on the same page shows one row per target (spinner, then ✅, or ❌ with the error and Retry), polling `GET /post-groups/:id` every 3s until nothing is `PROCESSING`.
+6. **History**: one card per group with an aggregated pill (Scheduled, Processing, Published, Partial, Failed, Cancelled) that expands to per-target rows. The 5s refetch runs only while some group is `SCHEDULED` or `PROCESSING` and is due soon.
+
+### 10.8 Build order
+
+1. Schema, migration and backfill.
+2. Capabilities module and `GET /api/capabilities`.
+3. `publish` queue and worker, callback-deadline jobs, and `recomputeGroupStatus`; the webhook and video poller switched over, plus webhook hardening.
+4. `POST /post-groups` (validation, Instagram dedupe, idempotency, ffprobe) plus list, get, cancel and retry.
+5. Scheduling reconciler.
+6. Frontend: new composer flow and results panel, then grouped History with retry and cancel.
+7. Remove the old `POST /posts` and old composer code; update history.md.
+
+---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
 *Updated: 2026-09-10 | Facebook `MULTI_PHOTO` (carousel) confirmed tested/working (§5). Full §2 OAuth detail added for all 5 platforms. `ConnectedAccounts` schema (§7) revised for the three token refresh shapes (`NONE`/`SLIDING_WINDOW`/`ON_DEMAND`). Backend tech stack finalized (§1): Bun + Hono, Docker Postgres + Prisma (driver adapter), Vite + React, BullMQ + ioredis (bunqueue as fallback), Bun native Redis client for pub/sub, Bun native S3 client for object storage. UploadThing evaluated and rejected.*  
@@ -708,3 +840,4 @@ Authorization Code flow + **PKCE (S256)** + **`nonce`**, confidential client (cl
 *Updated: 2026-09-23 | **YouTube becomes the fifth platform wired to the real backend** (§2.4, §5, §6, §7). Google OAuth connect flow (`lib/youtube.ts`, `routes/auth/youtube.ts`) with `access_type=offline&prompt=consent`, `youtube.upload` + `youtube.readonly` scopes, and callback guards for an unticked upload scope or a channel-less Google account. First real `ON_DEMAND` refresh implementation (`service/youtube-token.ts`): stored access token reused while >5 min from expiry, otherwise refreshed and persisted; an `invalid_grant` nulls the refresh token and surfaces `needsReconnect`. Schema: `ConnectionMethod.YOUTUBE_LOGIN`, `MediaType.SHORTS`, new nullable `Posts.platform_options` JSON column (migration `20260923040000_add_youtube`, hand-written and applied via `migrate deploy` to avoid the pre-existing `_prisma_migrations` drift forcing a reset). `youtube-poster.json` gained the `x-callback-secret` header plus `made_for_kids`/`tags`/`category_id` payload fields (category no longer hardcoded to 22). YouTube joins Facebook/LinkedIn on the **single shared video-status queue** — kept shared rather than split per platform (§6) — refactored to a per-platform status-check table and a `POLL_POLICY` record with a custom BullMQ backoff; YouTube polls on capped exponential backoff (~11 checks / ~33 min vs. 60 fixed). Frontend: Connect YouTube button + error toasts, composer YouTube fields (title, visibility, category, made-for-kids, tags; caption relabelled "Description"), and the history page shows the video title. Not yet confirmed with a live end-to-end post; unaudited-project uploads are forced private (§2.4).*
 *Updated: 2026-09-24 | Planning only: new §9 "App Authentication, Sessions & Workspaces". Google-only sign-in (OIDC, auth code + PKCE + nonce, separate Google Cloud project), opaque session cookies backed by Redis rather than stateless JWTs (immediate revocation), 7-day sliding sessions. Workspace tenancy for agencies (individuals get an auto-created Personal workspace), email invites auto-accepted on Google sign-in, no roles in V1 beyond workspace owner. Single-origin dev setup — the one free ngrok domain repointed at Vite, which proxies `/api` to the backend, so no platform redirect URIs change. §7 flagged as pending the workspace migration; Phase 1 roadmap item added.*
 *Updated: 2026-09-29 | §9.7 Phase E backend built: OWNER/ADMIN/MEMBER roles (owner derived from `owner_user_id`, `memberships.role` = ADMIN|MEMBER), owner-only member/invite management, ADMIN manages connected accounts, one non-transferable owner who cannot leave, single-user undeletable Personal workspace (`is_personal`), soft delete (`deleted_at`) hiding a workspace everywhere via the membership check, invites to existing accounts applied immediately, 20/hour per-user invite rate limit. §9.1 rows revised (no longer "no roles in V1"); §9.8 gains a V2 per-tier member cap and a list of possible future roles.*
+*Updated: 2026-09-29 | Planning only: new §10 "Multi-Posting (Post Groups) & Scheduling" — `PostGroup` parent over per-target `Post` rows, media-kind-first composer replacing the old one, per-platform caption overrides, all-or-nothing validation with one-click deselect, per-target BullMQ publish jobs (also used for scheduling), locked `recomputeGroupStatus` aggregation, callback-deadline jobs, webhook idempotency, manual per-target retry, ffprobe-verified YouTube Shorts, silent Instagram double-connection dedupe.*
