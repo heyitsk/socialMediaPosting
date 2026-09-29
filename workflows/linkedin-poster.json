@@ -43,7 +43,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'linkedin',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    author_urn: body.token && body.token.author_urn,\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'linkedin',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    author_urn: body.token && body.token.author_urn,\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url\n  }\n}];"
       }
     },
     {
@@ -206,7 +206,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-init-image-upload",
@@ -246,7 +247,8 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn } }) }}",
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-download-image",
@@ -268,7 +270,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-merge-image",
@@ -315,7 +318,8 @@
         "contentType": "binaryData",
         "inputDataFieldName": "data",
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-publish-image",
@@ -361,7 +365,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-split-carousel-urls",
@@ -375,7 +380,8 @@
       "parameters": {
         "jsCode": "// Fan media_urls[] out into one item per photo, so the parallel init/download\n// branches below run once per photo (n8n runs a node once per input item),\n// same pattern as the video multi-part fix. LinkedIn's MultiImage content type\n// needs 2-20 images — not strictly validated here, LinkedIn will reject otherwise.\nconst req = $('Parse Request').first().json;\nconst urls = req.media_urls || [];\nreturn urls.map((url, i) => ({ json: { media_url: url, carousel_index: i } }));"
       },
-      "notes": "One item per media_urls[] entry. LinkedIn's MultiImage requires 2-20 images."
+      "notes": "One item per media_urls[] entry. LinkedIn's MultiImage requires 2-20 images.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-init-image-upload-carousel",
@@ -416,7 +422,8 @@
         "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn } }) }}",
         "options": {}
       },
-      "notes": "Runs once per item from Split Carousel URLs — opens one upload session per photo. Doesn't need per-item data, just needs to run N times."
+      "notes": "Runs once per item from Split Carousel URLs — opens one upload session per photo. Doesn't need per-item data, just needs to run N times.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-download-image-carousel",
@@ -438,7 +445,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-merge-image-carousel",
@@ -486,7 +494,8 @@
         "inputDataFieldName": "data",
         "options": {}
       },
-      "notes": "Runs once per photo item, same fan-out as the video part upload."
+      "notes": "Runs once per photo item, same fan-out as the video part upload.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-collect-carousel-images",
@@ -499,7 +508,8 @@
       ],
       "parameters": {
         "jsCode": "// One item per photo went through LI Init Image Upload (Carousel), in\n// media_urls[] order — pull each item's image urn back out in that same\n// order to build the multiImage.images array finalize/publish needs.\nconst initItems = $('LI Init Image Upload (Carousel)').all();\nconst images = initItems.map((item) => ({ id: item.json.value.image }));\nreturn [{ json: { images } }];"
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-publish-carousel",
@@ -546,7 +556,8 @@
           }
         }
       },
-      "notes": "content.multiImage is LinkedIn's organic-only multi-photo post type (2-20 images) — distinct from content.carousel, which the Posts API restricts to sponsored/ads posts only."
+      "notes": "content.multiImage is LinkedIn's organic-only multi-photo post type (2-20 images) — distinct from content.carousel, which the Posts API restricts to sponsored/ads posts only.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-probe-video-size",
@@ -569,7 +580,8 @@
           }
         }
       },
-      "notes": "HEAD request just to read Content-Length — LinkedIn's videos initializeUpload requires fileSizeBytes upfront, unlike YouTube's resumable upload."
+      "notes": "HEAD request just to read Content-Length — LinkedIn's videos initializeUpload requires fileSizeBytes upfront, unlike YouTube's resumable upload.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-init-video-upload",
@@ -610,7 +622,8 @@
         "jsonBody": "={{ JSON.stringify({ initializeUploadRequest: { owner: $('Parse Request').first().json.author_urn, fileSizeBytes: parseInt($json.headers['content-length'] || $json.headers['Content-Length'] || '0', 10), uploadCaptions: false, uploadThumbnail: false } }) }}",
         "options": {}
       },
-      "notes": "Returns 1+ uploadInstructions entries — 1 for files under LinkedIn's 4,194,304-byte single-part limit, more (byte-range parts) for larger files. Split Video Into Parts handles both cases uniformly."
+      "notes": "Returns 1+ uploadInstructions entries — 1 for files under LinkedIn's 4,194,304-byte single-part limit, more (byte-range parts) for larger files. Split Video Into Parts handles both cases uniformly.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-download-video",
@@ -632,7 +645,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-merge-video",
@@ -661,7 +675,8 @@
       "parameters": {
         "jsCode": "// Merge Video Upload gives us one item: json = LI Init Video Upload's response\n// (value.uploadInstructions[]), binary.data = the full downloaded video file.\n// LinkedIn splits uploads over 4,194,304 bytes into multiple byte-range parts —\n// fan this out into one item per part, each carrying its own byte-range slice\n// of the video as binary data, so the next HTTP Request node PUTs each part\n// to its own uploadUrl (n8n runs a node once per input item automatically).\nconst item = $input.first();\nconst instructions = item.json.value.uploadInstructions;\nconst buffer = await this.helpers.getBinaryDataBuffer(0, 'data');\nconst mimeType = (item.binary && item.binary.data && item.binary.data.mimeType) || 'video/mp4';\n\nconst output = [];\nfor (let i = 0; i < instructions.length; i++) {\n  const part = instructions[i];\n  const chunk = buffer.subarray(part.firstByte, part.lastByte + 1);\n  const binaryData = await this.helpers.prepareBinaryData(chunk, `part-${i}.bin`, mimeType);\n  output.push({\n    json: {\n      partIndex: i,\n      uploadUrl: part.uploadUrl,\n      firstByte: part.firstByte,\n      lastByte: part.lastByte\n    },\n    binary: { data: binaryData }\n  });\n}\nreturn output;"
       },
-      "notes": "Fans out into 1 item per uploadInstructions entry (usually 1, but LinkedIn splits files over 4 MiB into multiple byte-range parts). Uses this.helpers.getBinaryDataBuffer/prepareBinaryData per n8n's Code node cookbook."
+      "notes": "Fans out into 1 item per uploadInstructions entry (usually 1, but LinkedIn splits files over 4 MiB into multiple byte-range parts). Uses this.helpers.getBinaryDataBuffer/prepareBinaryData per n8n's Code node cookbook.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-upload-video-binary",
@@ -700,7 +715,8 @@
           }
         }
       },
-      "notes": "Runs once per part item from Split Video Into Parts (n8n processes one output per input item). Full Response mode is required so each part's ETag response header can be collected for uploadedPartIds."
+      "notes": "Runs once per part item from Split Video Into Parts (n8n processes one output per input item). Full Response mode is required so each part's ETag response header can be collected for uploadedPartIds.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-collect-video-etags",
@@ -713,7 +729,8 @@
       ],
       "parameters": {
         "jsCode": "// One item per uploaded part, in the same order Split Video Into Parts emitted\n// them in — collapse into a single ordered uploadedPartIds array for finalizeUpload.\nconst items = $input.all();\nconst uploadedPartIds = items.map((item) => {\n  const headers = item.json.headers || {};\n  return headers['etag'] || headers['Etag'] || headers['ETag'];\n});\nreturn [{ json: { uploadedPartIds } }];"
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-finalize-video-upload",
@@ -753,7 +770,8 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ finalizeUploadRequest: { video: $('LI Init Video Upload').first().json.value.video, uploadToken: '', uploadedPartIds: $('Collect Video Part ETags').first().json.uploadedPartIds } }) }}",
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "li-wait-video",
@@ -814,7 +832,8 @@
             }
           }
         }
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "build-error-unsupported",
@@ -840,7 +859,8 @@
       ],
       "parameters": {
         "jsCode": "const req = $('Parse Request').first().json;\nconst headers = $json.headers || {};\nconst postId = headers['x-restli-id'] || headers['X-RestLi-Id'] || headers['x-linkedin-id'] || null;\n\n// The video's own urn:li:video:... isn't the same thing as postId (the\n// created post/share's urn) — the backend's video-status poller needs both:\n// one id to poll (GET /rest/videos/{urn}) and a different id to log as the\n// history page's platform_post_id once that poll confirms it's ready.\n// Only the VIDEO branch has a video urn to send back.\nlet mediaUrn = null;\nif (req.media_type === 'VIDEO') {\n  mediaUrn = $('LI Init Video Upload').first().json.value.video;\n}\n\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'SUCCESS',\n    platform_post_id: postId,\n    media_urn: mediaUrn,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "send-callback",
@@ -872,30 +892,6 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "error-trigger",
-      "name": "Error Trigger",
-      "type": "n8n-nodes-base.errorTrigger",
-      "typeVersion": 1,
-      "position": [
-        -260,
-        900
-      ],
-      "parameters": {}
-    },
-    {
-      "id": "build-error-from-trigger",
-      "name": "Build Error Result (From Trigger)",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -40,
-        900
-      ],
-      "parameters": {
-        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'linkedin',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
-      }
-    },
-    {
       "id": "send-error-callback",
       "name": "Send Error Callback",
       "type": "n8n-nodes-base.httpRequest",
@@ -923,6 +919,19 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reached via the error output of any API/Code node. Runs once for all\n// items so a failed carousel child sends a single FAILED callback.\nconst req = $('Parse Request').first().json;\nconst err = $input.first().json.error;\nconst msg = (typeof err === 'string' ? err : err?.message) || 'Unknown error';\nconst detail = typeof err === 'object' && err?.description ? ' - ' + err.description : '';\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'linkedin',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: msg + detail + ' (node: ' + $prevNode.name + ')',\n    callback_url: req.callback_url\n  }\n}];"
+      },
+      "id": "build-error-node-failure",
+      "name": "Build Error Result (Node Failure)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        900
+      ]
     }
   ],
   "connections": {
@@ -1010,6 +1019,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1018,6 +1034,13 @@
         [
           {
             "node": "Merge Carousel Image Upload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -1031,6 +1054,13 @@
             "node": "Merge Carousel Image Upload",
             "type": "main",
             "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1054,6 +1084,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1062,6 +1099,13 @@
         [
           {
             "node": "LI Publish Carousel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -1076,6 +1120,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1084,6 +1135,13 @@
         [
           {
             "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -1098,6 +1156,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1108,6 +1173,13 @@
             "node": "Merge Image Upload",
             "type": "main",
             "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1131,6 +1203,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1139,6 +1218,13 @@
         [
           {
             "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -1153,6 +1239,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1161,6 +1254,13 @@
         [
           {
             "node": "Merge Video Upload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -1174,6 +1274,13 @@
             "node": "Merge Video Upload",
             "type": "main",
             "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -1197,6 +1304,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1205,6 +1319,13 @@
         [
           {
             "node": "Collect Video Part ETags",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -1219,6 +1340,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1227,6 +1355,13 @@
         [
           {
             "node": "Wait 30s (Video Processing)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -1252,6 +1387,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1274,21 +1416,17 @@
             "type": "main",
             "index": 0
           }
-        ]
-      ]
-    },
-    "Error Trigger": {
-      "main": [
+        ],
         [
           {
-            "node": "Build Error Result (From Trigger)",
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Build Error Result (From Trigger)": {
+    "Build Error Result (Node Failure)": {
       "main": [
         [
           {

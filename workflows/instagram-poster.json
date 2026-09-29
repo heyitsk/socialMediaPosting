@@ -13,7 +13,7 @@
       "parameters": {
         "width": 640,
         "height": 420,
-        "content": "## instagram-poster\nWebhook-triggered, per-platform posting workflow. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\n**After importing:** activate the workflow, copy the Webhook node's *Production URL* (or use the Test URL while the editor is open in listen mode), then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/instagram-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test001\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"instagram\",\n    \"content\": \"Test caption #smposting\",\n    \"media_type\": \"IMAGE\",\n    \"media_urls\": [\"https://images.unsplash.com/photo-XXXX\"],\n    \"token\": {\n      \"ig_business_id\": \"YOUR_IG_BUSINESS_ID\",\n      \"access_token\": \"YOUR_LONG_LIVED_TOKEN\",\n      \"graph_host\": \"https://graph.facebook.com\"\n    },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `IMAGE | CAROUSEL | REELS | STORIES`. For `CAROUSEL`, `media_urls` should have 2+ entries. `callback_url` is optional \u2014 defaults to the backend's future `/api/webhooks/n8n-callback` route; point it at webhook.site while there's no backend yet to see the result payload.\n\n`token.graph_host` selects which Graph API host the access token is valid against: `https://graph.facebook.com` for Instagram accounts linked via a Facebook Page, `https://graph.instagram.com` for accounts connected via standalone Instagram Login. Defaults to `https://graph.facebook.com` if omitted."
+        "content": "## instagram-poster\nWebhook-triggered, per-platform posting workflow. Credentials come from the request payload only \u2014 never stored in n8n (see websitePlan.md \u00a75).\n\n**After importing:** activate the workflow, copy the Webhook node's *Production URL* (or use the Test URL while the editor is open in listen mode), then:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/instagram-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test001\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"instagram\",\n    \"content\": \"Test caption #smposting\",\n    \"media_type\": \"IMAGE\",\n    \"media_urls\": [\"https://images.unsplash.com/photo-XXXX\"],\n    \"token\": {\n      \"ig_business_id\": \"YOUR_IG_BUSINESS_ID\",\n      \"access_token\": \"YOUR_LONG_LIVED_TOKEN\",\n      \"graph_host\": \"https://graph.facebook.com\"\n    },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`media_type` accepts `IMAGE | CAROUSEL | REELS | STORIES`. For `CAROUSEL`, `media_urls` should have 2+ entries. `callback_url` is required \u2014 the backend always sends its `/api/webhooks/n8n-callback` URL; for manual tests point it at webhook.site to see the result payload.\n\n`token.graph_host` selects which Graph API host the access token is valid against: `https://graph.facebook.com` for Instagram accounts linked via a Facebook Page, `https://graph.instagram.com` for accounts connected via standalone Instagram Login. Defaults to `https://graph.facebook.com` if omitted."
       }
     },
     {
@@ -43,7 +43,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'instagram',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    ig_user_id: body.token && body.token.ig_business_id,\n    access_token: body.token && body.token.access_token,\n    graph_host: (body.token && body.token.graph_host) || 'https://graph.facebook.com',\n    callback_url: body.callback_url || 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'instagram',\n    content: body.content || '',\n    media_type: String(body.media_type || '').toUpperCase(),\n    media_urls: body.media_urls || [],\n    ig_user_id: body.token && body.token.ig_business_id,\n    access_token: body.token && body.token.access_token,\n    graph_host: (body.token && body.token.graph_host) || 'https://graph.facebook.com',\n    callback_url: body.callback_url\n  }\n}];"
       }
     },
     {
@@ -193,7 +193,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-wait-photo",
@@ -237,7 +238,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-split-urls",
@@ -284,7 +286,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-aggregate-children",
@@ -343,7 +346,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-wait-carousel",
@@ -387,7 +391,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-create-reel",
@@ -424,7 +429,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-wait-reel",
@@ -468,7 +474,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-create-story",
@@ -502,7 +509,8 @@
         },
         "options": {}
       },
-      "notes": "Image stories only for v1. Video stories need video_url + a longer wait before publish."
+      "notes": "Image stories only for v1. Video stories need video_url + a longer wait before publish.",
+      "onError": "continueErrorOutput"
     },
     {
       "id": "ig-wait-story",
@@ -546,7 +554,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "build-error-unsupported",
@@ -572,7 +581,8 @@
       ],
       "parameters": {
         "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'instagram',\n    status: 'SUCCESS',\n    platform_post_id: $json.id,\n    error: null,\n    callback_url: req.callback_url\n  }\n}];"
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "send-callback",
@@ -604,30 +614,6 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "error-trigger",
-      "name": "Error Trigger",
-      "type": "n8n-nodes-base.errorTrigger",
-      "typeVersion": 1,
-      "position": [
-        -260,
-        700
-      ],
-      "parameters": {}
-    },
-    {
-      "id": "build-error-from-trigger",
-      "name": "Build Error Result (From Trigger)",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        -40,
-        700
-      ],
-      "parameters": {
-        "jsCode": "const runData = $json.execution?.data?.executionData?.resultData?.runData;\nconst parsed = runData?.['Parse Request']?.[0]?.data?.main?.[0]?.[0]?.json || {};\nreturn [{\n  json: {\n    post_id: parsed.post_id ?? null,\n    platform: 'instagram',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: ($json.execution?.error?.message || 'Unknown error') + ' (last node: ' + ($json.execution?.lastNodeExecuted || 'unknown') + ')',\n    callback_url: parsed.callback_url ?? 'http://localhost:5000/api/webhooks/n8n-callback'\n  }\n}];"
-      }
-    },
-    {
       "id": "send-error-callback",
       "name": "Send Error Callback",
       "type": "n8n-nodes-base.httpRequest",
@@ -655,6 +641,19 @@
         }
       },
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reached via the error output of any API/Code node. Runs once for all\n// items so a failed carousel child sends a single FAILED callback.\nconst req = $('Parse Request').first().json;\nconst err = $input.first().json.error;\nconst msg = (typeof err === 'string' ? err : err?.message) || 'Unknown error';\nconst detail = typeof err === 'object' && err?.description ? ' - ' + err.description : '';\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'instagram',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: msg + detail + ' (node: ' + $prevNode.name + ')',\n    callback_url: req.callback_url\n  }\n}];"
+      },
+      "id": "build-error-node-failure",
+      "name": "Build Error Result (Node Failure)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        700
+      ]
     }
   ],
   "connections": {
@@ -727,6 +726,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -746,6 +752,13 @@
         [
           {
             "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -771,6 +784,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -790,6 +810,13 @@
         [
           {
             "node": "Wait 5s (Carousel)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -815,6 +842,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -823,6 +857,13 @@
         [
           {
             "node": "Wait 60s (Reel)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -848,6 +889,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -856,6 +904,13 @@
         [
           {
             "node": "Wait 5s (Story)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
@@ -881,6 +936,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -903,21 +965,17 @@
             "type": "main",
             "index": 0
           }
-        ]
-      ]
-    },
-    "Error Trigger": {
-      "main": [
+        ],
         [
           {
-            "node": "Build Error Result (From Trigger)",
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Build Error Result (From Trigger)": {
+    "Build Error Result (Node Failure)": {
       "main": [
         [
           {
