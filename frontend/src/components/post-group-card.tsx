@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { RotateCw } from "lucide-react";
 import { toast } from "sonner";
+import { PlatformMark } from "@/components/platform-mark";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -61,10 +62,10 @@ export function PostGroupCard({ group, workspaceId }: { group: PostGroup; worksp
   const hasScheduled = group.targets.some((target) => target.status === "SCHEDULED");
 
   return (
-    <Card className="max-w-2xl">
-      <CardHeader className="flex flex-row items-start justify-between gap-2">
-        <div className="flex flex-col gap-1">
-          <CardTitle className="text-base font-medium">
+    <Card className="overflow-hidden">
+      <CardHeader className="flex flex-col gap-3 border-b bg-muted/20 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-col gap-1">
+          <CardTitle className="text-base">
             {CONTENT_KIND_LABELS[group.contentKind]} to {group.targets.length}{" "}
             {group.targets.length === 1 ? "account" : "accounts"}
           </CardTitle>
@@ -75,7 +76,7 @@ export function PostGroupCard({ group, workspaceId }: { group: PostGroup; worksp
             · by {group.createdBy.name}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {hasScheduled && (
             <Button
               variant="outline"
@@ -89,11 +90,13 @@ export function PostGroupCard({ group, workspaceId }: { group: PostGroup; worksp
           <Badge variant={STATUS_VARIANT[group.status]}>{STATUS_LABELS[group.status]}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3 text-sm">
+      <CardContent className="p-0 text-sm">
         {group.caption && (
-          <p className="line-clamp-3 whitespace-pre-wrap text-muted-foreground">{group.caption}</p>
+          <p className="line-clamp-3 whitespace-pre-wrap border-b px-5 py-4 leading-6 text-muted-foreground sm:px-6">
+            {group.caption}
+          </p>
         )}
-        <ul className="flex flex-col divide-y rounded-md border">
+        <ul className="flex flex-col divide-y">
           {group.targets.map((target) => (
             <TargetRow
               key={target.id}
@@ -122,16 +125,21 @@ function TargetRow({
 }) {
   const error = latestError(target);
   return (
-    <li className="flex flex-col gap-1 px-3 py-2">
-      <div className="flex items-center justify-between gap-2">
-        <span>
-          <span className="font-medium">{PLATFORM_LABELS[target.platform]}</span> ·{" "}
-          {target.accountName}{" "}
-          <span className="text-xs text-muted-foreground">
-            ({MEDIA_TYPE_LABELS[target.mediaType]})
-          </span>
-        </span>
-        <div className="flex items-center gap-2">
+    <li className="flex flex-col gap-3 px-5 py-4 transition-colors hover:bg-muted/20 sm:px-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <PlatformMark platform={target.platform} className="size-9" />
+          <div className="min-w-0">
+            <p className="font-medium text-foreground">
+              {PLATFORM_LABELS[target.platform]}{" "}
+              <span className="text-xs font-normal text-muted-foreground">
+                ({MEDIA_TYPE_LABELS[target.mediaType]})
+              </span>
+            </p>
+            <p className="truncate text-sm text-muted-foreground">{target.accountName}</p>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           {target.status === "FAILED" && (
             <Button variant="outline" size="sm" disabled={retrying} onClick={onRetry}>
               <RotateCw className="size-3.5" />
@@ -141,17 +149,30 @@ function TargetRow({
           <Badge variant={STATUS_VARIANT[target.status]}>{STATUS_LABELS[target.status]}</Badge>
         </div>
       </div>
-      {target.youtubeTitle && <p className="text-xs">{target.youtubeTitle}</p>}
-      {target.caption !== sharedCaption && (
-        <p className="line-clamp-2 text-xs text-muted-foreground">Own caption: {target.caption}</p>
-      )}
-      {error && (
-        <p className="line-clamp-3 break-words text-xs text-destructive" title={error}>
-          {error}
-        </p>
-      )}
-      {target.attempt > 1 && (
-        <p className="text-xs text-muted-foreground">Attempt {target.attempt}</p>
+      {(target.youtubeTitle || target.caption !== sharedCaption || error || target.attempt > 1) && (
+        <div className="space-y-2 sm:pl-12">
+          {target.youtubeTitle && (
+            <p className="font-medium text-foreground">{target.youtubeTitle}</p>
+          )}
+          {target.caption !== sharedCaption && (
+            <p className="line-clamp-2 text-xs text-muted-foreground">
+              Own caption: {target.caption}
+            </p>
+          )}
+          {error && (
+            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-destructive">
+                Publishing error
+              </p>
+              <p className="mt-1 line-clamp-3 break-words text-sm text-destructive" title={error}>
+                {error}
+              </p>
+            </div>
+          )}
+          {target.attempt > 1 && (
+            <p className="text-xs text-muted-foreground">Attempt {target.attempt}</p>
+          )}
+        </div>
       )}
     </li>
   );
