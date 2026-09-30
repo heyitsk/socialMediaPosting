@@ -1,3 +1,4 @@
+import { trace } from "@opentelemetry/api";
 import { createMiddleware } from "hono/factory";
 import { HTTPException } from "hono/http-exception";
 import { type EffectiveRole, getRole } from "../db/workspaces";
@@ -14,6 +15,8 @@ export const requireAuth = createMiddleware<AuthEnv>(async (c, next) => {
     throw new HTTPException(401, { message: "Not signed in" });
   }
   c.set("userId", userId);
+  // Span attributes only — never metric labels (websitePlan.md §14.6).
+  trace.getActiveSpan()?.setAttribute("enduser.id", userId);
   await next();
 });
 
@@ -30,6 +33,7 @@ export const requireWorkspace = createMiddleware<WorkspaceEnv>(async (c, next) =
   }
   c.set("workspaceId", workspaceId);
   c.set("role", role);
+  trace.getActiveSpan()?.setAttribute("smposting.workspace_id", workspaceId);
   await next();
 });
 

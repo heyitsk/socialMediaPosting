@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Sep 30, 2026):** planning only. Nothing built. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+> **Status (Oct 1, 2026):** step 1 built (§14.11.1). Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1510,6 +1510,25 @@ For a "post now" target the result is one trace that reads: `POST post-groups` �
 
 New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@opentelemetry/exporter-{trace,metrics,logs}-otlp-http`, `@opentelemetry/sdk-logs`, `@hono/otel`, `@prisma/instrumentation@6.19.3`, `bullmq-otel`, `pino`. Frontend `@grafana/faro-web-sdk`, `@grafana/faro-web-tracing`.
 
+### 14.11.1 Step 1 as built (Oct 1, 2026)
+
+- **`backend/src/otel.ts`:** `NodeSDK` (0.222) with OTLP HTTP trace and metric exporters (metrics every 30 s), `PrismaInstrumentation`, and a resource of `service.name=smposting-backend`, `deployment.environment.name`, `process.runtime.name=bun`. It only starts when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and `OTEL_SDK_DISABLED` isn't `true`, and it flushes on SIGTERM/SIGINT. Imported first in `index.ts`; `app.ts` doesn't import it, so `bun test` and `bun run openapi` export nothing.
+- **Two span processors:**
+  - `RedactUrlProcessor` strips the query string from `url.full` when the span starts.
+  - `ClientErrorStatusProcessor`: `@hono/otel` marks a span ERROR whenever the handler threw, which includes every `HTTPException`. So a 401 from `/api/me` would count as a failure. This processor hands the exporter a copy of SERVER spans with a 4xx status and the status cleared. 5xx stays ERROR.
+- **`app.ts`:** `httpInstrumentationMiddleware()` (`@hono/otel` 1.2) is the first `app.use`. No headers are captured. Span names and the `http.route` label use the Hono route pattern.
+- **`middleware/auth.ts`:** `enduser.id` and `smposting.workspace_id` are set on the request span.
+- **`docker-compose.yml`:** `otel-lgtm` pinned to `grafana/otel-lgtm:0.11.10` (Grafana 12.1, Tempo 2.8, Loki 3.5, Prometheus 3.5). Grafana is on host port **3001** (3000 is often taken), login admin/admin. No volume, so local telemetry resets with the container. The image is 1.84 GB.
+- **`.env.example`:** `OTEL_EXPORTER_OTLP_ENDPOINT` (empty = off) and `OTEL_RESOURCE_ATTRIBUTES`.
+- **Spike result under Bun 1.3.13 (exit check passed):** a `POST /api/webhooks/n8n-callback?code=…&state=…` sent with a fixed `traceparent` produced:
+  - a Hono SERVER span whose parent is the incoming span id, so an incoming trace is continued. This is what n8n's callback will rely on.
+  - a `url.full` with the query string removed.
+  - Prisma spans (`prisma:client:operation` → `prisma:engine:db_query` → `prisma:engine:js:query:sql`) nested under the Hono span. The SQL text is present (prisma#27666 doesn't hit us).
+  - on a `GET /api/me` 401 span, the status UNSET.
+  - `http_server_request_duration_seconds` in Prometheus labelled by `http_route` and `http_response_status_code`.
+  - `bun test`: 51/51.
+- **Not yet:** the reconcilers and media cleaner run Prisma outside any request, so their queries show up as root `prisma:client:operation` traces every tick. Step 3 wraps each tick in its own span.
+
 ### 14.12 Risks
 
 - **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
@@ -1551,3 +1570,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
 *Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*
 *Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11. §14.10 decisions: Faro in the first build, n8n node spans on, Faro off locally, scheduled (delayed) sends get their own trace with a span link back to the create request.*
+*Updated: 2026-10-01 | §14 step 1 built (§14.11.1): `backend/src/otel.ts` (NodeSDK, OTLP traces + metrics, Prisma instrumentation, query-string redaction, 4xx not marked as errors), `@hono/otel` as the first middleware, user/workspace span attributes, `otel-lgtm` in compose (Grafana on :3001). Spike under Bun passed: incoming `traceparent` continued, Prisma spans nested under the request span with SQL text, HTTP metrics in Prometheus. 51/51 tests pass.*

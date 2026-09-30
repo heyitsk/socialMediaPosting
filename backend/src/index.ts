@@ -1,3 +1,5 @@
+// Must stay first: starts OpenTelemetry before @prisma/client loads.
+import "./otel";
 import { app } from "./app";
 import { env } from "./lib/env";
 import { startPublishWorker, startScheduleReconciler } from "./queue/publish-worker";

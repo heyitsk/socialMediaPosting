@@ -48,6 +48,20 @@ services:
     volumes:
       - n8n_data:/home/node/.n8n
 
+  # Local observability backend (websitePlan.md §14): an OTLP collector feeding
+  # Tempo (traces), Loki (logs) and Prometheus (metrics), with Grafana on top.
+  # Dev only — production sends the same OTLP to Grafana Cloud. Point the
+  # backend at it with OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318.
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.11.10
+    container_name: smposting-otel-lgtm
+    restart: unless-stopped
+    ports:
+      - "3001:3000" # Grafana (admin/admin); host 3000 is often taken
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    # No volume: local telemetry is throwaway and resets with the container.
+
 volumes:
   smposting_postgres_data:
   smposting_redis_data:
