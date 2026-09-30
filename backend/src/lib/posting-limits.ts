@@ -19,6 +19,11 @@ export const DUPLICATE_WINDOW_MS = DAY_MS;
 // project quota is shared by every channel of every workspace).
 export const APP_WIDE_ACCOUNT_ID = "*";
 
+// A post may be pushed back this far past the time asked for without asking
+// the user; past it, the target is refused with the next free time
+// (websitePlan.md §13.9 decision 1).
+export const AUTO_DELAY_MS = HOUR_MS;
+
 // ROLLING_24H: any 24 hours (Meta). UTC_DAY / PACIFIC_DAY: a calendar day
 // that resets at midnight in that zone (LinkedIn / YouTube).
 export type LimitWindow = "ROLLING_24H" | "UTC_DAY" | "PACIFIC_DAY";
@@ -313,10 +318,87 @@ export function mediaFingerprint(asset: {
   ].join(":");
 }
 
+// One target's content as the duplicate guard compares it: its caption, and
+// its uploaded files — or, for posts from before uploads, their public URLs.
+export function targetContentHash(
+  caption: string,
+  media: Parameters<typeof mediaFingerprint>[0][],
+  mediaUrls: unknown,
+): string {
+  const urls = Array.isArray(mediaUrls) ? mediaUrls.map(String) : [];
+  return contentHash(caption, media.length > 0 ? media.map(mediaFingerprint) : urls);
+}
+
 // Case, spacing and media order don't make a post different.
 export function contentHash(caption: string, media: string[]): string {
   const text = caption.trim().replace(/\s+/g, " ").toLowerCase();
   return createHash("sha256")
     .update(`${text}\n${[...media].sort().join("\n")}`)
     .digest("hex");
+}
+
+// --- Messages ---
+
+const PLATFORM_LABELS: Record<PostablePlatform, string> = {
+  FACEBOOK: "Facebook",
+  INSTAGRAM: "Instagram",
+  THREADS: "Threads",
+  LINKEDIN: "LinkedIn",
+  YOUTUBE: "YouTube",
+};
+
+// "25 minutes", "about 3 hours", "about 2 days". The server doesn't know the
+// user's timezone, so messages say how long rather than what time; the exact
+// time goes alongside as ISO (nextFreeAt) for the composer to format.
+export function durationInWords(ms: number): string {
+  const minutes = Math.max(1, Math.ceil(ms / MINUTE_MS));
+  if (minutes < 60) return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+  const hours = Math.round(ms / HOUR_MS);
+  if (hours < 48) return hours === 1 ? "about an hour" : `about ${hours} hours`;
+  return `about ${Math.round(ms / DAY_MS)} days`;
+}
+
+// Why a target can't be booked, for the composer and retry's 409.
+export type LimitRefusal =
+  | { reason: "DUPLICATE"; duplicateAt: Date }
+  | {
+      reason: "NO_SLOT";
+      nextFreeAt: Date | null;
+      cooldown: { until: Date; message: string } | null;
+    };
+
+export function limitRefusalMessage(
+  refusal: LimitRefusal,
+  platform: PostablePlatform,
+  now: number,
+): string {
+  if (refusal.reason === "DUPLICATE") {
+    const at = refusal.duplicateAt.getTime();
+    return at <= now
+      ? `The same caption and media went to this account ${durationInWords(now - at)} ago — change them to post again`
+      : `The same caption and media are already booked for this account in ${durationInWords(at - now)}`;
+  }
+  const { nextFreeAt, cooldown } = refusal;
+  if (cooldown) {
+    return `This account is paused (${cooldown.message}) — it can post again in ${durationInWords(cooldown.until.getTime() - now)}`;
+  }
+  const label = PLATFORM_LABELS[platform];
+  if (!nextFreeAt) {
+    return `${label}'s posting limit for this account is used up for the next 7 days`;
+  }
+  return `${label}'s posting limit for this account is reached — the next free slot is in ${durationInWords(nextFreeAt.getTime() - now)}`;
+}
+
+// Why a waiting target failed because its account got paused.
+export function pausedFailureMessage(
+  cooldown: { until: Date; message: string },
+  now: number,
+): string {
+  return `Not sent: this account is paused (${cooldown.message}) — retry in ${durationInWords(cooldown.until.getTime() - now)}`;
+}
+
+// The order bookings take their locks in when one post books several
+// accounts — the same order everywhere, so two posts can't deadlock.
+export function lockOrderKey(platform: PostablePlatform, platformAccountId: string): string {
+  return `${platform}:${platformAccountId}`;
 }

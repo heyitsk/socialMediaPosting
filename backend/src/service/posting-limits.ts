@@ -7,6 +7,7 @@ import {
   budgetsFor,
   DUPLICATE_WINDOW_MS,
   dayStart,
+  lockOrderKey,
   nextDayStart,
   nextFreeTimeForAll,
   type Slot,
@@ -25,14 +26,16 @@ const LOOKBACK_MS = 26 * HOUR_MS;
 // after the other while posts to other accounts don't wait. Transaction-scoped:
 // released on commit or rollback, so it can't be left held. Taken in sorted
 // order so two transactions needing the same pair (a YouTube channel and the
-// app-wide budget) can't deadlock.
+// app-wide budget) can't deadlock. A post booking several accounts books
+// them in lockOrderKey order for the same reason — "*" sorts before any real
+// id, so the whole sequence stays sorted.
 async function lockAccounts(
   tx: Tx,
   platform: PostablePlatform,
   accountIds: string[],
 ): Promise<void> {
   for (const accountId of [...accountIds].sort()) {
-    const key = `${platform}:${accountId}`;
+    const key = lockOrderKey(platform, accountId);
     await tx.$queryRaw`SELECT 1 FROM pg_advisory_xact_lock(hashtext(${key}))`;
   }
 }

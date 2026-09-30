@@ -1,6 +1,7 @@
 import { DelayedError, type Job, Worker } from "bullmq";
 import { prisma } from "../db/client";
-import { reconnectReason } from "../lib/capabilities";
+import { isPostablePlatform, reconnectReason } from "../lib/capabilities";
+import { pausedFailureMessage } from "../lib/posting-limits";
 import { mediaUrlsForDispatch } from "../service/media";
 import { dispatchPost } from "../service/n8n";
 import {
@@ -8,6 +9,7 @@ import {
   markTargetFailed,
   markTargetProcessing,
 } from "../service/post-groups";
+import { activeCooldown, bookedSlotAt, releaseSlot } from "../service/posting-limits";
 import { redisConnection } from "./connection";
 import {
   enqueueCallbackDeadline,
@@ -33,7 +35,8 @@ const RENDER_POLL_MS = 15_000;
 const IMAGE_RENDER_WAIT_MS = 10 * 60_000;
 const VIDEO_RENDER_WAIT_MS = 45 * 60_000;
 
-async function publish(job: Job<PublishJobData>, token?: string): Promise<void> {
+// Exported for tests; the worker below is the real caller.
+export async function publish(job: Job<PublishJobData>, token?: string): Promise<void> {
   const { postId, attempt, waitingSince } = job.data;
   const post = await prisma.post.findUnique({
     where: { id: postId },
@@ -60,24 +63,35 @@ async function publish(job: Job<PublishJobData>, token?: string): Promise<void> 
   const { group, connectedAccount: account } = post;
   const platform = account.platform;
 
+  // Failed before reaching n8n: the platform never saw it, so its slot stops
+  // counting against the account's posting limit (websitePlan.md §13.6).
+  const failUnsent = async (message: string) => {
+    if (await markTargetFailed(postId, platform, message, { attempt })) {
+      await releaseSlot(prisma, postId, attempt);
+    }
+  };
+
   // Cancelling only stops targets not yet sent — a manual retry of one that
   // failed before the cancel still goes out.
   if (post.status === "SCHEDULED" && (group.cancelledAt || group.workspace.deletedAt)) {
-    await markTargetCancelled(postId);
+    if (await markTargetCancelled(postId)) await releaseSlot(prisma, postId, attempt);
     return;
   }
+
+  // When the posting limiter booked it to go out: the scheduled time, or
+  // later if the account needed a gap. Null for posts from before the limiter.
+  const slotAt = await bookedSlotAt(prisma, postId, attempt);
+
   // Not while waiting for renders — that wait has its own limit below.
+  const due = group.scheduledFor ? (slotAt ?? group.scheduledFor) : null;
   if (
     attempt === 1 &&
     waitingSince === undefined &&
-    group.scheduledFor &&
-    Date.now() - group.scheduledFor.getTime() > MAX_SCHEDULE_LATENESS_MS
+    due &&
+    Date.now() - due.getTime() > MAX_SCHEDULE_LATENESS_MS
   ) {
-    await markTargetFailed(
-      postId,
-      platform,
+    await failUnsent(
       "Missed its scheduled time (the server was unavailable) — retry to post it now",
-      { attempt },
     );
     return;
   }
@@ -85,18 +99,30 @@ async function publish(job: Job<PublishJobData>, token?: string): Promise<void> 
   // Scheduled posts are re-checked at send time: the account may have been
   // disconnected, or its token may have lapsed, since the post was created.
   if (account.disconnectedAt) {
-    await markTargetFailed(
-      postId,
-      platform,
-      "The account was disconnected — reconnect it and retry",
-      { attempt },
-    );
+    await failUnsent("The account was disconnected — reconnect it and retry");
     return;
   }
   const blocked = reconnectReason(account);
   if (blocked) {
-    await markTargetFailed(postId, platform, blocked, { attempt });
+    await failUnsent(blocked);
     return;
+  }
+
+  // Paused after a spam block or a platform limit: fail rather than wait,
+  // so the user decides what to do (websitePlan.md §13.9 decision 4).
+  if (isPostablePlatform(platform)) {
+    const cooldown = await activeCooldown(prisma, platform, account.platformAccountId);
+    if (cooldown) {
+      await failUnsent(pausedFailureMessage(cooldown, Date.now()));
+      return;
+    }
+  }
+
+  // The job is normally queued to run at its slot. One that runs early (put
+  // back by the schedule reconciler) waits for it.
+  if (slotAt && slotAt.getTime() > Date.now() && token) {
+    await job.moveToDelayed(slotAt.getTime(), token);
+    throw new DelayedError();
   }
 
   // This target's cropped/padded/converted files.
@@ -104,11 +130,8 @@ async function publish(job: Job<PublishJobData>, token?: string): Promise<void> 
   const failedRender = renditions.find((rendition) => rendition.status === "FAILED");
   if (failedRender) {
     console.error(`publish ${postId}: a rendition failed:`, failedRender.error);
-    await markTargetFailed(
-      postId,
-      platform,
+    await failUnsent(
       "Couldn't prepare the cropped media for this platform — retry to render it again",
-      { attempt },
     );
     return;
   }
@@ -119,12 +142,7 @@ async function publish(job: Job<PublishJobData>, token?: string): Promise<void> 
       ? VIDEO_RENDER_WAIT_MS
       : IMAGE_RENDER_WAIT_MS;
     if (Date.now() - since > limit) {
-      await markTargetFailed(
-        postId,
-        platform,
-        "Preparing the cropped media took too long — retry to try again",
-        { attempt },
-      );
+      await failUnsent("Preparing the cropped media took too long — retry to try again");
       return;
     }
     // Same job, checked again shortly — it stays pending, so the schedule
@@ -188,8 +206,18 @@ export function startPublishWorker(): Worker<PublishJobData> {
 const RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 async function reconcileDueSchedules(): Promise<void> {
+  const now = new Date();
+  // Scheduled groups, and "post now" targets the posting limiter pushed
+  // back (SCHEDULED with a slot, no scheduledFor).
   const due = await prisma.post.findMany({
-    where: { status: "SCHEDULED", group: { scheduledFor: { lte: new Date() }, cancelledAt: null } },
+    where: {
+      status: "SCHEDULED",
+      group: { cancelledAt: null },
+      OR: [
+        { group: { scheduledFor: { lte: now } } },
+        { dispatchSlots: { some: { releasedAt: null, slotAt: { lte: now } } } },
+      ],
+    },
     select: { id: true, attempt: true },
   });
   for (const post of due) {

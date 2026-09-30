@@ -1267,6 +1267,39 @@ While an account is cooling down:
   - pauses (never shortened, the app-wide YouTube pause) and usage
   - 8 posts booking one account at the same moment. With the lock switched off this test fails: all 8 got the same time.
 
+### 13.10.3 Step 3 as built (Sep 30, 2026)
+
+The limiter now drives real posting.
+
+- **Create (`POST /post-groups`).**
+  - Inside the create transaction, after the posts and renditions, each target books a slot in `lockOrderKey` order. `earliest` is `scheduledFor` or now, and `latest` is `earliest + AUTO_DELAY_MS` (1 h). The content hash is the target's caption plus its files' fingerprints.
+  - A duplicate, or no slot within the hour, throws `PostingLimitError`. That rolls back the whole create (all-or-nothing, like validation) and returns the usual 400. Each refused target gets a message and `nextFreeAt` (ISO, or null), for step 5's "Schedule for then".
+  - Limit errors are only reported once validation passes, so a post with validation errors doesn't show its limit errors yet.
+  - A "post now" target pushed past now becomes `SCHEDULED`. The group status is recomputed, and the job is queued with its `slotAt` as the delay. The transaction timeout is 15 s, because booking can wait on other posts to the same account.
+  - New: `rateLimitByUser("post-groups", 30, 3600)`.
+- **Messages** say how long ("in about 3 hours"), not what time, because the server doesn't know the user's timezone. `lib/posting-limits.ts` holds `limitRefusalMessage`, `pausedFailureMessage` and `durationInWords`.
+- **Publish worker.**
+  - Every failure before hand-off also releases the slot (`failUnsent`): cancelled, missed time, disconnected, reconnect needed, render failed or too slow. Failures after hand-off keep it.
+  - "Missed its scheduled time" is measured from `slotAt` for scheduled groups.
+  - A paused account fails the target with "Not sent: this account is paused (…) — retry in …".
+  - A job that runs before its slot is moved back to the slot time.
+  - `publish` is exported for tests.
+- **Reconciler** also re-queues lost jobs for `SCHEDULED` targets with a due slot and no `scheduledFor`, i.e. pushed-back "post now" targets.
+- **Retry** books `attempt + 1` before `prepareRetry`. It returns 409 with the limit message if the account is paused or has no slot within the hour, and releases the slot if the retry then loses a race. The job is queued at `slotAt`. Retries stay `PROCESSING` while waiting, so they can't be cancelled.
+- **Cancel** releases each cancelled target's slot.
+- **API:** each target has `sendAt`, the booked time of the current attempt.
+- **Frontend (minimal).** The composer's results panel polls every 3 s while any target is `PROCESSING`. A mixed group reads `SCHEDULED`, which used to stop the polling. It polls every 30 s while a "post now" group still has a pushed-back target. History already shows these as Scheduled with a Cancel button.
+- **Tests:** `routes/post-groups.limits.test.ts` runs the real route and worker against the dev database. The publish/render queues and n8n are stubbed so nothing is queued or sent. It covers:
+  - a second post to the same Page getting `SCHEDULED` at +gap and queued then
+  - the duplicate refusal
+  - all-or-nothing with a paused account (`nextFreeAt` = pause end, nothing written for the other account)
+  - cancel freeing the slot for the next post
+  - retry refused while paused, then paced after attempt 1
+  - the worker failing a paused account's post and freeing its slot
+  - the worker moving an early job to its slot
+
+  40/40 pass with both profiles. Not yet tested with a real post through n8n.
+
 ### 13.11 Risks
 
 - Meta publishes no Facebook post limit or spam threshold, so the Facebook numbers are guesses. Start strict and loosen them based on what we see.
@@ -1301,3 +1334,4 @@ While an account is cooling down:
 *Updated: 2026-09-30 | §13.9 decisions recorded: 1 h auto-delay allowance, fixed caps (not adjustable per workspace), duplicates blocked outright, targets waiting on a cooled-down account fail (for every cooldown reason) instead of being held, and no early clearing. First build covers Facebook, Instagram, Threads, LinkedIn and YouTube.*
 *Updated: 2026-09-30 | §13 step 1 built (§13.10.1): migration `20260930170000_add_posting_limits` (`dispatch_slots`, `account_cooldowns`, `CooldownReason`), `lib/posting-limits.ts` with the fixed policy table, LinkedIn call costs, UTC/Pacific calendar days, the `fitsAt`/`nextFreeTime` slot search and the duplicate-guard hash, `POSTING_LIMITS_PROFILE` (`standard`|`dev`), and 22 `bun test` cases. Nothing wired into posting yet.*
 *Updated: 2026-09-30 | §13 step 2 built (§13.10.2): `service/posting-limits.ts` — `reserveSlot` under per-account Postgres advisory locks (duplicate check, pause-aware, multi-budget for YouTube, `NO_SLOT` with the next free time past `latest`), `releaseSlot`/`bookedSlotAt`, `setCooldown` (never shortens)/`activeCooldown`, and `accountUsage`. 11 database tests, including a concurrency test shown to fail without the lock. Still not wired into posting.*
+*Updated: 2026-09-30 | §13 step 3 built (§13.10.3): the posting limiter now drives real posting. Create books every target inside its transaction (1 h auto-delay, duplicates refused, all-or-nothing 400 with `nextFreeAt`), pushed-back "post now" targets become `SCHEDULED` and are queued at their slot, the publish worker fails paused accounts and releases slots on every failure before hand-off, retry books first (409 when paused or full), cancel releases slots, the reconciler covers pushed-back targets, targets expose `sendAt`, and create is limited to 30 per user per hour. Composer results panel keeps polling mixed groups. 7 route/worker tests (queues and n8n stubbed); 40/40 pass.*

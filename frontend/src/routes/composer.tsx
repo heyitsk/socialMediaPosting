@@ -473,7 +473,18 @@ export function ComposerPage() {
       if (error) throw error;
       return data;
     },
-    refetchInterval: (query) => (query.state.data?.status === "PROCESSING" ? 3000 : false),
+    // Fast while any account is sending — the group reads SCHEDULED when one
+    // account was pushed back by its posting limit, even if others are
+    // sending now. Slow while a "post now" still has an account waiting for
+    // its slot (at most an hour); a real scheduled post needs no polling.
+    refetchInterval: (query) => {
+      const group = query.state.data;
+      if (!group) return false;
+      if (group.targets.some((target) => target.status === "PROCESSING")) return 3000;
+      if (!group.scheduledFor && group.targets.some((target) => target.status === "SCHEDULED"))
+        return 30_000;
+      return false;
+    },
   });
 
   // Clickable even with problems left, so the click can reveal what's missing.
