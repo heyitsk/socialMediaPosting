@@ -24,6 +24,7 @@ import type { WorkspaceEnv } from "../middleware/auth";
 import { rateLimitByUser } from "../middleware/rate-limit";
 import { deleteMediaAsset, probeMediaAsset } from "../service/media";
 import { workspaceParamsSchema } from "./workspace-params";
+import { mediaUploads } from "../lib/metrics";
 
 // Composer uploads straight to S3 (websitePlan.md §11), in two phases:
 // 1. POST /media — we record a PENDING asset and hand back presigned upload
@@ -166,8 +167,13 @@ async function findAsset(workspaceId: string, assetId: string) {
 
 // Deletes what was uploaded and tells the composer why.
 async function reject(asset: MediaAsset, message: string): Promise<never> {
+  mediaUploads.add(1, { kind: uploadKind(asset), outcome: "rejected" });
   await deleteMediaAsset(asset);
   throw new HTTPException(400, { message });
+}
+
+function uploadKind(asset: MediaAsset): "video" | "image" {
+  return isVideoType(asset.contentType) ? "video" : "image";
 }
 
 function describe(contentType: string): string {
@@ -271,6 +277,7 @@ export const mediaRoute = new OpenAPIHono<WorkspaceEnv>()
         durationSeconds: shape?.durationSeconds,
       },
     });
+    mediaUploads.add(1, { kind: uploadKind(asset), outcome: "ready" });
     return c.json(serializeAsset(ready), 200);
   })
   .openapi(deleteUpload, async (c) => {

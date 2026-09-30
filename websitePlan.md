@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Oct 1, 2026):** steps 1-3 built (§14.11.1-§14.11.3); the n8n leg of step 3 waits on upgrading the running n8n container. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+> **Status (Oct 1, 2026):** steps 1-4 built (§14.11.1-§14.11.4); the n8n leg of step 3 waits on upgrading the running n8n container. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1578,6 +1578,23 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - `bun test` 51/51, `tsc` clean.
 - **Not yet checked:** the n8n leg (dispatch → `workflow.execute` → callback in one trace) needs the n8n upgrade plus a real post, which is §14.11 step 3's exit check.
 
+### 14.11.4 Step 4 as built (Oct 1, 2026)
+
+- **`lib/metrics.ts`** (all labels from fixed sets; Prometheus names shown):
+  - `smposting_posts_dispatched_total` {platform, media_type}: after a successful n8n hand-off (publish worker).
+  - `smposting_posts_completed_total` {platform, media_type, outcome=published|failed|cancelled}: in `transitionTarget` (`service/post-groups.ts`), which now also selects `mediaType` and the account's platform. A late SUCCESS after a deadline FAILED counts once as each.
+  - `smposting_posts_deadline_hits_total` {platform}: only when the deadline job actually failed the target.
+  - `smposting_n8n_dispatch_duration_seconds` {workflow}: around the dispatch call in `service/n8n.ts`. `workflow` is the webhook path, e.g. `facebook-poster`.
+  - `smposting_limits_pauses_total` {platform, reason}: in `pauseForLimitError`. `reason` is the `CooldownReason`.
+  - `smposting_limits_refusals_total` {platform, reason=duplicate|no_slot|paused}: in `refusalError` (create and retry refusals).
+  - `smposting_render_duration_seconds` {kind=image|video, outcome=ready|failed}: the render worker's work moved into `renderRendition`, timed from after the no-op checks.
+  - `smposting_media_uploads_total` {kind, outcome=ready|rejected}: at upload complete and in `reject`.
+- **`queue/telemetry.ts`:** observable gauge `smposting_queue_jobs` {queue, state=waiting|delayed|active|failed}, read with `getJobCounts` at each 30 s export, for the three queues. BullMQ's own `bullmq_jobs_completed_total`, `bullmq_job_duration_milliseconds` and friends come from `enableMetrics`.
+- **Dropped for now:**
+  - Send → published duration (§14.6): `posts` has no dispatch timestamp, so it needs a migration. Traces already show it per post.
+  - Host/runtime metrics: not tried under Bun.
+- **Checked:** a 45 s run of the backend exported all 12 `smposting_queue_jobs` series and the BullMQ and HTTP metrics to local Prometheus. The business counters only appear once their event happens; with no real posts in the test they're covered by `tsc` only. `bun test` 51/51.
+
 ### 14.12 Risks
 
 - **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
@@ -1622,3 +1639,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-10-01 | §14 step 1 built (§14.11.1): `backend/src/otel.ts` (NodeSDK, OTLP traces + metrics, Prisma instrumentation, query-string redaction, 4xx not marked as errors), `@hono/otel` as the first middleware, user/workspace span attributes, `otel-lgtm` in compose (Grafana on :3001). Spike under Bun passed: incoming `traceparent` continued, Prisma spans nested under the request span with SQL text, HTTP metrics in Prometheus. 51/51 tests pass.*
 *Updated: 2026-10-01 | §14 step 2 built (§14.11.2): `lib/logger.ts` (pino with trace ids, in-process bridge to the OTel Logs SDK → Loki, `err` as `exception.*`), `middleware/request-log.ts` replacing `hono/logger`, and every `console.*` call except `lib/env.ts` moved to structured fields with fixed messages. Log → trace link checked in local Grafana. 51/51 tests pass.*
 *Updated: 2026-10-01 | §14 step 3 built (§14.11.3): `bullmq-otel` on every queue and worker; delayed publishes, deadlines and video-status polls start their own trace with a span link back (`queue/telemetry.ts`); root spans for the reconcilers and media cleaner; `tracedFetch` for all 17 outbound calls, sending `traceparent` only to n8n; n8n pinned to 2.41.4 with `N8N_OTEL_*` in compose. Parent/link/propagation/redaction checked in Tempo with a throwaway queue. The n8n leg needs the running n8n container upgraded from 2.13.4.*
+*Updated: 2026-10-01 | §14 step 4 built (§14.11.4): `lib/metrics.ts` business metrics (dispatched, completed by outcome, deadline hits, n8n dispatch time, limit pauses and refusals, render time, uploads) with fixed-set labels only, and a `smposting_queue_jobs` gauge per queue and state. Send-to-published duration deferred (needs a dispatch timestamp column). Queue gauge, BullMQ and HTTP metrics checked in local Prometheus.*

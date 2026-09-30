@@ -21,6 +21,7 @@ import {
   type PublishJobData,
 } from "./publish-queue";
 import { linkToProducer, telemetry } from "./telemetry";
+import { postsDeadlineHits, postsDispatched } from "../lib/metrics";
 
 // Each job is one quick HTTP call to n8n (the workflows respond on receipt),
 // so a group's targets — up to this many — go out in parallel.
@@ -161,6 +162,7 @@ export async function publish(job: Job<PublishJobData>, token?: string): Promise
     // Uploaded media gets freshly signed S3 URLs on every attempt.
     const mediaUrls = await mediaUrlsForDispatch(group.media, post.renditions, post.mediaUrls);
     await dispatchPost({ ...post, mediaUrls }, account);
+    postsDispatched.add(1, { platform, media_type: post.mediaType });
   } catch (err) {
     logger.error({ postId, platform, err }, "publish failed");
     const message =
@@ -182,12 +184,13 @@ async function enforceDeadline({ postId, attempt }: PublishJobData): Promise<voi
     select: { connectedAccount: { select: { platform: true } } },
   });
   if (!post) return;
-  await markTargetFailed(
+  const failed = await markTargetFailed(
     postId,
     post.connectedAccount.platform,
     "No result came back from the platform — it may still have posted, check before retrying",
     { attempt },
   );
+  if (failed) postsDeadlineHits.add(1, { platform: post.connectedAccount.platform });
 }
 
 export function startPublishWorker(): Worker<PublishJobData> {

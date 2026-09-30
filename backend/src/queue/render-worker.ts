@@ -12,6 +12,7 @@ import { withRootSpan } from "../lib/tracing";
 import { redisConnection } from "./connection";
 import { enqueueRender, RENDER_QUEUE, type RenderJobData } from "./render-queue";
 import { telemetry } from "./telemetry";
+import { renderDuration, secondsSince } from "../lib/metrics";
 
 // ffmpeg uses every core it gets; two at once keeps the API responsive.
 const CONCURRENCY = 2;
@@ -46,6 +47,33 @@ async function render(job: Job<RenderJobData>): Promise<void> {
     specHash: rendition.specHash,
   };
 
+  const kind = isVideoType(master.contentType) ? "video" : "image";
+  const start = performance.now();
+  try {
+    // width/height are checked non-null above.
+    await renderRendition(
+      rendition,
+      { ...master, width: master.width, height: master.height },
+      spec,
+    );
+    renderDuration.record(secondsSince(start), { kind, outcome: "ready" });
+  } catch (err) {
+    renderDuration.record(secondsSince(start), { kind, outcome: "failed" });
+    throw err;
+  }
+}
+
+async function renderRendition(
+  rendition: { id: string; key: string },
+  master: {
+    key: string;
+    contentType: string;
+    width: number;
+    height: number;
+    durationSeconds: number | null;
+  },
+  spec: RenditionSpec,
+): Promise<void> {
   let sizeBytes: number;
   if (isVideoType(master.contentType)) {
     const dir = await mkdtemp(join(tmpdir(), "render-"));

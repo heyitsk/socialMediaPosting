@@ -49,6 +49,7 @@ import {
   youtubeOptionsSchema,
 } from "./post-schemas";
 import { workspaceParamsSchema } from "./workspace-params";
+import { limitRefusals } from "../lib/metrics";
 
 // websitePlan.md §10.6. The composer asks for 2+ minutes; 1 here leaves room
 // for the time spent filling in the form after picking.
@@ -451,6 +452,10 @@ function refusalError(
   platform: PostablePlatform,
   now: number,
 ): TargetError {
+  limitRefusals.add(1, {
+    platform,
+    reason: refusal.reason === "DUPLICATE" ? "duplicate" : refusal.cooldown ? "paused" : "no_slot",
+  });
   return {
     connectedAccountId,
     errors: [limitRefusalMessage(refusal, platform, now)],

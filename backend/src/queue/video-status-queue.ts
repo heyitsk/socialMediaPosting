@@ -1,6 +1,6 @@
 import { Queue } from "bullmq";
 import { redisConnection } from "./connection";
-import { laterJob, telemetry } from "./telemetry";
+import { laterJob, observeQueueDepth, telemetry } from "./telemetry";
 
 export const VIDEO_STATUS_QUEUE = "video-status-poll";
 
@@ -9,6 +9,7 @@ export const VIDEO_STATUS_QUEUE = "video-status-poll";
 const POLL_BACKOFF_TYPE = "video-status-poll";
 
 const videoStatusQueue = new Queue(VIDEO_STATUS_QUEUE, { connection: redisConnection(), telemetry });
+observeQueueDepth(videoStatusQueue);
 
 export type VideoPollPlatform = "FACEBOOK" | "LINKEDIN" | "YOUTUBE";
 

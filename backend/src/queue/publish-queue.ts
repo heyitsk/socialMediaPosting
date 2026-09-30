@@ -1,7 +1,7 @@
 import type { MediaType } from "@prisma/client";
 import { Queue } from "bullmq";
 import { redisConnection } from "./connection";
-import { laterJob, type TraceLinkData, telemetry } from "./telemetry";
+import { laterJob, observeQueueDepth, type TraceLinkData, telemetry } from "./telemetry";
 
 export const PUBLISH_QUEUE = "post-publish";
 
@@ -21,6 +21,7 @@ const publishQueue = new Queue<PublishJobData>(PUBLISH_QUEUE, {
   connection: redisConnection(),
   telemetry,
 });
+observeQueueDepth(publishQueue);
 
 // Custom job ids make re-adding a no-op, so the reconciler (and a retried
 // request) can't double-publish. BullMQ rejects ":" in custom ids.

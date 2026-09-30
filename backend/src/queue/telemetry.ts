@@ -1,3 +1,5 @@
+import { metrics } from "@opentelemetry/api";
+import type { Queue } from "bullmq";
 import { BullMQOtel } from "bullmq-otel";
 import { currentTraceparent, linkActiveSpanTo } from "../lib/tracing";
 
@@ -23,4 +25,26 @@ export function laterJob(): { data: TraceLinkData; opts: { telemetry: { omitCont
 // Call first in a worker's processor.
 export function linkToProducer(data: TraceLinkData): void {
   linkActiveSpanTo(data.traceLink);
+}
+
+// Jobs per queue and state, read from Redis each time metrics are exported
+// (websitePlan.md §14.6). A growing `waiting` means the workers can't keep up;
+// `delayed` is mostly schedules and is expected to be large.
+const QUEUE_STATES = ["waiting", "delayed", "active", "failed"] as const;
+const observedQueues: Queue[] = [];
+
+metrics
+  .getMeter("smposting-backend")
+  .createObservableGauge("smposting.queue.jobs", { description: "Jobs per queue and state" })
+  .addCallback(async (result) => {
+    for (const queue of observedQueues) {
+      const counts = await queue.getJobCounts(...QUEUE_STATES);
+      for (const state of QUEUE_STATES) {
+        result.observe(counts[state] ?? 0, { queue: queue.name, state });
+      }
+    }
+  });
+
+export function observeQueueDepth(queue: Queue): void {
+  observedQueues.push(queue);
 }
