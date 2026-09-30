@@ -41,6 +41,7 @@ import {
   YOUTUBE_TITLE_MAX,
   type YouTubeOptions,
 } from "@/lib/posting";
+import { AUTO_DELAY_MS, formatWhen, pausedText, usePostingLimits } from "@/lib/posting-limits";
 import { useWorkspaceId } from "@/lib/session";
 import { cn } from "@/lib/utils";
 
@@ -137,6 +138,8 @@ export function ComposerPage() {
   // The tile whose Adjust dialog is open.
   const [adjusting, setAdjusting] = useState<string | null>(null);
 
+  const { byAccount: limits } = usePostingLimits(workspaceId);
+
   const capabilitiesByPlatform = new Map(
     capabilities?.platforms.map((platform) => [platform.platform, platform]) ?? [],
   );
@@ -152,6 +155,20 @@ export function ComposerPage() {
     if (account.needsReconnect) return "Reconnect this account on the Dashboard first";
     if (kind && !platformCapabilities.mediaTypes.some((option) => option.kind === kind)) {
       return `${PLATFORM_LABELS[account.platform]} doesn't support ${CONTENT_KIND_LABELS[kind].toLowerCase()} posts`;
+    }
+    // Posting limits (websitePlan.md §13.8). The backend has the last word;
+    // this only hides accounts it would certainly refuse.
+    const limit = limits.get(account.id);
+    if (limit?.cooldown) {
+      // Scheduling for after the pause ends is fine.
+      const at =
+        scheduleMode === "later" && scheduledAt ? new Date(scheduledAt).getTime() : Date.now();
+      if (at < Date.parse(limit.cooldown.until)) return pausedText(limit);
+    }
+    if (limit && scheduleMode === "now") {
+      if (limit.nextFreeAt === null) return "No free posting slot in the next 7 days";
+      if (Date.parse(limit.nextFreeAt) > Date.now() + AUTO_DELAY_MS)
+        return `Posting limit reached — the next free slot is ${formatWhen(limit.nextFreeAt)}. Schedule the post for then`;
     }
     return null;
   }
@@ -387,6 +404,32 @@ export function ComposerPage() {
     setServerErrors((current) => current && { ...current, targets: [] });
   };
 
+  // Accounts refused for their posting limit come back with the earliest time
+  // they'd take it — the latest of those works for all of them (§13.8).
+  const freeTimes = (serverErrors?.targets ?? []).flatMap((target) =>
+    target.nextFreeAt && selectedIds.includes(target.connectedAccountId)
+      ? [Date.parse(target.nextFreeAt)]
+      : [],
+  );
+  const scheduleForThen = freeTimes.length > 0 ? Math.max(...freeTimes) : null;
+  const scheduleAtFreeSlot = () => {
+    if (scheduleForThen === null) return;
+    // The picker has minute precision; round up so it's never too early.
+    setScheduledAt(toLocalInputValue(new Date(Math.ceil(scheduleForThen / 60_000) * 60_000)));
+    setScheduleMode("later");
+    setServerErrors((current) => current && { ...current, targets: [] });
+  };
+
+  // "Post now" accounts that have to wait for their posting pace.
+  const now = Date.now();
+  const pushedBack =
+    scheduleMode === "now"
+      ? selectedAccounts.flatMap((account) => {
+          const at = limits.get(account.id)?.nextFreeAt;
+          return at && Date.parse(at) > now + 30_000 ? [{ account, at }] : [];
+        })
+      : [];
+
   const createGroup = useMutation({
     mutationFn: async () => {
       if (!kind) throw new Error("Pick what you're posting");
@@ -429,16 +472,25 @@ export function ComposerPage() {
           },
         },
       );
-      if (error) throw error;
+      if (error || !data) throw error ?? new Error("Empty response");
       return { group: data, created: response.status === 201 };
     },
     onMutate: () => setServerErrors(null),
     onSuccess: ({ group, created }) => {
       queryClient.setQueryData(["post-group", workspaceId, group.id], group);
       queryClient.invalidateQueries({ queryKey: ["post-groups", workspaceId] });
+      queryClient.invalidateQueries({ queryKey: ["posting-limits", workspaceId] });
       setResultGroupId(group.id);
+      // "Post now" targets the limiter pushed back wait as SCHEDULED.
+      const waiting = group.scheduledFor
+        ? 0
+        : group.targets.filter((target) => target.status === "SCHEDULED").length;
       if (!created) toast.info("That post was already submitted — showing its status");
-      else if (group.status === "SCHEDULED") toast.success("Post scheduled");
+      else if (group.scheduledFor) toast.success("Post scheduled");
+      else if (waiting > 0)
+        toast.success(
+          `Posting — ${waiting} ${waiting === 1 ? "account waits" : "accounts wait"} for a safe gap after their last post`,
+        );
       else toast.success(`Posting to ${group.targets.length} accounts…`);
       // Ready for the next post; keep the account picks, which are often reused.
       setIdempotencyKey(crypto.randomUUID());
@@ -785,6 +837,16 @@ export function ComposerPage() {
                     onChange={(e) => setScheduledAt(e.target.value)}
                   />
                 )}
+                {pushedBack.length > 0 && (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    {pushedBack.map(({ account, at }) => (
+                      <p key={account.id}>
+                        {PLATFORM_LABELS[account.platform]} · {account.accountName} goes out around{" "}
+                        {formatWhen(at)}, to keep a safe gap between its posts.
+                      </p>
+                    ))}
+                  </div>
+                )}
               </section>
             )}
 
@@ -804,6 +866,11 @@ export function ComposerPage() {
                     <Button variant="outline" size="sm" onClick={deselectInvalid}>
                       Deselect invalid accounts
                     </Button>
+                    {scheduleForThen !== null && (
+                      <Button variant="outline" size="sm" onClick={scheduleAtFreeSlot}>
+                        Schedule for {formatWhen(scheduleForThen)}
+                      </Button>
+                    )}
                   </div>
                 )}
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">

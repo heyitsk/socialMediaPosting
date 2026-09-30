@@ -1335,6 +1335,29 @@ Platform limit errors now pause accounts automatically.
 
   49/49 pass with both profiles.
 
+### 13.10.5 Step 5 as built (Sep 30, 2026)
+
+Users can now see the limits.
+
+- **`GET /api/workspaces/:ws/posting-limits`** (`routes/posting-limits.ts`) returns, for each connected account on a platform we post to: `{ connectedAccountId, platform, unit: posts|calls, used, upcoming, cap, window, resetsAt, nextFreeAt, cooldown }`.
+  - It uses `accountUsage` from step 2. Two connections of one Instagram account share one lookup.
+  - `nextFreeAt` is for a one-cost post, so it's never later than what a real post would get.
+- **`backend/src/app.ts`** now holds the HTTP app; `index.ts` only serves it and starts the workers. **`bun run openapi <file>`** (`scripts/openapi.ts`) writes the OpenAPI spec without starting the server or workers, which would otherwise pick up the shared dev queue's jobs. The frontend's `api-schema.d.ts` was regenerated from it with `bunx openapi-typescript <file> -o src/lib/api-schema.d.ts`.
+- **Frontend `lib/posting-limits.ts`:** `usePostingLimits` (refetched every 60 s, and invalidated after posting, retry and cancel), `formatWhen` ("10:05" / "tomorrow 09:12" / "Fri 3 Oct, 09:12", in the browser's timezone), `windowLabel` and `pausedText`.
+- **Dashboard:** each account card shows
+  - "12 / 25 posts in the last 24 hours" (LinkedIn: calls, "today (resets at midnight UTC)"), with a bar that turns amber at 80 %
+  - how many are queued, and "Next post can go out at 10:05" when that's more than a minute away
+  - when paused: a **Paused** badge in place of Connected, and "Paused until tomorrow 14:05 — Meta flagged the posting as spam".
+- **Composer:**
+  - Paused accounts are disabled with the reason, unless the post is scheduled after the pause ends.
+  - For "Post now", an account whose next free slot is more than an hour away is disabled with that time. The backend still decides; this only hides certain refusals.
+  - The Timing step lists "Facebook · My Page goes out around 10:05, to keep a safe gap between its posts" for pushed-back accounts.
+  - A 400 with `nextFreeAt` adds a **"Schedule for {time}"** button. It uses the latest of the refused accounts' times, rounded up to the minute, and switches to Schedule.
+  - The success toast says how many accounts wait for a safe gap.
+- **Post card (results panel and History):** a target booked later than asked shows "Waiting for its posting limit — goes out at 10:05". That covers pushed-back "post now" targets, retries and nudged schedules.
+- **Tests:** 2 more in `routes/post-groups.limits.test.ts` for the endpoint (usage, queued count and `nextFreeAt` computed the same way as the limiter; a pause). 51/51 pass with both profiles. The frontend type-checks and builds.
+- **Not checked in a browser yet.** A dev backend started from this branch would run its workers against the shared dev Redis.
+
 ### 13.11 Risks
 
 - Meta publishes no Facebook post limit or spam threshold, so the Facebook numbers are guesses. Start strict and loosen them based on what we see.
@@ -1371,3 +1394,4 @@ Platform limit errors now pause accounts automatically.
 *Updated: 2026-09-30 | §13 step 2 built (§13.10.2): `service/posting-limits.ts` — `reserveSlot` under per-account Postgres advisory locks (duplicate check, pause-aware, multi-budget for YouTube, `NO_SLOT` with the next free time past `latest`), `releaseSlot`/`bookedSlotAt`, `setCooldown` (never shortens)/`activeCooldown`, and `accountUsage`. 11 database tests, including a concurrency test shown to fail without the lock. Still not wired into posting.*
 *Updated: 2026-09-30 | §13 step 3 built (§13.10.3): the posting limiter now drives real posting. Create books every target inside its transaction (1 h auto-delay, duplicates refused, all-or-nothing 400 with `nextFreeAt`), pushed-back "post now" targets become `SCHEDULED` and are queued at their slot, the publish worker fails paused accounts and releases slots on every failure before hand-off, retry books first (409 when paused or full), cancel releases slots, the reconciler covers pushed-back targets, targets expose `sendAt`, and create is limited to 30 per user per hour. Composer results panel keeps polling mixed groups. 7 route/worker tests (queues and n8n stubbed); 40/40 pass.*
 *Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*
+*Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*

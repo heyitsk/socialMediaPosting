@@ -828,7 +828,7 @@ export interface paths {
                         "application/json": components["schemas"]["PostGroup"];
                     };
                 };
-                /** @description Validation failed — nothing was created */
+                /** @description Validation failed, or an account's posting limit can't fit it within an hour — nothing was created */
                 400: {
                     headers: {
                         [name: string]: unknown;
@@ -836,6 +836,13 @@ export interface paths {
                     content: {
                         "application/json": components["schemas"]["PostGroupValidationError"];
                     };
+                };
+                /** @description More than 30 posts created in an hour */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
                 };
             };
         };
@@ -983,7 +990,7 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description Target isn't FAILED */
+                /** @description Target isn't FAILED, is out of attempts, or its account's posting limit or pause doesn't allow it within an hour */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -992,6 +999,44 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/posting-limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Each connected account's posting limit usage and pause (websitePlan.md §13.8) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One entry per connected account on a platform we post to */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PostingLimit"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1364,6 +1409,8 @@ export interface components {
             attempt: number;
             canRetry: boolean;
             preparingMedia: boolean;
+            /** Format: date-time */
+            sendAt: string | null;
             youtubeTitle: string | null;
             logs: components["schemas"]["PostLog"][];
         };
@@ -1381,6 +1428,8 @@ export interface components {
             targets: {
                 connectedAccountId: string;
                 errors: string[];
+                /** Format: date-time */
+                nextFreeAt?: string | null;
             }[];
         };
         CreatePostGroupRequest: {
@@ -1429,6 +1478,29 @@ export interface components {
             categoryId: "1" | "2" | "10" | "15" | "17" | "19" | "20" | "22" | "23" | "24" | "25" | "26" | "27" | "28" | "29";
             /** @default [] */
             tags: string[];
+        };
+        PostingLimit: {
+            connectedAccountId: string;
+            /** @enum {string} */
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+            /** @enum {string} */
+            unit: "posts" | "calls";
+            used: number;
+            upcoming: number;
+            cap: number;
+            /** @enum {string} */
+            window: "ROLLING_24H" | "UTC_DAY" | "PACIFIC_DAY";
+            /** Format: date-time */
+            resetsAt: string | null;
+            /** Format: date-time */
+            nextFreeAt: string | null;
+            cooldown: {
+                /** Format: date-time */
+                until: string;
+                /** @enum {string} */
+                reason: "ABUSE_BLOCK" | "RATE_LIMIT" | "QUOTA";
+                message: string;
+            } | null;
         };
         MediaAsset: {
             id: string;

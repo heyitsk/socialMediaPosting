@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleAlert, CircleCheck, Link2, RefreshCw, Unplug } from "lucide-react";
+import { CircleAlert, CircleCheck, CirclePause, Link2, RefreshCw, Unplug } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -8,7 +8,15 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { API_URL, api } from "@/lib/api";
 import { PLATFORM_LABELS } from "@/lib/posting";
+import {
+  formatWhen,
+  type PostingLimit,
+  pausedText,
+  usePostingLimits,
+  windowLabel,
+} from "@/lib/posting-limits";
 import { useWorkspace, useWorkspaceId } from "@/lib/session";
+import { cn } from "@/lib/utils";
 
 // Removed from the workspace, or a plain member (only owners/admins connect).
 const FORBIDDEN_MESSAGE =
@@ -154,6 +162,8 @@ function ConnectedAccountsSection() {
     },
   });
 
+  const { byAccount: limits } = usePostingLimits(workspaceId);
+
   const disconnect = useMutation({
     mutationFn: async (id: string) => {
       const { error } = await api.DELETE("/api/workspaces/{workspaceId}/integrations/{id}", {
@@ -251,6 +261,11 @@ function ConnectedAccountsSection() {
                         <span className="size-1.5 rounded-full bg-amber-500" aria-hidden="true" />
                         Attention
                       </span>
+                    ) : limits.get(account.id)?.cooldown ? (
+                      <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-300">
+                        <CirclePause className="size-3.5" aria-hidden="true" />
+                        Paused
+                      </span>
                     ) : (
                       <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
                         <CircleCheck className="size-3.5" aria-hidden="true" />
@@ -272,6 +287,8 @@ function ConnectedAccountsSection() {
                       </p>
                     )}
                   </div>
+
+                  <PostingUsage limit={limits.get(account.id)} />
 
                   {canManage && (
                     <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-border pt-4">
@@ -330,5 +347,42 @@ function ConnectedAccountsSection() {
         )}
       </Card>
     </section>
+  );
+}
+
+// How much of the account's posting limit is used (websitePlan.md §13.8).
+function PostingUsage({ limit }: { limit: PostingLimit | undefined }) {
+  if (!limit) return null;
+  const paused = pausedText(limit);
+  const share = Math.min(1, limit.used / limit.cap);
+  const now = Date.now();
+  const nextFreeAt = limit.nextFreeAt ? Date.parse(limit.nextFreeAt) : null;
+  return (
+    <div className="mb-4 space-y-1.5 text-xs text-muted-foreground">
+      {paused ? (
+        <p className="font-medium text-amber-800 dark:text-amber-200">{paused}</p>
+      ) : (
+        <>
+          <div className="flex items-baseline justify-between gap-2">
+            <span>
+              {limit.used} / {limit.cap} {limit.unit} {windowLabel(limit.window)}
+            </span>
+            {limit.upcoming > 0 && <span>{limit.upcoming} queued</span>}
+          </div>
+          {/* The count above says the same for screen readers. */}
+          <div className="h-1.5 overflow-hidden rounded-full bg-muted" aria-hidden="true">
+            <div
+              className={cn("h-full rounded-full", share >= 0.8 ? "bg-amber-500" : "bg-primary")}
+              style={{ width: `${share * 100}%` }}
+            />
+          </div>
+          {nextFreeAt === null ? (
+            <p>No free posting slot in the next 7 days.</p>
+          ) : (
+            nextFreeAt > now + 60_000 && <p>Next post can go out at {formatWhen(nextFreeAt)}.</p>
+          )}
+        </>
+      )}
+    </div>
   );
 }

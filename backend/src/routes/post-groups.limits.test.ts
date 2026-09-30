@@ -41,13 +41,14 @@ const { OpenAPIHono: Hono } = await import("@hono/zod-openapi");
 const { DelayedError } = await import("bullmq");
 const { prisma } = await import("../db/client");
 const { env } = await import("../lib/env");
-const { budgetsFor } = await import("../lib/posting-limits");
+const { budgetsFor, nextFreeTime } = await import("../lib/posting-limits");
 const { errorHandler } = await import("../middleware/error-handler");
 const { publish } = await import("../queue/publish-worker");
 const { markTargetFailed } = await import("../service/post-groups");
 const { bookedSlotAt, setCooldown } = await import("../service/posting-limits");
 const { postGroupsRoute } = await import("./post-groups");
 const { webhooksRoute } = await import("./webhooks");
+const { postingLimitsRoute } = await import("./posting-limits");
 
 const RUN = crypto.randomUUID().slice(0, 8);
 const HOUR = 60 * 60_000;
@@ -165,6 +166,7 @@ beforeAll(async () => {
     await next();
   });
   app.route("/w/:workspaceId/post-groups", postGroupsRoute);
+  app.route("/w/:workspaceId/posting-limits", postingLimitsRoute);
   app.onError(errorHandler);
 });
 
@@ -395,5 +397,61 @@ describe("n8n callback", () => {
         where: { platformAccountId: await platformAccountIdOf(page) },
       }),
     ).toBe(0);
+  });
+});
+
+describe("GET /posting-limits", () => {
+  interface Limit {
+    connectedAccountId: string;
+    unit: string;
+    used: number;
+    upcoming: number;
+    cap: number;
+    window: string;
+    resetsAt: string | null;
+    nextFreeAt: string | null;
+    cooldown: { until: string; reason: string; message: string } | null;
+  }
+  const limitsFor = async (connectedAccountId: string) => {
+    const res = await app.request(`/w/${workspaceId}/posting-limits`);
+    expect(res.status).toBe(200);
+    return ((await res.json()) as Limit[]).find(
+      (limit) => limit.connectedAccountId === connectedAccountId,
+    );
+  };
+
+  test("shows what was sent, what's queued and the next free time", async () => {
+    const page = await facebookPage();
+    const policy = budgetsFor("FACEBOOK", "x", env.POSTING_LIMITS_PROFILE)[0]?.policy;
+    const first = (await postOk(page, "sent")).targets[0];
+    const queued = (await postOk(page, "queued")).targets[0];
+
+    const limit = await limitsFor(page);
+    expect(limit?.unit).toBe("posts");
+    expect(limit?.cap).toBe(policy?.perDay ?? 0);
+    expect(limit?.window).toBe("ROLLING_24H");
+    expect(limit?.used).toBe(1);
+    expect(limit?.upcoming).toBe(1);
+    // The same answer the limiter gives for those two bookings.
+    if (!policy || !first?.sendAt || !queued?.sendAt) throw new Error("missing data");
+    const booked = [first.sendAt, queued.sendAt].map((at) => ({ at: Date.parse(at), cost: 1 }));
+    expect(Date.parse(limit?.nextFreeAt ?? "")).toBeGreaterThan(Date.parse(queued.sendAt));
+    expect(Date.parse(limit?.nextFreeAt ?? "")).toBe(
+      nextFreeTime(policy, booked, Date.parse(first.sendAt), 1) ?? 0,
+    );
+    expect(limit?.cooldown).toBeNull();
+  });
+
+  test("shows a pause", async () => {
+    const page = await facebookPage();
+    const until = new Date(Date.now() + 5 * HOUR);
+    await pause(page, until);
+    const limit = await limitsFor(page);
+    expect(limit?.cooldown).toEqual({
+      until: until.toISOString(),
+      reason: "ABUSE_BLOCK",
+      message: "flagged as spam",
+    });
+    expect(limit?.nextFreeAt).toBe(until.toISOString());
   });
 });
