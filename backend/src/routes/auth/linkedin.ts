@@ -3,6 +3,7 @@ import { prisma } from "../../db/client";
 import { beginConnect, connectRedirect, finishConnect } from "../../lib/connect-state";
 import { encrypt } from "../../lib/crypto";
 import { buildAuthUrl, exchangeCodeForToken, fetchProfile } from "../../lib/linkedin";
+import { logger } from "../../lib/logger";
 
 export const linkedinAuthRoute = new Hono();
 
@@ -56,7 +57,7 @@ linkedinAuthRoute.get("/callback", async (c) => {
 
     return c.redirect(connectRedirect("connected=linkedin", ctx.workspaceId));
   } catch (err) {
-    console.error("LinkedIn OAuth callback failed:", err);
+    logger.error({ platform: "linkedin", err }, "OAuth callback failed");
     return c.redirect(connectRedirect("error=linkedin_connect_failed", ctx.workspaceId));
   }
 });

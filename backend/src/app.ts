@@ -2,12 +2,12 @@ import { httpInstrumentationMiddleware } from "@hono/otel";
 import { swaggerUI } from "@hono/swagger-ui";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { csrf } from "hono/csrf";
-import { logger } from "hono/logger";
 import { env } from "./lib/env";
 import { requireAuth, requireWorkspace } from "./middleware/auth";
 import { corsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/error-handler";
 import { rateLimit } from "./middleware/rate-limit";
+import { requestLog } from "./middleware/request-log";
 import { facebookAuthRoute } from "./routes/auth/facebook";
 import { instagramAuthRoute } from "./routes/auth/instagram";
 import { linkedinAuthRoute } from "./routes/auth/linkedin";
@@ -35,7 +35,7 @@ export const app = new OpenAPIHono();
 // n8n's callback. No request/response headers are captured: they carry the
 // session cookie and x-callback-secret. websitePlan.md §14.3.
 app.use(httpInstrumentationMiddleware());
-app.use(logger());
+app.use(requestLog);
 app.use(corsMiddleware);
 // Rejects cross-site form/text POSTs (the only kind that skip a CORS
 // preflight) whose Origin isn't the frontend — covers logout and anything

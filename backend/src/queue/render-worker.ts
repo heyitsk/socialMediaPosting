@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Job, Worker } from "bullmq";
 import { prisma } from "../db/client";
+import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
 import { type Rect, type RenditionSpec, renderImage, renderVideo } from "../lib/render";
 import { presignDownload, putObject, readObject } from "../lib/s3";
@@ -85,7 +86,10 @@ export function startRenderWorker(): Worker<RenderJobData> {
   });
   worker.on("failed", (job, err) => {
     if (!job) return;
-    console.error(`render ${job.data.renditionId} failed (attempt ${job.attemptsMade}):`, err);
+    logger.error(
+      { renditionId: job.data.renditionId, attempt: job.attemptsMade, err },
+      "render failed",
+    );
     // Out of retries: the publish worker sees FAILED and fails the targets.
     if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
       void markFailed(job.data.renditionId, err.message.slice(0, 1000));
@@ -109,7 +113,7 @@ async function reconcilePendingRenders(): Promise<void> {
 
 export function startRenderReconciler(): void {
   const run = () =>
-    reconcilePendingRenders().catch((err) => console.error("render reconciler failed:", err));
+    reconcilePendingRenders().catch((err) => logger.error({ err }, "render reconciler failed"));
   run();
   setInterval(run, RECONCILE_INTERVAL_MS);
 }

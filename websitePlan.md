@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Oct 1, 2026):** step 1 built (§14.11.1). Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+> **Status (Oct 1, 2026):** steps 1-2 built (§14.11.1, §14.11.2). Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1529,6 +1529,29 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - `bun test`: 51/51.
 - **Not yet:** the reconcilers and media cleaner run Prisma outside any request, so their queries show up as root `prisma:client:operation` traces every tick. Step 3 wraps each tick in its own span.
 
+### 14.11.2 Step 2 as built (Oct 1, 2026)
+
+- **`backend/src/lib/logger.ts`:** pino 10, `base: undefined`, `LOG_LEVEL` (default `info`).
+  - A `mixin` adds `trace_id`/`span_id` from the active span to every line.
+  - Output goes through a custom in-process destination, not a pino transport, because transports run in a worker thread and lose the caller's trace context. Each line goes:
+    - to stdout: pino-pretty in dev (trace ids hidden), raw JSON in production.
+    - to the OTel Logs SDK, using `context.active()` so Loki gets the trace id natively. Fields become attributes (objects JSON-encoded). `err` maps to `exception.type` / `exception.message` / `exception.stacktrace`.
+  - The OTel logger is looked up per line, so a logger created before `otel.ts` starts isn't stuck as a no-op.
+- **`otel.ts`:** adds a `BatchLogRecordProcessor` with the OTLP HTTP log exporter.
+- **`middleware/request-log.ts`:** replaces `hono/logger`. One `request` line per request with `method`, `route` (Hono pattern, not the raw path), `status` and `durationMs`. It logs at `error` for 5xx. It's registered right after `@hono/otel`, so it's inside the request span.
+- **`error-handler.ts`:** `logger.error({ err }, "unhandled error")`.
+- **Every `console.*` call replaced** (all but `lib/env.ts`, which runs before anything else and exits):
+  - `index.ts`, the five OAuth callback routes (`{ platform, err }`), `login.ts` (message only, never the code/state/id_token, as before), `media.ts`, `post-groups.ts` and `webhooks.ts` routes;
+  - the publish, render and video-status workers;
+  - `service/media.ts` and `service/limit-pauses.ts`, whose pause line now carries `platform`, `platformAccountId`, `until`, `reason` and `failedWaiting` as fields.
+  - Messages are fixed strings; ids moved into fields.
+- **Checked against local otel-lgtm:**
+  - The `request` line for a `POST /api/webhooks/n8n-callback` sent with a fixed `traceparent` reached Loki with that trace id and span id, and `route`/`status`/`method` as structured metadata.
+  - A logged `Error` arrived with `exception.*` attributes.
+  - The bundled Grafana already provisions Loki `trace_id` → Tempo and Tempo → Loki links. In Grafana Cloud these must be set up by hand (step 6).
+  - `bun test`: 51/51. `tsc` clean.
+- **Known gap:** OAuth helper errors (`lib/facebook.ts` etc.) include the platform's error response body in `err.message`. It was already printed that way. They're error bodies, not tokens, but it's worth a look before production.
+
 ### 14.12 Risks
 
 - **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
@@ -1571,3 +1594,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*
 *Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11. §14.10 decisions: Faro in the first build, n8n node spans on, Faro off locally, scheduled (delayed) sends get their own trace with a span link back to the create request.*
 *Updated: 2026-10-01 | §14 step 1 built (§14.11.1): `backend/src/otel.ts` (NodeSDK, OTLP traces + metrics, Prisma instrumentation, query-string redaction, 4xx not marked as errors), `@hono/otel` as the first middleware, user/workspace span attributes, `otel-lgtm` in compose (Grafana on :3001). Spike under Bun passed: incoming `traceparent` continued, Prisma spans nested under the request span with SQL text, HTTP metrics in Prometheus. 51/51 tests pass.*
+*Updated: 2026-10-01 | §14 step 2 built (§14.11.2): `lib/logger.ts` (pino with trace ids, in-process bridge to the OTel Logs SDK → Loki, `err` as `exception.*`), `middleware/request-log.ts` replacing `hono/logger`, and every `console.*` call except `lib/env.ts` moved to structured fields with fixed messages. Log → trace link checked in local Grafana. 51/51 tests pass.*

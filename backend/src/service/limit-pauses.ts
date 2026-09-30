@@ -1,6 +1,7 @@
 import { prisma } from "../db/client";
 import type { PostablePlatform } from "../lib/capabilities";
 import { classifyLimitError, type LimitError } from "../lib/limit-errors";
+import { logger } from "../lib/logger";
 import { APP_WIDE_ACCOUNT_ID, nextDayStart, pausedFailureMessage } from "../lib/posting-limits";
 import { removePublishJob } from "../queue/publish-queue";
 import { markTargetFailed } from "./post-groups";
@@ -103,8 +104,15 @@ export async function pauseForLimitError(input: {
     sourcePostId,
   });
   const failed = await failWaitingTargets(platform, platformAccountId, cooldown, now);
-  console.warn(
-    `paused ${platform} ${platformAccountId} until ${cooldown.until.toISOString()} (${limit.reason}); failed ${failed} waiting post(s)`,
+  logger.warn(
+    {
+      platform,
+      platformAccountId,
+      until: cooldown.until.toISOString(),
+      reason: limit.reason,
+      failedWaiting: failed,
+    },
+    "account paused for a posting limit",
   );
   return cooldown;
 }

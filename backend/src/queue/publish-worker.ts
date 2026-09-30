@@ -1,6 +1,7 @@
 import { DelayedError, type Job, Worker } from "bullmq";
 import { prisma } from "../db/client";
 import { isPostablePlatform, reconnectReason } from "../lib/capabilities";
+import { logger } from "../lib/logger";
 import { pausedFailureMessage } from "../lib/posting-limits";
 import { mediaUrlsForDispatch } from "../service/media";
 import { dispatchPost } from "../service/n8n";
@@ -129,7 +130,7 @@ export async function publish(job: Job<PublishJobData>, token?: string): Promise
   const renditions = post.renditions.map((link) => link.rendition);
   const failedRender = renditions.find((rendition) => rendition.status === "FAILED");
   if (failedRender) {
-    console.error(`publish ${postId}: a rendition failed:`, failedRender.error);
+    logger.error({ postId, renderError: failedRender.error }, "publish: a rendition failed");
     await failUnsent(
       "Couldn't prepare the cropped media for this platform — retry to render it again",
     );
@@ -159,7 +160,7 @@ export async function publish(job: Job<PublishJobData>, token?: string): Promise
     const mediaUrls = await mediaUrlsForDispatch(group.media, post.renditions, post.mediaUrls);
     await dispatchPost({ ...post, mediaUrls }, account);
   } catch (err) {
-    console.error(`publish ${postId} (${platform}) failed:`, err);
+    logger.error({ postId, platform, err }, "publish failed");
     const message =
       err instanceof Error && err.name === "TimeoutError"
         ? "The posting service didn't respond — try again later"
@@ -196,7 +197,7 @@ export function startPublishWorker(): Worker<PublishJobData> {
     },
     { connection: redisConnection(), concurrency: CONCURRENCY },
   );
-  worker.on("failed", (job, err) => console.error(`publish-queue job ${job?.id} crashed:`, err));
+  worker.on("failed", (job, err) => logger.error({ jobId: job?.id, err }, "publish job crashed"));
   return worker;
 }
 
@@ -222,7 +223,7 @@ async function reconcileDueSchedules(): Promise<void> {
   });
   for (const post of due) {
     if (!(await hasPendingPublishJob(post.id, post.attempt))) {
-      console.warn(`reconciler: re-queueing lost publish job for post ${post.id}`);
+      logger.warn({ postId: post.id }, "reconciler: re-queueing lost publish job");
       await enqueuePublish(post.id, post.attempt);
     }
   }
@@ -230,7 +231,7 @@ async function reconcileDueSchedules(): Promise<void> {
 
 export function startScheduleReconciler(): void {
   const run = () =>
-    reconcileDueSchedules().catch((err) => console.error("schedule reconciler failed:", err));
+    reconcileDueSchedules().catch((err) => logger.error({ err }, "schedule reconciler failed"));
   run();
   setInterval(run, RECONCILE_INTERVAL_MS);
 }

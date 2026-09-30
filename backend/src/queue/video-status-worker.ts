@@ -4,6 +4,7 @@ import { prisma } from "../db/client";
 import { decrypt } from "../lib/crypto";
 import { getVideoStatus as getFacebookVideoStatus } from "../lib/facebook";
 import { getVideoStatus as getLinkedInVideoStatus } from "../lib/linkedin";
+import { logger } from "../lib/logger";
 import { getVideoStatus as getYouTubeVideoStatus } from "../lib/youtube";
 import { pauseForLimitError } from "../service/limit-pauses";
 import { markTargetFailed, markTargetPublished } from "../service/post-groups";
@@ -91,7 +92,7 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
           platformAccountId: post.connectedAccount.platformAccountId,
           raw: err instanceof Error ? err.message : String(err),
         }).catch((pauseErr: unknown) =>
-          console.error(`couldn't pause after poll of ${postId}:`, pauseErr),
+          logger.error({ postId, err: pauseErr }, "couldn't pause after video-status poll"),
         );
         throw err;
       }

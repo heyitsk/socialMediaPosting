@@ -1,7 +1,9 @@
 import { type Context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
+import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import {
@@ -104,11 +106,13 @@ if (enabled) {
         exportIntervalMillis: 30_000,
       }),
     ],
+    // Fed by lib/logger.ts.
+    logRecordProcessors: [new BatchLogRecordProcessor({ exporter: new OTLPLogExporter() })],
     instrumentations: [new PrismaInstrumentation()],
   });
   sdk.start();
 
-  // Flush buffered spans and metrics before the process goes away.
+  // Flush buffered spans, metrics and logs before the process goes away.
   const shutdown = () => {
     sdk.shutdown().finally(() => process.exit(0));
   };
