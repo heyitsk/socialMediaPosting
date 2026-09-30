@@ -1424,7 +1424,7 @@ New video branch: `Route by Media Type` → `LI Init Video Upload` (size from pa
 
 `LI Relay Video Parts`:
 - For each `uploadInstructions[i]`: GET `media_urls[0]` with `Range: bytes=firstByte-lastByte`. Require `206` and a body length of exactly `lastByte-firstByte+1`. Then PUT to `uploadUrl` with `Authorization`, `Content-Type`, and full-response mode to read the `ETag`.
-- Run parts with a small concurrency pool (proposed 4, ≈16 MiB in memory), then emit `uploadedPartIds` **in part order**.
+- Run parts through a concurrency pool (a constant; value open, see 15.8 #3), then emit `uploadedPartIds` **in part order**.
 - Per-part retry: 3 attempts with backoff on network errors / 5xx / 429. On a 4xx, fail straight away.
 - Errors are thrown with the node name + part index + status + body snippet, so `lib/platform-error.ts` rules keep matching (update the rules that key on `LI Download Video` / `Split Video Into Parts`).
 - Remove `LI Download Video`, `Merge Video Upload`, `Split Video Into Parts`, `LI Upload Video Binary`, `Collect Video Part ETags`.
