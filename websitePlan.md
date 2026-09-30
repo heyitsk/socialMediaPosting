@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Sep 30, 2026):** planning only. Nothing built. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. Open questions are in §14.10.
+> **Status (Sep 30, 2026):** planning only. Nothing built. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1492,12 +1492,12 @@ The result is one trace per target that reads: `POST post-groups` → `publish` 
 - The Faro collector URL is public by design (it's shipped in the browser bundle), so it's a plain `VITE_FARO_URL` build var.
 - Sampling: `parentbased_always_on` (100 %) while volume is low. Revisit if traces near 50 GB/month, e.g. drop to 20 % and keep 100 % of errors with tail sampling in Alloy.
 
-### 14.10 Open questions (defaults marked, confirm or change)
+### 14.10 Decisions (Kushagra, Sep 30)
 
-1. **Frontend Faro in the first build?** Default: yes, as step 5. It's cheap, and it's how we'd see composer errors users never report.
-2. **n8n node spans:** default on (`N8N_OTEL_TRACES_INCLUDE_NODE_SPANS=true`). It shows exactly which Graph API node failed. Turn it off if trace volume grows.
-3. **Local Faro testing:** default: Faro off locally, with an optional `alloy` compose profile (`docker compose --profile faro up`).
-4. **Scheduled-post traces:** parent (one long trace) vs. link (separate trace). Default: parent, then revisit after step 3 (§14.5).
+1. **Frontend Faro in the first build:** yes, as step 5. It's cheap, and it's how we'd see composer errors users never report.
+2. **n8n node spans:** on (`N8N_OTEL_TRACES_INCLUDE_NODE_SPANS=true`). It shows exactly which Graph API node failed. Turn it off if trace volume grows.
+3. **Local Faro testing:** Faro off locally, with an optional `alloy` compose profile (`docker compose --profile faro up`).
+4. **Scheduled-post traces:** parent: the publish job continues the create request's trace, even when it runs hours later. Revisit after step 3 (§14.5) if long traces skew Tempo's duration search or the waterfall is unreadable. The fallback is a new trace per send with a span link back to the create request.
 
 ### 14.11 Build order
 
@@ -1550,4 +1550,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*
 *Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
 *Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*
-*Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11, open questions in §14.10.*
+*Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11. §14.10 decisions: Faro in the first build, n8n node spans on, Faro off locally, scheduled sends continue the create request's trace.*
