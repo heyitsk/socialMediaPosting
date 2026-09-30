@@ -51,10 +51,26 @@ const ERROR_RULES: ErrorRule[] = [
     message: "The platform didn't accept this account's login — reconnect it on the Dashboard.",
   },
 
-  // --- Limits ---
+  // --- Limits (these also pause the account, lib/limit-errors.ts) ---
+  {
+    text: /\\?"code\\?":\s*368\b|temporarily blocked/i,
+    message:
+      "Meta flagged this as spam and blocked posting from this account for now — it's paused for 24 hours, and retrying sooner makes the block longer.",
+  },
+  {
+    platform: "INSTAGRAM",
+    text: /2207042/,
+    message: "This Instagram account has reached its limit of posts per 24 hours.",
+  },
   {
     platform: "YOUTUBE",
-    text: /quotaExceeded|uploadLimitExceeded/,
+    text: /quotaExceeded/,
+    message:
+      "The app's daily YouTube quota is used up — YouTube posts resume after midnight Pacific time.",
+  },
+  {
+    platform: "YOUTUBE",
+    text: /uploadLimitExceeded/,
     message: "YouTube's upload limit for this channel is used up — try again tomorrow.",
   },
   {

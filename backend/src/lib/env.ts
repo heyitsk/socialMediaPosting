@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 const envSchema = z.object({
-  NODE_ENV: z.enum(["development", "production"]).default("development"),
+  // "test" is what `bun test` sets.
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().default(4000),
   DATABASE_URL: z.url(),
   REDIS_HOST: z.string().default("localhost"),
@@ -53,6 +54,10 @@ const envSchema = z.object({
 
   N8N_BASE_URL: z.url(),
   N8N_CALLBACK_SECRET: z.string().min(1),
+
+  // "dev" halves every posting cap and doubles the gaps, for while the Meta
+  // app is still in development mode. See lib/posting-limits.ts.
+  POSTING_LIMITS_PROFILE: z.enum(["standard", "dev"]).default("standard"),
 });
 
 const parsed = envSchema.safeParse(process.env);

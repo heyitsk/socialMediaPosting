@@ -16,18 +16,29 @@ import {
   SHORTS_MAX_DURATION_SECONDS,
 } from "../lib/capabilities";
 import { isVideoType } from "../lib/media-files";
+import {
+  AUTO_DELAY_MS,
+  type LimitRefusal,
+  limitRefusalMessage,
+  lockOrderKey,
+  targetContentHash,
+} from "../lib/posting-limits";
 import { renditionKey } from "../lib/render";
 import type { WorkspaceEnv } from "../middleware/auth";
+import { rateLimitByUser } from "../middleware/rate-limit";
 import { enqueuePublish, removePublishJob } from "../queue/publish-queue";
 import { enqueueRender } from "../queue/render-queue";
 import { mediaExpiry, probeMediaAsset, resetFailedRenditions } from "../service/media";
 import { resolveTargetMedia, type TargetMedia } from "../service/media-fits";
 import {
+  aggregateStatus,
+  canRetry,
   MAX_ATTEMPTS,
   markTargetCancelled,
   markTargetFailed,
   prepareRetry,
 } from "../service/post-groups";
+import { releaseSlot, reserveSlot } from "../service/posting-limits";
 import {
   contentKindSchema,
   mediaTypeSchema,
@@ -93,9 +104,27 @@ const validationErrorSchema = z
     // Problems with the post as a whole (media, schedule time).
     errors: z.array(z.string()),
     // Problems with individual targets — the composer offers to deselect these.
-    targets: z.array(z.object({ connectedAccountId: z.string(), errors: z.array(z.string()) })),
+    targets: z.array(
+      z.object({
+        connectedAccountId: z.string(),
+        errors: z.array(z.string()),
+        // Set when the account's posting limit is the problem: the earliest
+        // time it can take this post, for a "Schedule for then" button.
+        nextFreeAt: z.iso.datetime().nullable().optional(),
+      }),
+    ),
   })
   .openapi("PostGroupValidationError");
+
+type TargetError = z.infer<typeof validationErrorSchema>["targets"][number];
+
+// Every post is limited per platform account anyway; this stops one user
+// flooding the queue and n8n with post groups.
+const CREATE_LIMIT_PER_HOUR = 30;
+
+// Booking may wait on other posts to the same accounts, so the create
+// transaction gets longer than Prisma's 5 s default.
+const CREATE_TRANSACTION = { timeout: 15_000 };
 
 const groupParamsSchema = workspaceParamsSchema.extend({ groupId: z.string() });
 
@@ -104,6 +133,7 @@ const createPostGroup = createRoute({
   path: "/",
   tags: ["Posts"],
   summary: "Post to one or more connected accounts, now or scheduled",
+  middleware: [rateLimitByUser("post-groups", CREATE_LIMIT_PER_HOUR, 60 * 60)] as const,
   request: {
     params: workspaceParamsSchema,
     body: { content: { "application/json": { schema: createPostGroupSchema } } },
@@ -118,9 +148,11 @@ const createPostGroup = createRoute({
       content: { "application/json": { schema: postGroupSchema } },
     },
     400: {
-      description: "Validation failed — nothing was created",
+      description:
+        "Validation failed, or an account's posting limit can't fit it within an hour — nothing was created",
       content: { "application/json": { schema: validationErrorSchema } },
     },
+    429: { description: `More than ${CREATE_LIMIT_PER_HOUR} posts created in an hour` },
   },
 });
 
@@ -181,7 +213,10 @@ const retryTarget = createRoute({
       content: { "application/json": { schema: postGroupSchema } },
     },
     404: { description: "Not found" },
-    409: { description: "Target isn't FAILED" },
+    409: {
+      description:
+        "Target isn't FAILED, is out of attempts, or its account's posting limit or pause doesn't allow it within an hour",
+    },
   },
 });
 
@@ -400,6 +435,28 @@ async function validate(workspaceId: string, body: CreateBody) {
 // Another post claimed one of the files between validation and create.
 class MediaTakenError extends Error {}
 
+// Some targets can't be booked (duplicate, or no free slot within the
+// allowance). Thrown to roll the whole create back — all-or-nothing, like
+// validation.
+class PostingLimitError extends Error {
+  constructor(readonly targets: TargetError[]) {
+    super("posting limit");
+  }
+}
+
+function refusalError(
+  connectedAccountId: string,
+  refusal: LimitRefusal,
+  platform: PostablePlatform,
+  now: number,
+): TargetError {
+  return {
+    connectedAccountId,
+    errors: [limitRefusalMessage(refusal, platform, now)],
+    nextFreeAt: refusal.reason === "NO_SLOT" ? (refusal.nextFreeAt?.toISOString() ?? null) : null,
+  };
+}
+
 export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
   .openapi(createPostGroup, async (c) => {
     const body = c.req.valid("json");
@@ -425,9 +482,14 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     let group: Prisma.PostGroupGetPayload<{ include: typeof postGroupInclude }>;
     // Renditions to render once the transaction has committed.
     let toRender: string[] = [];
+    // When the limiter booked each post to go out.
+    let sendAt = new Map<string, Date>();
+    const now = Date.now();
+    const earliest = scheduledFor ?? new Date(now);
     try {
       group = await prisma.$transaction(async (tx) => {
         toRender = [];
+        sendAt = new Map();
         const created = await tx.postGroup.create({
           data: {
             workspaceId,
@@ -499,9 +561,60 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
               toRender.push(rendition.id);
           }
         }
+
+        // Book each target with the posting limiter (websitePlan.md §13.6),
+        // in lock order so two posts sharing accounts can't deadlock. A
+        // target pushed back from "now" waits as SCHEDULED, so it shows as
+        // waiting and can be cancelled like a scheduled one.
+        const refused: TargetError[] = [];
+        const byLockOrder = [...resolved].sort((a, b) => {
+          const keyA = lockOrderKey(a.account.platform, a.account.platformAccountId);
+          const keyB = lockOrderKey(b.account.platform, b.account.platformAccountId);
+          return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+        });
+        for (const target of byLockOrder) {
+          const postId = postIdByAccount.get(target.account.id);
+          if (!postId) continue;
+          const booking = await reserveSlot(tx, {
+            platform: target.account.platform,
+            platformAccountId: target.account.platformAccountId,
+            postId,
+            attempt: 1,
+            mediaType: target.mediaType,
+            mediaCount: media.length,
+            contentHash: targetContentHash(target.caption, media, []),
+            earliest,
+            latest: new Date(earliest.getTime() + AUTO_DELAY_MS),
+          });
+          if (!booking.ok) {
+            refused.push(refusalError(target.account.id, booking, target.account.platform, now));
+            continue;
+          }
+          sendAt.set(postId, booking.slotAt);
+          if (!scheduledFor && booking.slotAt > earliest) {
+            await tx.post.update({ where: { id: postId }, data: { status: "SCHEDULED" } });
+          }
+        }
+        if (refused.length > 0) throw new PostingLimitError(refused);
+        if (!scheduledFor && [...sendAt.values()].some((at) => at > earliest)) {
+          const targets = await tx.post.findMany({
+            where: { groupId: created.id },
+            select: { status: true },
+          });
+          await tx.postGroup.update({
+            where: { id: created.id },
+            data: { status: aggregateStatus(targets.map((target) => target.status)) },
+          });
+        }
         return created;
-      });
+      }, CREATE_TRANSACTION);
     } catch (err) {
+      if (err instanceof PostingLimitError) {
+        return c.json(
+          { message: "Some of this post can't be sent", errors: [], targets: err.targets },
+          400,
+        );
+      }
       if (err instanceof MediaTakenError) {
         return c.json(
           {
@@ -537,7 +650,7 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     await Promise.all(
       group.posts.map(async (post) => {
         try {
-          await enqueuePublish(post.id, post.attempt, scheduledFor);
+          await enqueuePublish(post.id, post.attempt, sendAt.get(post.id) ?? scheduledFor);
         } catch (err) {
           console.error(`couldn't queue post ${post.id}:`, err);
           await markTargetFailed(
@@ -548,6 +661,7 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
               attempt: post.attempt,
             },
           );
+          await releaseSlot(prisma, post.id, post.attempt);
         }
       }),
     );
@@ -583,7 +697,8 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     await prisma.postGroup.update({ where: { id: groupId }, data: { cancelledAt: new Date() } });
     for (const post of pending) {
       await removePublishJob(post.id, post.attempt);
-      await markTargetCancelled(post.id);
+      // Never sent, so it stops counting against the account's limit.
+      if (await markTargetCancelled(post.id)) await releaseSlot(prisma, post.id, post.attempt);
     }
     return c.json(serializePostGroup(await findGroup(c.var.workspaceId, groupId)), 200);
   })
@@ -595,28 +710,57 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
       throw new HTTPException(404, { message: "Post not found" });
     }
 
-    const attempt = await prepareRetry(postId);
-    if (attempt === "NOT_FAILED") {
-      throw new HTTPException(409, { message: "Only failed posts can be retried" });
-    }
-    if (attempt === "LIMIT_REACHED") {
-      throw new HTTPException(409, {
+    const notFailed = () => new HTTPException(409, { message: "Only failed posts can be retried" });
+    const outOfAttempts = () =>
+      new HTTPException(409, {
         message: `This post was already tried ${MAX_ATTEMPTS} times — create it again instead`,
       });
+    if (post.status !== "FAILED") throw notFailed();
+    if (!canRetry(post)) throw outOfAttempts();
+
+    // A retry is paced like any other send: booked first, refused if the
+    // account is paused or has no slot within the hour (websitePlan.md §13.6).
+    const { platform, platformAccountId } = post.connectedAccount;
+    const nextAttempt = post.attempt + 1;
+    let slotAt: Date | null = null;
+    if (isPostablePlatform(platform)) {
+      const now = Date.now();
+      const booking = await prisma.$transaction((tx) =>
+        reserveSlot(tx, {
+          platform,
+          platformAccountId,
+          postId,
+          attempt: nextAttempt,
+          mediaType: post.mediaType,
+          mediaCount: group.media.length,
+          contentHash: targetContentHash(post.caption, group.media, post.mediaUrls),
+          earliest: new Date(now),
+          latest: new Date(now + AUTO_DELAY_MS),
+        }),
+      );
+      if (!booking.ok) {
+        throw new HTTPException(409, { message: limitRefusalMessage(booking, platform, now) });
+      }
+      slotAt = booking.slotAt;
+    }
+
+    const attempt = await prepareRetry(postId);
+    if (typeof attempt !== "number") {
+      // Another request got there first, or the post changed meanwhile.
+      await releaseSlot(prisma, postId, nextAttempt);
+      throw attempt === "NOT_FAILED" ? notFailed() : outOfAttempts();
     }
     try {
       // A render that failed gets another go along with the post.
       for (const renditionId of await resetFailedRenditions(postId))
         await enqueueRender(renditionId);
-      await enqueuePublish(postId, attempt);
+      await enqueuePublish(postId, attempt, slotAt);
     } catch (err) {
       console.error(`couldn't queue retry of post ${postId}:`, err);
-      await markTargetFailed(
-        postId,
-        post.connectedAccount.platform,
-        "Couldn't queue the retry — try again",
-        { attempt },
-      );
+      await markTargetFailed(postId, platform, "Couldn't queue the retry — try again", {
+        attempt,
+      });
+      await releaseSlot(prisma, postId, attempt);
     }
     return c.json(serializePostGroup(await findGroup(c.var.workspaceId, groupId)), 200);
   });
