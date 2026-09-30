@@ -4,6 +4,7 @@ import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
 import { type ImageShape, probeImage, probeVideo, type VideoShape } from "../lib/media-probe";
 import { abortMultipartUpload, deleteObject, presignDownload, readObject } from "../lib/s3";
+import { withRootSpan } from "../lib/tracing";
 
 // websitePlan.md §11. Uploaded media is kept this long after the post's send
 // time (not after upload — posts can be scheduled up to 90 days ahead), long
@@ -143,7 +144,10 @@ async function cleanMedia(): Promise<void> {
 }
 
 export function startMediaCleaner(): void {
-  const run = () => cleanMedia().catch((err) => logger.error({ err }, "media cleaner failed"));
+  const run = () =>
+    withRootSpan("clean media", cleanMedia).catch((err) =>
+      logger.error({ err }, "media cleaner failed"),
+    );
   run();
   setInterval(run, CLEAN_INTERVAL_MS);
 }

@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Oct 1, 2026):** steps 1-2 built (§14.11.1, §14.11.2). Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+> **Status (Oct 1, 2026):** steps 1-3 built (§14.11.1-§14.11.3); the n8n leg of step 3 waits on upgrading the running n8n container. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1552,6 +1552,32 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - `bun test`: 51/51. `tsc` clean.
 - **Known gap:** OAuth helper errors (`lib/facebook.ts` etc.) include the platform's error response body in `err.message`. It was already printed that way. They're error bodies, not tokens, but it's worth a look before production.
 
+### 14.11.3 Step 3 as built (Oct 1, 2026)
+
+- **`queue/telemetry.ts`:**
+  - One `BullMQOtel` (`bullmq-otel` 2.0, `enableMetrics: true`) passed as `telemetry` to all three `Queue`s and `Worker`s.
+  - `laterJob()` for jobs that run later: it sets BullMQ's job option `telemetry.omitContext` (so the worker's `process` span starts a new trace) and puts the caller's `traceparent` in `job.data.traceLink`.
+  - `linkToProducer(job.data)`, called first in the publish and video-status processors, adds it as a span link.
+  - Where each job lands:
+    - **Delayed `publish` jobs** (schedules and limiter push-backs): new trace + link.
+    - **Deadline jobs:** always new trace + link.
+    - **Video-status polls:** new trace + link, since their retries run up to ~33 min.
+    - **Immediate publishes and renders:** keep the parent.
+  - A job that starts immediately and is later re-delayed (render wait, pacing) keeps its parent, because BullMQ reuses the job's stored context. Acceptable for now.
+- **`lib/tracing.ts`:**
+  - `withRootSpan(name, fn)` gives the schedule reconciler, render reconciler and media cleaner one root span per tick (`reconcile schedules`, `reconcile renders`, `clean media`).
+  - `tracedFetch(url, init, { propagate })` is a CLIENT span per call. `url.full` never includes the query string (Graph API URLs carry `access_token`).
+  - `traceparent` is only sent with `propagate: true`, which is set only for the n8n dispatch in `service/n8n.ts`. Platform APIs get no trace headers. All 17 `fetch` calls (`service/n8n.ts`, `lib/{facebook,instagram,threads,linkedin,youtube,google-login}.ts`) go through it.
+- **`docker-compose.yml` n8n:** image pinned to `docker.n8n.io/n8nio/n8n:2.41.4` (the `stable` tag on Oct 1). Added `N8N_OTEL_ENABLED=true`, `N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4318`, `N8N_OTEL_EXPORTER_SERVICE_NAME=smposting-n8n`.
+  - **The running container is still 2.13.4.** Upgrading means recreating it on the external `n8n_data` volume, and n8n runs its DB migrations on first start. Back up the volume first.
+- **Checked** with a throwaway `otel-spike` queue, using the same helpers against local Redis and otel-lgtm:
+  - An immediate job's `add` → `process` → `complete` spans sat in the request's trace.
+  - A delayed job's `process` span had no parent and a link to the request's trace.
+  - `tracedFetch` sent `traceparent` only with `propagate`.
+  - `url.full` came through with the query string stripped.
+  - `bun test` 51/51, `tsc` clean.
+- **Not yet checked:** the n8n leg (dispatch → `workflow.execute` → callback in one trace) needs the n8n upgrade plus a real post, which is §14.11 step 3's exit check.
+
 ### 14.12 Risks
 
 - **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
@@ -1595,3 +1621,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11. §14.10 decisions: Faro in the first build, n8n node spans on, Faro off locally, scheduled (delayed) sends get their own trace with a span link back to the create request.*
 *Updated: 2026-10-01 | §14 step 1 built (§14.11.1): `backend/src/otel.ts` (NodeSDK, OTLP traces + metrics, Prisma instrumentation, query-string redaction, 4xx not marked as errors), `@hono/otel` as the first middleware, user/workspace span attributes, `otel-lgtm` in compose (Grafana on :3001). Spike under Bun passed: incoming `traceparent` continued, Prisma spans nested under the request span with SQL text, HTTP metrics in Prometheus. 51/51 tests pass.*
 *Updated: 2026-10-01 | §14 step 2 built (§14.11.2): `lib/logger.ts` (pino with trace ids, in-process bridge to the OTel Logs SDK → Loki, `err` as `exception.*`), `middleware/request-log.ts` replacing `hono/logger`, and every `console.*` call except `lib/env.ts` moved to structured fields with fixed messages. Log → trace link checked in local Grafana. 51/51 tests pass.*
+*Updated: 2026-10-01 | §14 step 3 built (§14.11.3): `bullmq-otel` on every queue and worker; delayed publishes, deadlines and video-status polls start their own trace with a span link back (`queue/telemetry.ts`); root spans for the reconcilers and media cleaner; `tracedFetch` for all 17 outbound calls, sending `traceparent` only to n8n; n8n pinned to 2.41.4 with `N8N_OTEL_*` in compose. Parent/link/propagation/redaction checked in Tempo with a throwaway queue. The n8n leg needs the running n8n container upgraded from 2.13.4.*

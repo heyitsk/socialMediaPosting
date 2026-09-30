@@ -1,6 +1,7 @@
 import type { MediaType } from "@prisma/client";
 import { Queue } from "bullmq";
 import { redisConnection } from "./connection";
+import { laterJob, type TraceLinkData, telemetry } from "./telemetry";
 
 export const PUBLISH_QUEUE = "post-publish";
 
@@ -8,7 +9,7 @@ export const PUBLISH_QUEUE = "post-publish";
 // - "publish": send one target to its n8n workflow — now, or delayed until
 //   the group's scheduledFor.
 // - "deadline": fail the target if n8n never called back.
-export interface PublishJobData {
+export interface PublishJobData extends TraceLinkData {
   postId: string;
   attempt: number;
   // Set while a publish waits for its cropped/padded media to finish
@@ -16,7 +17,10 @@ export interface PublishJobData {
   waitingSince?: number;
 }
 
-const publishQueue = new Queue<PublishJobData>(PUBLISH_QUEUE, { connection: redisConnection() });
+const publishQueue = new Queue<PublishJobData>(PUBLISH_QUEUE, {
+  connection: redisConnection(),
+  telemetry,
+});
 
 // Custom job ids make re-adding a no-op, so the reconciler (and a retried
 // request) can't double-publish. BullMQ rejects ":" in custom ids.
@@ -30,12 +34,15 @@ export async function enqueuePublish(
   attempt: number,
   runAt?: Date | null,
 ): Promise<void> {
+  const delay = runAt ? Math.max(0, runAt.getTime() - Date.now()) : 0;
+  const later = delay > 0 ? laterJob() : undefined;
   await publishQueue.add(
     "publish",
-    { postId, attempt },
+    { postId, attempt, ...later?.data },
     {
+      ...later?.opts,
       jobId: publishJobId(postId, attempt),
-      delay: runAt ? Math.max(0, runAt.getTime() - Date.now()) : 0,
+      delay,
       attempts: 1,
       removeOnComplete: true,
       removeOnFail: true,
@@ -59,10 +66,12 @@ export async function enqueueCallbackDeadline(
   attempt: number,
   mediaType: MediaType,
 ): Promise<void> {
+  const later = laterJob();
   await publishQueue.add(
     "deadline",
-    { postId, attempt },
+    { postId, attempt, ...later.data },
     {
+      ...later.opts,
       jobId: deadlineJobId(postId, attempt),
       delay: callbackDeadlineMs(mediaType),
       attempts: 1,

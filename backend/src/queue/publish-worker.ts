@@ -3,6 +3,7 @@ import { prisma } from "../db/client";
 import { isPostablePlatform, reconnectReason } from "../lib/capabilities";
 import { logger } from "../lib/logger";
 import { pausedFailureMessage } from "../lib/posting-limits";
+import { withRootSpan } from "../lib/tracing";
 import { mediaUrlsForDispatch } from "../service/media";
 import { dispatchPost } from "../service/n8n";
 import {
@@ -19,6 +20,7 @@ import {
   PUBLISH_QUEUE,
   type PublishJobData,
 } from "./publish-queue";
+import { linkToProducer, telemetry } from "./telemetry";
 
 // Each job is one quick HTTP call to n8n (the workflows respond on receipt),
 // so a group's targets — up to this many — go out in parallel.
@@ -192,10 +194,11 @@ export function startPublishWorker(): Worker<PublishJobData> {
   const worker = new Worker<PublishJobData>(
     PUBLISH_QUEUE,
     async (job, token) => {
+      linkToProducer(job.data);
       if (job.name === "deadline") return enforceDeadline(job.data);
       return publish(job, token);
     },
-    { connection: redisConnection(), concurrency: CONCURRENCY },
+    { connection: redisConnection(), concurrency: CONCURRENCY, telemetry },
   );
   worker.on("failed", (job, err) => logger.error({ jobId: job?.id, err }, "publish job crashed"));
   return worker;
@@ -231,7 +234,9 @@ async function reconcileDueSchedules(): Promise<void> {
 
 export function startScheduleReconciler(): void {
   const run = () =>
-    reconcileDueSchedules().catch((err) => logger.error({ err }, "schedule reconciler failed"));
+    withRootSpan("reconcile schedules", reconcileDueSchedules).catch((err) =>
+      logger.error({ err }, "schedule reconciler failed"),
+    );
   run();
   setInterval(run, RECONCILE_INTERVAL_MS);
 }

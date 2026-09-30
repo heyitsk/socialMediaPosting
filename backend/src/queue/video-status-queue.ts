@@ -1,5 +1,6 @@
 import { Queue } from "bullmq";
 import { redisConnection } from "./connection";
+import { laterJob, telemetry } from "./telemetry";
 
 export const VIDEO_STATUS_QUEUE = "video-status-poll";
 
@@ -7,7 +8,7 @@ export const VIDEO_STATUS_QUEUE = "video-status-poll";
 // video-status-worker.ts registers as its settings.backoffStrategy.
 const POLL_BACKOFF_TYPE = "video-status-poll";
 
-const videoStatusQueue = new Queue(VIDEO_STATUS_QUEUE, { connection: redisConnection() });
+const videoStatusQueue = new Queue(VIDEO_STATUS_QUEUE, { connection: redisConnection(), telemetry });
 
 export type VideoPollPlatform = "FACEBOOK" | "LINKEDIN" | "YOUTUBE";
 
@@ -56,10 +57,13 @@ export async function enqueueVideoStatusPoll(
   platformPostId: string,
   mediaId: string = platformPostId,
 ): Promise<void> {
+  // Retries run for up to ~33 min, so polls get their own trace (§14.5).
+  const later = laterJob();
   await videoStatusQueue.add(
     "poll",
-    { postId, platform, platformPostId, mediaId },
+    { postId, platform, platformPostId, mediaId, ...later.data },
     {
+      ...later.opts,
       // A duplicate n8n callback for the same upload reuses this id instead
       // of starting a second poller.
       jobId: `video-${postId}-${mediaId}`.replace(/:/g, "_"),

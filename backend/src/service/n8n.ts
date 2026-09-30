@@ -3,6 +3,7 @@ import { decrypt } from "../lib/crypto";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../lib/capabilities";
 import { env } from "../lib/env";
 import { getFreshYouTubeAccessToken } from "./youtube-token";
+import { tracedFetch } from "../lib/tracing";
 
 // facebook-poster.json's "Route by Media Type" switch matches on these exact
 // strings, not our Prisma MediaType enum values.
@@ -273,12 +274,18 @@ export async function buildYouTubePayload(
 const N8N_DISPATCH_TIMEOUT_MS = 15_000;
 
 async function postToN8n(webhookPath: string, payload: unknown): Promise<void> {
-  const response = await fetch(`${env.N8N_BASE_URL}/webhook/${webhookPath}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(N8N_DISPATCH_TIMEOUT_MS),
-  });
+  // propagate: n8n continues this trace through the workflow, and its
+  // callback brings it back to us (websitePlan.md §14.5).
+  const response = await tracedFetch(
+    `${env.N8N_BASE_URL}/webhook/${webhookPath}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(N8N_DISPATCH_TIMEOUT_MS),
+    },
+    { propagate: true },
+  );
 
   if (!response.ok) {
     throw new Error(`n8n dispatch failed (${response.status}): ${await response.text()}`);

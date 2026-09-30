@@ -1,5 +1,6 @@
 import { Queue } from "bullmq";
 import { redisConnection } from "./connection";
+import { telemetry } from "./telemetry";
 
 // Renders per-platform versions of uploaded media (websitePlan.md §12.5).
 // Its own queue and worker because ffmpeg saturates CPU — it must not hold
@@ -10,7 +11,10 @@ export interface RenderJobData {
   renditionId: string;
 }
 
-const renderQueue = new Queue<RenderJobData>(RENDER_QUEUE, { connection: redisConnection() });
+const renderQueue = new Queue<RenderJobData>(RENDER_QUEUE, {
+  connection: redisConnection(),
+  telemetry,
+});
 
 // One job per rendition, so the targets sharing it and the reconciler can
 // all enqueue it without rendering twice. A render is safe to redo (it

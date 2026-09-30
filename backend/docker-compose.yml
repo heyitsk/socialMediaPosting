@@ -22,7 +22,9 @@ services:
       - smposting_redis_data:/data
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n
+    # Pinned: built-in OpenTelemetry needs 2.19+, and it's still a preview
+    # feature whose settings may change between versions.
+    image: docker.n8n.io/n8nio/n8n:2.41.4
     container_name: smposting-n8n
     restart: unless-stopped
     ports:
@@ -45,6 +47,12 @@ services:
       # n8n blocks {{ $env.* }} access in node expressions by default (security
       # hardening) — required here since our callback nodes read $env.CALLBACK_SECRET.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # Tracing (websitePlan.md §14.5). n8n continues the traceparent the
+      # backend sends with each dispatch, adds a span per node, and passes it
+      # on in the callback request, so one trace covers the whole post.
+      N8N_OTEL_ENABLED: "true"
+      N8N_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
+      N8N_OTEL_EXPORTER_SERVICE_NAME: smposting-n8n
     volumes:
       - n8n_data:/home/node/.n8n
 

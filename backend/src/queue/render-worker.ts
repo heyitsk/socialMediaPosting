@@ -8,8 +8,10 @@ import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
 import { type Rect, type RenditionSpec, renderImage, renderVideo } from "../lib/render";
 import { presignDownload, putObject, readObject } from "../lib/s3";
+import { withRootSpan } from "../lib/tracing";
 import { redisConnection } from "./connection";
 import { enqueueRender, RENDER_QUEUE, type RenderJobData } from "./render-queue";
+import { telemetry } from "./telemetry";
 
 // ffmpeg uses every core it gets; two at once keeps the API responsive.
 const CONCURRENCY = 2;
@@ -83,6 +85,7 @@ export function startRenderWorker(): Worker<RenderJobData> {
   const worker = new Worker<RenderJobData>(RENDER_QUEUE, render, {
     connection: redisConnection(),
     concurrency: CONCURRENCY,
+    telemetry,
   });
   worker.on("failed", (job, err) => {
     if (!job) return;
@@ -113,7 +116,9 @@ async function reconcilePendingRenders(): Promise<void> {
 
 export function startRenderReconciler(): void {
   const run = () =>
-    reconcilePendingRenders().catch((err) => logger.error({ err }, "render reconciler failed"));
+    withRootSpan("reconcile renders", reconcilePendingRenders).catch((err) =>
+      logger.error({ err }, "render reconciler failed"),
+    );
   run();
   setInterval(run, RECONCILE_INTERVAL_MS);
 }

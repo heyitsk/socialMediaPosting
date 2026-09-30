@@ -10,6 +10,7 @@ import { pauseForLimitError } from "../service/limit-pauses";
 import { markTargetFailed, markTargetPublished } from "../service/post-groups";
 import { getFreshYouTubeAccessToken } from "../service/youtube-token";
 import { redisConnection } from "./connection";
+import { linkToProducer, type TraceLinkData, telemetry } from "./telemetry";
 import {
   pollBackoffStrategy,
   pollTimeoutMs,
@@ -17,7 +18,7 @@ import {
   type VideoPollPlatform,
 } from "./video-status-queue";
 
-interface VideoStatusJobData {
+interface VideoStatusJobData extends TraceLinkData {
   postId: string;
   platform: VideoPollPlatform;
   platformPostId: string;
@@ -73,6 +74,7 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
   return new Worker<VideoStatusJobData>(
     VIDEO_STATUS_QUEUE,
     async (job) => {
+      linkToProducer(job.data);
       const { postId, platform, platformPostId, mediaId } = job.data;
       const { label, check } = PLATFORMS[platform];
 
@@ -125,6 +127,7 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
       connection: redisConnection(),
       concurrency: CONCURRENCY,
       settings: { backoffStrategy: pollBackoffStrategy },
+      telemetry,
     },
   );
 }
