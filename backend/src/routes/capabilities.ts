@@ -9,6 +9,7 @@ import {
   POSTABLE_PLATFORMS,
   SHORTS_MAX_DURATION_SECONDS,
   SURFACE_FITS,
+  VIDEO_MAX_BYTES,
 } from "../lib/capabilities";
 import type { AuthEnv } from "../middleware/auth";
 import { contentKindSchema, mediaTypeSchema, platformSchema } from "./post-schemas";
@@ -22,6 +23,8 @@ const capabilitiesSchema = z
         platform: platformSchema,
         captionLimit: z.number(),
         carousel: z.object({ min: z.number(), max: z.number() }),
+        // Set only where the platform takes smaller videos than we accept.
+        videoMaxBytes: z.number().optional(),
         // Only the kinds this platform supports; the first media type is the default.
         mediaTypes: z.array(
           z.object({ kind: contentKindSchema, mediaTypes: z.array(mediaTypeSchema) }),
@@ -70,6 +73,7 @@ export const capabilitiesRoute = new OpenAPIHono<AuthEnv>().openapi(getCapabilit
         platform,
         captionLimit: CAPTION_LIMITS[platform],
         carousel: CAROUSEL_LIMITS[platform],
+        videoMaxBytes: VIDEO_MAX_BYTES[platform],
         mediaTypes: CONTENT_KINDS.flatMap((kind) => {
           const mediaTypes = MEDIA_TYPES[platform][kind];
           return mediaTypes ? [{ kind, mediaTypes: [...mediaTypes] }] : [];

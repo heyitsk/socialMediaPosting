@@ -1424,7 +1424,7 @@ New video branch: `Route by Media Type` → `LI Init Video Upload` (size from pa
 
 `LI Relay Video Parts`:
 - For each `uploadInstructions[i]`: GET `media_urls[0]` with `Range: bytes=firstByte-lastByte`. Require `206` and a body length of exactly `lastByte-firstByte+1`. Then PUT to `uploadUrl` with `Authorization`, `Content-Type`, and full-response mode to read the `ETag`.
-- Run parts through a concurrency pool (a constant; value open, see 15.8 #3), then emit `uploadedPartIds` **in part order**.
+- Run parts through a concurrency pool (a constant, 1 to start; see 15.8 #3), then emit `uploadedPartIds` **in part order**.
 - Per-part retry: 3 attempts with backoff on network errors / 5xx / 429. On a 4xx, fail straight away.
 - Errors are thrown with the node name + part index + status + body snippet, so `lib/platform-error.ts` rules keep matching (update the rules that key on `LI Download Video` / `Split Video Into Parts`).
 - Remove `LI Download Video`, `Merge Video Upload`, `Split Video Into Parts`, `LI Upload Video Binary`, `Collect Video Part ETags`.
@@ -1443,7 +1443,7 @@ New flow: `Validate Payload` → `Initiate Resumable Upload` (add `X-Upload-Cont
 ### 15.6 Build order
 
 0. **Spike (half a day):** in the dev n8n (untagged `latest` image, so n8n 2.x with task runners), confirm inside a Code node: `this.helpers.httpRequest` with `encoding: 'arraybuffer'` + `returnFullResponse` for a ranged GET, and a PUT with a Buffer body that returns response headers. **If it fails**, fall back to Node 18+ global `fetch`, or `require('https')` with `NODE_FUNCTION_ALLOW_BUILTIN=https` set on the **runner** (not just the main container). Record the result here before step 1.
-1. Backend: `media_size_bytes` / `media_content_type` in the payloads, and the LinkedIn 500 MB check (15.9), with tests.
+1. Backend: `media_size_bytes` / `media_content_type` in the payloads, with tests. (The LinkedIn 500 MB check from 15.9 is already built.)
 2. LinkedIn relay node; standalone test with a 27 MB video (the Sep 22 file) and a ~500 MB video; watch n8n memory (`docker stats`).
 3. YouTube chunked relay; the same two sizes, plus kill the network mid-upload to check resume.
 4. Update `platform-error.ts` rules for the new node names; update `setup.md` §9 if any env var is needed.
@@ -1461,18 +1461,18 @@ New flow: `Validate Payload` → `Initiate Resumable Upload` (add `X-Upload-Cont
 
 1. **Chunked relay** (15.2) replaces §3's raw-stream pipe.
 2. **YouTube: chunked resumable upload with resume on failure** (15.5).
-3. **LinkedIn part concurrency: open.** Facts it depends on (LinkedIn Videos API docs, `li-lms-2026-09`):
+3. **LinkedIn part concurrency: start at 1** (decided Oct 1). Background facts (LinkedIn Videos API docs, `li-lms-2026-09`):
    - Part PUTs go to `www.linkedin.com/dms-uploads/...`, not `api.linkedin.com/rest`. The docs don't say whether they count toward the 150-calls-per-member daily limit (§13.1). Either way concurrency changes **how fast** the calls happen, not **how many**: a 400 MB video is 100 parts whether sent 1 or 4 at a time.
    - The docs don't forbid parallel parts. Order only matters in `finalizeUpload`'s `uploadedPartIds`, which the relay sorts by part index.
    - Upload URLs expire together, typically 30 days after `initializeUpload`, so sequential uploads can't run out of time.
    - Parallel helps when each part is latency-bound (S3 → n8n → LinkedIn round trips); it doesn't help if n8n's uplink is already full. Memory: 4 MiB × concurrency, negligible either way.
-   - Proposal: make it a constant in the node, **start at 1** for the first live tests, measure a 100-200 MB upload, then try 3-4 and keep it only if it's clearly faster with no 429s.
+   - It's a constant in the node, **set to 1** for the first live tests. Measure a 100-200 MB upload, then try 3-4 and keep it only if it's clearly faster with no 429s.
 4. **LinkedIn first**, then YouTube.
 5. **Facebook / Instagram / Threads stay as they are.** Meta fetches the presigned URL itself; no relay.
 
 ### 15.9 Found while planning (Sep 30)
 
-- **LinkedIn video size limit isn't validated up front.** LinkedIn's spec is 75 KB-500 MB for feed video, but our upload cap is 1 GB (`MAX_VIDEO_BYTES`). Today a 600 MB LinkedIn video only fails inside n8n (the `platform-error.ts` rule turns it into a readable message). Add a per-platform max-size check to `POST /post-groups` validation (§10.4), with LinkedIn at 500 MB. Build with step 1.
+- **LinkedIn video size limit — built Oct 1.** LinkedIn's spec is 75 KB-500 MB for feed video, but our upload cap is 1 GB (`MAX_VIDEO_BYTES`), so a bigger LinkedIn video used to fail only inside n8n. Now `VIDEO_MAX_BYTES` in `lib/capabilities.ts` (LinkedIn: 500 × 1024 × 1024, matching the MB the UI shows) is checked per target in `POST /post-groups` validation against the uploaded file's `sizeBytes`, and sent as `videoMaxBytes` in `GET /capabilities` so the composer blocks submit with the same message: "LinkedIn doesn't support videos over 500 MB — clip.mp4 is 600.0 MB". Other platforms are unaffected. A crop/pad rendition is rendered after create, so it isn't size-checked (rarely larger than the original). The `platform-error.ts` rule stays as a fallback. Tests in `routes/post-groups.limits.test.ts` ("video size").
 - **`linkedInCalls` cost (`lib/posting-limits.ts`) assumes each part PUT is one API call** ("12 covers a typical ~20 MB video"). A 500 MB video is 125 parts, which would blow past the 100-call cap if part PUTs really count. If they're on `dms-uploads` and don't count, the cost is flat. Check in LinkedIn's Developer Portal → Analytics after the step 2 test, then either make the cost size-based (`3 + ceil(size / 4 MiB)` + polls) or flat.
 
 ---
@@ -1507,4 +1507,5 @@ New flow: `Validate Payload` → `Initiate Resumable Upload` (add `X-Upload-Cont
 *Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*
 *Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
 *Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*  
-*Updated: 2026-09-30 | Planning only: new §15 "Video Streaming Relay". S3 multipart and LinkedIn multipart are unrelated (S3 stores one object); today's LinkedIn/YouTube video branches still download the whole file into n8n. Proposed: a Code node relaying bounded ranged-GET chunks (LinkedIn per 4 MiB part, in parallel; YouTube chunked resumable with resume on failure), file size sent in the payload, spike on n8n 2.x task runners first. Decisions in §15.8 (chunked relay, YouTube chunked resumable with resume, LinkedIn first, Meta unchanged); LinkedIn part concurrency still open.*
+*Updated: 2026-09-30 | Planning only: new §15 "Video Streaming Relay". S3 multipart and LinkedIn multipart are unrelated (S3 stores one object); today's LinkedIn/YouTube video branches still download the whole file into n8n. Proposed: a Code node relaying bounded ranged-GET chunks (LinkedIn per 4 MiB part, in parallel; YouTube chunked resumable with resume on failure), file size sent in the payload, spike on n8n 2.x task runners first. Decisions in §15.8 (chunked relay, YouTube chunked resumable with resume, LinkedIn first, Meta unchanged); LinkedIn part concurrency still open.*  
+*Updated: 2026-10-01 | §15.8: LinkedIn part concurrency decided (start at 1). §15.9: LinkedIn videos over 500 MB are now refused at post creation (backend validation + composer, `VIDEO_MAX_BYTES` in `lib/capabilities.ts`, exposed as `videoMaxBytes` in `/capabilities`).*

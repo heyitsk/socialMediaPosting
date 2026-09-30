@@ -1293,6 +1293,7 @@ export interface components {
                     min: number;
                     max: number;
                 };
+                videoMaxBytes?: number;
                 mediaTypes: {
                     /** @enum {string} */
                     kind: "TEXT" | "IMAGE" | "CAROUSEL" | "VIDEO" | "STORY";

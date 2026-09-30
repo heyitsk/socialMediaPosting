@@ -21,7 +21,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, apiErrorMessage } from "@/lib/api";
 import type { components } from "@/lib/api-schema";
 import { defaultTileFit, effectiveRatio, mediaFitsFor, type TileFit } from "@/lib/media-fit";
-import { isVideoFile } from "@/lib/media-upload";
+import { formatBytes, isVideoFile } from "@/lib/media-upload";
 import {
   CONTENT_KIND_LABELS,
   CONTENT_KINDS,
@@ -332,6 +332,15 @@ export function ComposerPage() {
       const { min, max } = platformCapabilities.carousel;
       if (mediaItems.length >= 2 && (mediaItems.length < min || mediaItems.length > max))
         errors.push({ message: `${label} carousels take ${min}-${max} images` });
+    }
+    const maxVideoBytes = platformCapabilities.videoMaxBytes;
+    if (kind === "VIDEO" && maxVideoBytes) {
+      for (const item of mediaItems) {
+        if (item.file.size > maxVideoBytes)
+          errors.push({
+            message: `${label} doesn't support videos over ${maxVideoBytes / 1024 / 1024} MB — ${item.file.name} is ${formatBytes(item.file.size)}`,
+          });
+      }
     }
     // Shapes the platform's API refuses (websitePlan.md §12.2), after any crop
     // or pad. Instagram's JPEG-only rule is handled by the backend converting.
