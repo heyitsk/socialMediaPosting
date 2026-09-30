@@ -1096,7 +1096,7 @@ MediaRendition
 
 ## 13. Per-Platform Posting Limits — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status:** planned, not built. Makes the §5 "per-`(user, platform)` rate limiter" and "circuit breaker" concrete. Open questions for Kushagra are in §13.9. Defaults marked *(to confirm)* depend on the answers.
+> **Status:** planned, not built. Makes the §5 "per-`(user, platform)` rate limiter" and "circuit breaker" concrete. Kushagra's decisions are in §13.9. Scope: Facebook, Instagram, Threads, LinkedIn and YouTube. Pinterest gets a policy row when it's wired.
 
 **Goal:** a user should never lose an account for hours because the app sent too much, too fast. The backend holds every post back until the platform will accept it. It never sends one that would go over a limit.
 
@@ -1124,7 +1124,7 @@ Sources: Meta Graph API "Rate Limits", Instagram "Content Publishing", Threads "
 
 ### 13.3 Policy table (`backend/src/lib/posting-limits.ts`)
 
-One record per platform, next to `capabilities.ts`: `{ perDay, window: "ROLLING_24H" | "UTC_DAY" | "PACIFIC_DAY", perHour, minGapSeconds, cost(mediaType), duplicateWindowHours }`. `cost` is 1 per post, except LinkedIn (API calls) and YouTube (units). Defaults *(to confirm)*, deliberately about half the published limit:
+One record per platform, next to `capabilities.ts`: `{ perDay, window: "ROLLING_24H" | "UTC_DAY" | "PACIFIC_DAY", perHour, minGapSeconds, cost(mediaType), duplicateWindowHours }`. `cost` is 1 per post, except LinkedIn (API calls) and YouTube (units). Confirmed caps, deliberately about half the published limit:
 
 | Platform | Our daily cap | Per hour | Min gap | Cost per post |
 |---|---|---|---|---|
@@ -1136,14 +1136,14 @@ One record per platform, next to `capabilities.ts`: `{ perDay, window: "ROLLING_
 | YouTube project (all users) | 80 `videos.insert` and 8,000 units | — | — | insert 1 + about 15 units of polling |
 
 - `POSTING_LIMITS_PROFILE=dev` halves every number, and doubles each gap. Meta treats development-mode apps more strictly, and that is where the block happened.
-- A workspace can later **lower** its own caps, but never raise them (§13.9 Q2).
+- The caps are the same for everyone. Workspaces can't change them (§13.9 decision 2).
 
 ### 13.4 What a limit is keyed on
 
 The platform counts per **platform account**, not per app user or per `ConnectedAccount` row. So the key is `(platform, platformAccountId)`:
 
 - A Page connected in two workspaces, or an Instagram account connected through both Facebook Login and Instagram Login (§2.2), shares **one** budget. Otherwise two teams could each use "their" 25 and still trigger the block.
-- YouTube and Pinterest Trial also have an **app-wide** budget (`platformAccountId = "*"`), checked in addition to the per-channel one.
+- YouTube also has an **app-wide** budget (`platformAccountId = "*"`), checked in addition to the per-channel one. Pinterest Trial will need the same when it's wired.
 - Separately, an app-level abuse guard: `rateLimitByUser("post-groups", 30, 3600)` on `POST /post-groups`, using the existing middleware. This protects n8n. It's unrelated to platform limits.
 
 ### 13.5 Data model (hand-written SQL + `migrate deploy`, as usual)
@@ -1169,12 +1169,13 @@ index (platform, platform_account_id, slot_at)
 **`service/posting-limits.ts`** exposes `reserveSlot(tx, key, cost, earliest, contentHash)` → `slotAt`, `releaseSlot(postId, attempt)`, `getCooldown(key)`, `setCooldown(...)` and `usage(key)`. `reserveSlot` finds the earliest time ≥ `earliest` (and ≥ any cooldown) where the minimum gap, the hour and the day all have room. It searches at most 7 days ahead.
 
 1. **Create (`POST /post-groups`, §10.4 step 2 and 4):**
-   - The duplicate guard runs with the other validation. A matching `content_hash` (normalized caption + media asset ids) on the same account within 24 h is a target error: "You posted this to @page 2 hours ago".
+   - The duplicate guard runs with the other validation. A matching `content_hash` (normalized caption + media asset ids) on the same account within 24 h is a target error: "You posted this to @page 2 hours ago". There is no "post anyway" (§13.9 decision 3).
    - Slots are reserved inside the transaction that creates the posts. The publish job's delay becomes `slotAt - now` instead of `scheduledFor - now`.
-   - If `slotAt` is later than requested but within the **auto-delay allowance** (default 2 h *(to confirm)*), the target is accepted. The response and results panel say "goes out at 14:05 (Instagram posting pace)".
+   - If `slotAt` is later than requested but within the **1 h auto-delay allowance** (§13.9 decision 1), the target is accepted. The response and results panel say "goes out at 14:05 (Instagram posting pace)".
    - Beyond the allowance, for example when the day's cap is full, it's a normal §10.4 target error with the next free time: "@brand has used today's 25 Instagram posts — next free slot tomorrow 09:12". The UI offers "Schedule for then" next to "Deselect".
 2. **Publish worker (the final check):** before `markTargetProcessing`, re-read the cooldown and the slot.
-   - If the account is cooling down, or `slot_at` is still in the future, re-delay the job with `moveToDelayed` (the same mechanism as the render wait) instead of failing it.
+   - If `slot_at` is still in the future, re-delay the job with `moveToDelayed` (the same mechanism as the render wait).
+   - If the account is cooling down, **fail** the target with the reason and the resume time, and release its slot (§13.9 decision 4). This catches anything the cooldown sweep in §13.7 missed.
    - `MAX_SCHEDULE_LATENESS_MS` is measured from `slot_at`, so a post the limiter pushed back is never failed as "missed".
 3. **Slot release:** the slot is released if the target fails **before** hand-off to n8n (disconnected, render failed, cancelled). The platform never saw it. After hand-off it's kept, even on failure, because the platform may already have counted the call.
 4. **Retry:** takes a new slot. A retry can't bypass pacing.
@@ -1186,7 +1187,7 @@ n8n already sends the raw error text, so `routes/webhooks.ts` classifies it with
 
 | Signal | Cooldown | Scope |
 |---|---|---|
-| Meta `code 368` (any subcode), "temporarily blocked" | **24 h** *(to confirm)* | account |
+| Meta `code 368` (any subcode), "temporarily blocked" | **24 h** | account |
 | Meta `4 / 17 / 32 / 613 / 80001`, HTTP 429 | `estimated_time_to_regain_access` if sent, else 1 h | account |
 | Instagram publishing limit (`code 9`, subcode `2207042`) | until the oldest slot in the rolling 24 h leaves the window | account |
 | Threads publishing limit | same, rolling 24 h | account |
@@ -1196,9 +1197,10 @@ n8n already sends the raw error text, so `routes/webhooks.ts` classifies it with
 
 While an account is cooling down:
 
-- Its pending publish jobs are **held until `until`**, not failed *(to confirm, §13.9 Q4)*.
-- The composer shows it disabled: "Paused until 14:05 — Meta flagged rapid posting". A scheduled post after `until` is still allowed.
-- A workspace owner or admin can clear a `RATE_LIMIT` cooldown early. `ABUSE_BLOCK` can't be cleared early, because sending into a 368 makes it longer.
+- **Setting a cooldown fails that account's waiting targets right away** (§13.9 decision 4): every `SCHEDULED` target whose `slot_at` is before `until` has its publish job removed, is marked `FAILED` with "Paused by Facebook until 14:05 tomorrow (flagged as spam) — retry after that", and releases its slot. Targets already handed to n8n are left alone. Scheduled posts after `until` are kept.
+- Retrying a failed target while its account is still cooling down returns 409 with the resume time.
+- The composer shows the account disabled: "Paused until 14:05 — Meta flagged rapid posting". A post scheduled after `until` is still allowed.
+- Nobody can clear a cooldown early. Sending into a 368 makes it longer, and caps aren't adjustable per workspace either.
 
 ### 13.8 API and frontend
 
@@ -1207,20 +1209,20 @@ While an account is cooling down:
 - **Composer:** accounts that are paused, or have no slot within the allowance, are shown disabled with the reason. The "When" step shows "goes out around 14:05" for a target the limiter pushed back.
 - **Results panel / History:** a target the limiter pushed back shows "Waiting for posting limit — goes out at 14:05" (status stays `SCHEDULED`, no new enum). A cooldown hit shows the reason and the resume time, not a generic failure.
 
-### 13.9 Open questions (Kushagra)
+### 13.9 Decisions (Kushagra, Sep 30)
 
-1. **Hitting a limit on "Post now":** auto-delay within a 2 h allowance and reject beyond it (recommended), always reject, or always queue however long it takes?
-2. **Caps:** are the §13.3 defaults fine? Should workspaces be able to lower them?
-3. **Duplicate content:** hard block (recommended, it's the most common 368 trigger), or a warning with "post anyway"?
-4. **After a Meta spam block:** fixed 24 h cooldown? Should queued and scheduled posts for that account **wait** until it ends (recommended), or **fail** so the user decides?
-5. **Scope of the first version:** all six platforms, or Meta (Facebook, Instagram, Threads) first, where the real block happened?
+1. **Limit hit on "Post now" or a schedule:** the post waits automatically if a slot opens within **1 hour**. Beyond that the target is rejected with the next free time.
+2. **Caps:** the §13.3 numbers as written. **Workspaces can't change them.**
+3. **Duplicate content** to the same account within 24 h is **blocked**, with no override.
+4. **Cooldowns:** 24 h after a Meta 368. Posts waiting for a cooling-down account **fail** instead of waiting, so the user decides what to do. This applies to every cooldown reason, not only 368, so the behaviour is the same everywhere.
+5. **Scope:** all five wired platforms (Facebook, Instagram, Threads, LinkedIn, YouTube) in the first build. Pinterest waits until it's wired.
 
 ### 13.10 Build order
 
 1. `lib/posting-limits.ts` (policy table, window maths) + migration for `dispatch_slots` and `account_cooldowns`.
 2. `service/posting-limits.ts` (`reserveSlot` with advisory lock, release, cooldowns) + tests for slot search: gap, hour, rolling vs calendar day, cooldown.
-3. Wire into create (duplicate guard, reservation, allowance errors), the publish worker (hold/re-delay), retry and cancel. Add the per-user create limit.
-4. Webhook/poller error classifier → cooldowns. YouTube project-wide budget.
+3. Wire into create (duplicate guard, reservation, allowance errors), the publish worker (pace re-delay, cooldown fail), retry and cancel. Add the per-user create limit.
+4. Webhook/poller error classifier → cooldowns, plus the sweep that fails waiting targets. YouTube project-wide budget.
 5. `GET /posting-limits` + frontend (dashboard usage, composer disabled/next slot, results panel and History messages).
 6. **Later:** have n8n callbacks pass `X-Business-Use-Case-Usage` / `x-ratelimit-*` through (the §6 `usage` field) to pause proactively above 80 %. Before an Instagram/Threads publish when our own count is above 80 %, call `content_publishing_limit` / `threads_publishing_limit`. That catches posts made through other tools on the same account. Add Pinterest limits when it's wired.
 
@@ -1255,3 +1257,4 @@ While an account is cooling down:
 *Updated: 2026-09-30 | §12 step 1 built (§12.10): media dimensions stored at upload (`sharp` for images, ffprobe for video; migration `20260930090000_add_media_dimensions`), per-platform `surfaces` fit rules in `/api/capabilities`, API-rejected shapes validated per target, Shorts check on stored dimensions, and a read-only per-platform preview grid with safe zones in the composer. Phase 2 roadmap item ticked; live upload test pending.*
 *Updated: 2026-09-30 | §12 step 2 built (§12.11): per-platform crop / blur-pad / Instagram JPEG conversion. `media_renditions` + `post_media_renditions` (migration `20260930120000_add_media_renditions`), presets in `/api/capabilities`, `mediaFits` per target on `POST /post-groups`, `media-render` BullMQ queue rendering with `sharp` (images) and `ffmpeg` (video) right after create, publish waits for renders and signs rendition keys, Adjust dialog with `react-easy-crop` and per-account customizing in the composer. The "Instagram only accepts JPEG" error is gone. Renders verified against S3; composer dialog and live posts not yet tested.*
 *Updated: 2026-09-30 | Planning only: new §13 "Per-Platform Posting Limits". Official limits checked per platform (Instagram 50-100 and Threads 250 posts per rolling 24 h, LinkedIn 150 calls per member per UTC day, YouTube project-wide units, Facebook none published). The Sep 2026 block was Meta's code 368 spam check, not a quota, so the plan adds pacing (minimum gap, per-hour cap), daily caps at about half the published limits, a 24 h duplicate guard and a cooldown circuit breaker. Limits are keyed on the platform account, not the app user or `ConnectedAccount`. Reservations live in a Postgres `dispatch_slots` table behind an advisory lock. Open questions in §13.9.*
+*Updated: 2026-09-30 | §13.9 decisions recorded: 1 h auto-delay allowance, fixed caps (not adjustable per workspace), duplicates blocked outright, targets waiting on a cooled-down account fail (for every cooldown reason) instead of being held, and no early clearing. First build covers Facebook, Instagram, Threads, LinkedIn and YouTube.*
