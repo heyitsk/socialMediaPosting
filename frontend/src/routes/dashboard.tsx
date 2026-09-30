@@ -1,13 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Activity,
-  CircleAlert,
-  CircleCheck,
-  Link2,
-  Loader2,
-  RefreshCw,
-  Unplug,
-} from "lucide-react";
+import { CircleAlert, CircleCheck, Link2, RefreshCw, Unplug } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -101,15 +93,6 @@ function useConnectStatusToast() {
 export function DashboardPage() {
   useConnectStatusToast();
 
-  const { data, isPending, isError } = useQuery({
-    queryKey: ["health"],
-    queryFn: async () => {
-      const { data, error } = await api.GET("/health");
-      if (error) throw error;
-      return data;
-    },
-  });
-
   return (
     <div className="flex flex-col gap-8">
       <header className="max-w-2xl">
@@ -118,51 +101,6 @@ export function DashboardPage() {
           Manage connected social accounts and publishing connections from one place.
         </p>
       </header>
-
-      <section
-        className="flex flex-col gap-3 rounded-lg border border-border bg-card px-4 py-3 shadow-sm sm:flex-row sm:items-center sm:justify-between sm:px-5"
-        aria-label="Backend connection status"
-        aria-live="polite"
-      >
-        <div className="flex items-center gap-3">
-          <div
-            className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${
-              isError
-                ? "bg-destructive/10 text-destructive"
-                : data
-                  ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                  : "bg-muted text-muted-foreground"
-            }`}
-          >
-            {isPending ? (
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-            ) : isError ? (
-              <CircleAlert className="size-4" aria-hidden="true" />
-            ) : (
-              <Activity className="size-4" aria-hidden="true" />
-            )}
-          </div>
-          <div>
-            <p className="text-sm font-medium text-foreground">
-              {isPending && "Checking backend"}
-              {isError && "Backend unavailable"}
-              {data && "Backend healthy"}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {isPending && "Verifying API availability..."}
-              {isError && "Could not reach the backend API."}
-              {data &&
-                `Backend is ${data.status} as of ${new Date(data.timestamp).toLocaleTimeString()}`}
-            </p>
-          </div>
-        </div>
-        {data && (
-          <span className="inline-flex items-center gap-1.5 self-start text-xs font-medium text-emerald-700 dark:text-emerald-300 sm:self-auto">
-            <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
-            Connected
-          </span>
-        )}
-      </section>
 
       <ConnectedAccountsSection />
     </div>
