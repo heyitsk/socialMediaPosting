@@ -4,8 +4,8 @@ import type { Job } from "bullmq";
 import type { WorkspaceEnv } from "../middleware/auth";
 import type { PublishJobData } from "../queue/publish-queue";
 
-// The posting limiter wired into create, cancel, retry and the publish worker
-// (websitePlan.md §13.6), against the dev database. The queues and n8n are
+// The posting limiter wired into create, cancel, retry, the publish worker
+// and the n8n callback (websitePlan.md §13.6-13.7), against the dev database. The queues and n8n are
 // replaced so nothing is ever queued in Redis or sent — a real publish job
 // would be picked up by a running dev backend.
 
@@ -25,6 +25,12 @@ mock.module("../queue/render-queue", () => ({
   RENDER_QUEUE: "media-render-test",
   enqueueRender: async () => {},
 }));
+mock.module("../queue/video-status-queue", () => ({
+  VIDEO_STATUS_QUEUE: "video-status-test",
+  enqueueVideoStatusPoll: async () => {},
+  pollBackoffStrategy: () => 0,
+  pollTimeoutMs: () => 0,
+}));
 mock.module("../service/n8n", () => ({
   dispatchPost: async () => {
     throw new Error("n8n must not be called in tests");
@@ -41,6 +47,7 @@ const { publish } = await import("../queue/publish-worker");
 const { markTargetFailed } = await import("../service/post-groups");
 const { bookedSlotAt, setCooldown } = await import("../service/posting-limits");
 const { postGroupsRoute } = await import("./post-groups");
+const { webhooksRoute } = await import("./webhooks");
 
 const RUN = crypto.randomUUID().slice(0, 8);
 const HOUR = 60 * 60_000;
@@ -92,7 +99,7 @@ interface Refused {
   targets: { connectedAccountId: string; errors: string[]; nextFreeAt?: string | null }[];
 }
 
-async function post(connectedAccountIds: string[], caption: string) {
+async function post(connectedAccountIds: string[], caption: string, extra: object = {}) {
   const res = await app.request(base(), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -101,13 +108,18 @@ async function post(connectedAccountIds: string[], caption: string) {
       contentKind: "TEXT",
       caption,
       targets: connectedAccountIds.map((connectedAccountId) => ({ connectedAccountId })),
+      ...extra,
     }),
   });
   return { status: res.status, body: (await res.json()) as unknown };
 }
 
-async function postOk(connectedAccountId: string, caption: string): Promise<Group> {
-  const { status, body } = await post([connectedAccountId], caption);
+async function postOk(
+  connectedAccountId: string,
+  caption: string,
+  extra: object = {},
+): Promise<Group> {
+  const { status, body } = await post([connectedAccountId], caption, extra);
   if (status !== 201) throw new Error(`expected 201, got ${status}: ${JSON.stringify(body)}`);
   return body as Group;
 }
@@ -313,5 +325,75 @@ describe("publish worker", () => {
     expect(seen.delayedTo).toBe(Date.parse(target.sendAt));
     const row = await prisma.post.findUniqueOrThrow({ where: { id: target.id } });
     expect(row.status).toBe("SCHEDULED");
+  });
+});
+
+describe("n8n callback", () => {
+  const callback = (postId: string, error: string) =>
+    webhooksRoute.request("/n8n-callback", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-callback-secret": env.N8N_CALLBACK_SECRET },
+      body: JSON.stringify({ post_id: postId, platform: "facebook", status: "FAILED", error }),
+    });
+
+  test("Meta's spam block pauses the Page and fails what's waiting for it", async () => {
+    const page = await facebookPage();
+    const sent = (await postOk(page, "went to n8n")).targets[0];
+    const waiting = (await postOk(page, "waiting for its slot")).targets[0];
+    const later = (
+      await postOk(page, "scheduled after the pause", {
+        scheduledFor: new Date(Date.now() + 48 * HOUR).toISOString(),
+      })
+    ).targets[0];
+    if (!sent || !waiting || !later) throw new Error("no targets");
+    expect(waiting.status).toBe("SCHEDULED");
+
+    const error =
+      '400 - "{\\"error\\":{\\"message\\":\\"(#368) The action attempted has been deemed abusive\\",\\"code\\":368,\\"error_subcode\\":1390008}}" (node: Publish Text)';
+    const res = await callback(sent.id, error);
+    expect(res.status).toBe(204);
+
+    const cooldown = await prisma.accountCooldown.findFirstOrThrow({
+      where: { platformAccountId: await platformAccountIdOf(page) },
+    });
+    expect(cooldown.reason).toBe("ABUSE_BLOCK");
+    expect(cooldown.sourcePostId).toBe(sent.id);
+    expect(cooldown.until.getTime() - Date.now()).toBeGreaterThan(23 * HOUR);
+
+    const rows = await prisma.post.findMany({
+      where: { id: { in: [sent.id, waiting.id, later.id] } },
+      include: { logs: true },
+    });
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    expect(byId.get(sent.id)?.status).toBe("FAILED");
+    expect(byId.get(waiting.id)?.status).toBe("FAILED");
+    expect(byId.get(waiting.id)?.logs[0]?.errorMessage).toContain(
+      "paused (Meta flagged the posting as spam)",
+    );
+    expect(await bookedSlotAt(prisma, waiting.id, 1)).toBeNull();
+    // Booked for after the pause ends, so it stays.
+    expect(byId.get(later.id)?.status).toBe("SCHEDULED");
+    // The sent post's slot still counts — Meta saw it.
+    expect(await bookedSlotAt(prisma, sent.id, 1)).not.toBeNull();
+
+    // And the History message explains it.
+    const group = await app.request(
+      `${base()}/${(await prisma.post.findUniqueOrThrow({ where: { id: sent.id } })).groupId}`,
+    );
+    const shown = ((await group.json()) as Group).targets[0]?.logs.at(-1)?.errorMessage;
+    expect(shown).toStartWith("Meta flagged this as spam");
+  });
+
+  test("an ordinary failure pauses nothing", async () => {
+    const page = await facebookPage();
+    const sent = (await postOk(page, "plain failure")).targets[0];
+    if (!sent) throw new Error("no target");
+    const res = await callback(sent.id, '500 - "{\\"error\\":{\\"message\\":\\"boom\\"}}"');
+    expect(res.status).toBe(204);
+    expect(
+      await prisma.accountCooldown.count({
+        where: { platformAccountId: await platformAccountIdOf(page) },
+      }),
+    ).toBe(0);
   });
 });

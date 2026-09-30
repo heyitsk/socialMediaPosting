@@ -1300,6 +1300,41 @@ The limiter now drives real posting.
 
   40/40 pass with both profiles. Not yet tested with a real post through n8n.
 
+### 13.10.4 Step 4 as built (Sep 30, 2026)
+
+Platform limit errors now pause accounts automatically.
+
+- **`lib/limit-errors.ts`** holds the `classifyLimitError(raw, platform)` rules table from §13.7. It reads the same raw text as `platform-error.ts` (n8n's `400 - "{…}" (node: …)`, or the poller's `… failed (403): {…}`). First match wins:
+
+  | Error | Pause | Scope |
+  |---|---|---|
+  | Meta `368` / "temporarily blocked" | 24 h (`ABUSE_BLOCK`) | account |
+  | Instagram subcode `2207042` | rolling 24 h (`QUOTA`) | account |
+  | Threads "publishing limit / quota" text | rolling 24 h (`QUOTA`) | account |
+  | Meta codes `4/17/32/613/80001/80002` | 1 h (`RATE_LIMIT`) | account |
+  | YouTube `quotaExceeded` | to Pacific midnight (`QUOTA`) | **app-wide `"*"`** |
+  | YouTube `uploadLimitExceeded` | 24 h (`QUOTA`) | channel |
+  | YouTube `rateLimitExceeded` | 1 h (`RATE_LIMIT`) | channel |
+  | LinkedIn 429 | to UTC midnight (`QUOTA`) | account |
+  | any other 429 | 1 h (`RATE_LIMIT`) | account |
+
+  - The code match is anchored on a JSON `"code"` key, so `error_subcode: 4`, `code: 40`, and HTTP 400 don't match.
+  - Threads doesn't document its over-the-limit error, so that rule is a guess.
+  - `estimated_time_to_regain_access` isn't used: n8n doesn't pass response headers through yet (step 6).
+- **`service/limit-pauses.ts`:**
+  - `pauseForLimitError` classifies the error, works out the pause's end, calls `setCooldown` (never shortened), then `failWaitingTargets`.
+  - Rolling pauses end when our oldest slot in the last 24 h leaves the window. They last at least 1 h, because posts made with other tools aren't counted; with no slots they last 24 h.
+  - `failWaitingTargets` finds every `SCHEDULED` target for that account (every YouTube account for `"*"`, in every workspace) that is due before the pause ends. It removes the job, fails the target with the paused message, and releases the slot. Targets due after the pause, and ones already handed to n8n, are kept.
+- **Wired into:**
+  - `routes/webhooks.ts`: every FAILED callback, duplicates and late ones included. Errors here are logged, never turned into a 500.
+  - `queue/video-status-worker.ts`: a status check that throws (e.g. `videos.list` spending YouTube's project quota) pauses, then rethrows so BullMQ's retry still applies.
+- **History wording** (`platform-error.ts`): new rules for 368, which warns that retrying sooner makes the block longer; for Instagram `2207042`; and for YouTube's project quota, now separate from the channel's upload limit.
+- **Tests:** `lib/limit-errors.test.ts` (7), plus 2 callback tests in `routes/post-groups.limits.test.ts`:
+  - a real n8n-shaped 368 callback pauses the Page for 24 h. Its pushed-back post fails with the paused message and its slot is freed, a post scheduled 48 h out stays `SCHEDULED`, the sent post's slot still counts, and History shows the 368 wording.
+  - a plain 500 pauses nothing.
+
+  49/49 pass with both profiles.
+
 ### 13.11 Risks
 
 - Meta publishes no Facebook post limit or spam threshold, so the Facebook numbers are guesses. Start strict and loosen them based on what we see.
@@ -1335,3 +1370,4 @@ The limiter now drives real posting.
 *Updated: 2026-09-30 | §13 step 1 built (§13.10.1): migration `20260930170000_add_posting_limits` (`dispatch_slots`, `account_cooldowns`, `CooldownReason`), `lib/posting-limits.ts` with the fixed policy table, LinkedIn call costs, UTC/Pacific calendar days, the `fitsAt`/`nextFreeTime` slot search and the duplicate-guard hash, `POSTING_LIMITS_PROFILE` (`standard`|`dev`), and 22 `bun test` cases. Nothing wired into posting yet.*
 *Updated: 2026-09-30 | §13 step 2 built (§13.10.2): `service/posting-limits.ts` — `reserveSlot` under per-account Postgres advisory locks (duplicate check, pause-aware, multi-budget for YouTube, `NO_SLOT` with the next free time past `latest`), `releaseSlot`/`bookedSlotAt`, `setCooldown` (never shortens)/`activeCooldown`, and `accountUsage`. 11 database tests, including a concurrency test shown to fail without the lock. Still not wired into posting.*
 *Updated: 2026-09-30 | §13 step 3 built (§13.10.3): the posting limiter now drives real posting. Create books every target inside its transaction (1 h auto-delay, duplicates refused, all-or-nothing 400 with `nextFreeAt`), pushed-back "post now" targets become `SCHEDULED` and are queued at their slot, the publish worker fails paused accounts and releases slots on every failure before hand-off, retry books first (409 when paused or full), cancel releases slots, the reconciler covers pushed-back targets, targets expose `sendAt`, and create is limited to 30 per user per hour. Composer results panel keeps polling mixed groups. 7 route/worker tests (queues and n8n stubbed); 40/40 pass.*
+*Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*

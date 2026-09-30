@@ -5,6 +5,7 @@ import { decrypt } from "../lib/crypto";
 import { getVideoStatus as getFacebookVideoStatus } from "../lib/facebook";
 import { getVideoStatus as getLinkedInVideoStatus } from "../lib/linkedin";
 import { getVideoStatus as getYouTubeVideoStatus } from "../lib/youtube";
+import { pauseForLimitError } from "../service/limit-pauses";
 import { markTargetFailed, markTargetPublished } from "../service/post-groups";
 import { getFreshYouTubeAccessToken } from "../service/youtube-token";
 import { redisConnection } from "./connection";
@@ -78,7 +79,22 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
         where: { id: postId },
         include: { connectedAccount: true },
       });
-      const result = await check(post.connectedAccount, mediaId);
+      let result: VideoCheckResult;
+      try {
+        result = await check(post.connectedAccount, mediaId);
+      } catch (err) {
+        // A status check can hit a limit too (YouTube's videos.list spends
+        // the shared project quota) — pause like a failed post would, then
+        // let BullMQ retry as usual. websitePlan.md §13.7.
+        await pauseForLimitError({
+          platform,
+          platformAccountId: post.connectedAccount.platformAccountId,
+          raw: err instanceof Error ? err.message : String(err),
+        }).catch((pauseErr: unknown) =>
+          console.error(`couldn't pause after poll of ${postId}:`, pauseErr),
+        );
+        throw err;
+      }
 
       if (result.state === "ready") {
         await markTargetPublished(postId, platform, platformPostId);
