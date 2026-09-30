@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 import {
   AbortMultipartUploadCommand,
   CompleteMultipartUploadCommand,
@@ -8,6 +9,7 @@ import {
   S3Client,
   UploadPartCommand,
 } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
 import { createPresignedPost } from "@aws-sdk/s3-presigned-post";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { env } from "./env";
@@ -121,6 +123,28 @@ export async function readObjectHead(key: string): Promise<Uint8Array> {
   const { Body } = await s3.send(
     new GetObjectCommand({ Bucket, Key: key, Range: `bytes=0-${SNIFF_BYTES - 1}` }),
   );
+  if (!Body) return new Uint8Array();
+  return Body.transformToByteArray();
+}
+
+// Rendered versions (lib/render.ts) are written by this server, not the
+// browser. A rendered video can be large, so this streams it in parts.
+export async function putObject(
+  key: string,
+  contentType: string,
+  body: Uint8Array | Readable,
+): Promise<void> {
+  await new Upload({
+    client: s3,
+    params: { Bucket, Key: key, Body: body, ContentType: contentType },
+    partSize: 16 * 1024 * 1024,
+    queueSize: 4,
+  }).done();
+}
+
+// The whole object — only for images, which are capped at 8 MB.
+export async function readObject(key: string): Promise<Uint8Array> {
+  const { Body } = await s3.send(new GetObjectCommand({ Bucket, Key: key }));
   if (!Body) return new Uint8Array();
   return Body.transformToByteArray();
 }

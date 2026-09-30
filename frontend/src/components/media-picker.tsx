@@ -18,18 +18,55 @@ import { cn } from "@/lib/utils";
 // limits are checked per account in the composer.
 const MAX_FILES = 20;
 
+export interface MediaShape {
+  width: number;
+  height: number;
+  // Videos only.
+  durationSeconds: number | null;
+}
+
 export interface MediaItem {
   localId: string;
   file: File;
   contentType: string;
-  // Object URL for the thumbnail and the in-browser Shorts check.
+  // Object URL for the thumbnail and the per-platform previews.
   previewUrl: string;
+  // Display dimensions, for the aspect-ratio checks and the Shorts check.
+  // Read in the browser right away, then replaced by what the backend
+  // measured once the upload completes. null until known.
+  shape: MediaShape | null;
   status: "uploading" | "ready" | "error";
   // 0-1.
   progress: number;
   assetId: string | null;
   error: string | null;
   controller: AbortController;
+}
+
+// Reads the local file's dimensions without uploading or decoding all of it
+// (a video loads its metadata only). Browsers apply EXIF orientation and
+// video rotation, so these are display dimensions like the backend's.
+function measureFile(file: File, url: string): Promise<MediaShape> {
+  return new Promise((resolve, reject) => {
+    if (isVideoFile(file)) {
+      const video = document.createElement("video");
+      video.preload = "metadata";
+      video.onloadedmetadata = () =>
+        resolve({
+          width: video.videoWidth,
+          height: video.videoHeight,
+          durationSeconds: video.duration,
+        });
+      video.onerror = reject;
+      video.src = url;
+    } else {
+      const image = new Image();
+      image.onload = () =>
+        resolve({ width: image.naturalWidth, height: image.naturalHeight, durationSeconds: null });
+      image.onerror = reject;
+      image.src = url;
+    }
+  });
 }
 
 // Each file starts uploading as soon as it's picked, so it's usually done by
@@ -57,7 +94,22 @@ export function useMediaUploads(workspaceId: string) {
         item.controller.signal,
         (assetId) => update(item.localId, { assetId }),
       )
-        .then((asset) => update(item.localId, { status: "ready", progress: 1, assetId: asset.id }))
+        .then((asset) =>
+          update(item.localId, {
+            status: "ready",
+            progress: 1,
+            assetId: asset.id,
+            ...(asset.width && asset.height
+              ? {
+                  shape: {
+                    width: asset.width,
+                    height: asset.height,
+                    durationSeconds: asset.durationSeconds,
+                  },
+                }
+              : {}),
+          }),
+        )
         .catch((err) => {
           if (item.controller.signal.aborted) return;
           update(item.localId, {
@@ -68,6 +120,20 @@ export function useMediaUploads(workspaceId: string) {
     },
     [workspaceId, update],
   );
+
+  // The browser's reading; never overwrites the backend's.
+  const measure = useCallback((item: MediaItem) => {
+    measureFile(item.file, item.previewUrl)
+      .then((shape) =>
+        setItems((all) =>
+          all.map((other) =>
+            other.localId === item.localId && !other.shape ? { ...other, shape } : other,
+          ),
+        ),
+      )
+      // Unreadable here — the backend's probe decides once uploaded.
+      .catch(() => {});
+  }, []);
 
   // Stops the upload and deletes whatever reached S3. Files already in a post
   // are only forgotten (see clear).
@@ -94,6 +160,7 @@ export function useMediaUploads(workspaceId: string) {
         file,
         contentType: contentTypeOf(file),
         previewUrl: URL.createObjectURL(file),
+        shape: null,
         status: "uploading",
         progress: 0,
         assetId: null,
@@ -108,7 +175,10 @@ export function useMediaUploads(workspaceId: string) {
       toast.error(`A post can have at most ${MAX_FILES} files`);
       for (const item of accepted.splice(room)) URL.revokeObjectURL(item.previewUrl);
     }
-    for (const item of accepted) start(item);
+    for (const item of accepted) {
+      start(item);
+      measure(item);
+    }
     setItems([...kept, ...accepted]);
   }
 

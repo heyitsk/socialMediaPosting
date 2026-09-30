@@ -1,12 +1,28 @@
-// ffprobe for the YouTube Shorts shape check (websitePlan.md §10.5), run
-// against a short-lived presigned S3 URL of the uploaded video.
+// Display dimensions of an uploaded file, read once when its upload completes
+// (websitePlan.md §12.3) and used for the per-platform aspect-ratio checks
+// and the YouTube Shorts check (§10.5). Videos go through ffprobe against a
+// short-lived presigned S3 URL; images through sharp on the downloaded bytes.
+
+import sharp from "sharp";
 
 const FFPROBE_TIMEOUT_MS = 20_000;
 
-export interface VideoShape {
+export interface ImageShape {
   width: number;
   height: number;
+}
+
+export interface VideoShape extends ImageShape {
   durationSeconds: number;
+}
+
+// Display width/height — phone photos are often stored landscape with an
+// EXIF orientation that viewers (and the platforms) apply.
+export async function probeImage(bytes: Uint8Array): Promise<ImageShape> {
+  const metadata = await sharp(bytes).metadata();
+  const { width, height } = metadata.autoOrient ?? metadata;
+  if (!width || !height) throw new Error("Couldn't read the image's dimensions");
+  return { width, height };
 }
 
 interface FfprobeOutput {

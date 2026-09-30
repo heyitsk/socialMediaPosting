@@ -21,14 +21,15 @@ import {
 } from "../lib/s3";
 import type { WorkspaceEnv } from "../middleware/auth";
 import { rateLimitByUser } from "../middleware/rate-limit";
-import { deleteMediaAsset } from "../service/media";
+import { deleteMediaAsset, probeMediaAsset } from "../service/media";
 import { workspaceParamsSchema } from "./workspace-params";
 
 // Composer uploads straight to S3 (websitePlan.md §11), in two phases:
 // 1. POST /media — we record a PENDING asset and hand back presigned upload
 //    URLs (one form POST for an image, one PUT per part for a video).
 // 2. POST /media/:id/complete — we check the object S3 actually has (size,
-//    magic bytes) and mark it READY. Only READY assets can be posted.
+//    magic bytes), read its dimensions and mark it READY. Only READY assets
+//    can be posted.
 // Anything left PENDING or never posted is removed by the media cleaner.
 
 const contentTypeSchema = z.enum(MEDIA_CONTENT_TYPES);
@@ -40,6 +41,11 @@ export const mediaAssetSchema = z
     contentType: z.string(),
     sizeBytes: z.number(),
     status: z.enum(["PENDING", "READY", "DELETED"]),
+    // As displayed; null until the upload completes.
+    width: z.number().nullable(),
+    height: z.number().nullable(),
+    // Videos only.
+    durationSeconds: z.number().nullable(),
   })
   .openapi("MediaAsset");
 
@@ -143,6 +149,9 @@ function serializeAsset(asset: MediaAsset): z.infer<typeof mediaAssetSchema> {
     contentType: asset.contentType,
     sizeBytes: asset.sizeBytes,
     status: asset.status,
+    width: asset.width,
+    height: asset.height,
+    durationSeconds: asset.durationSeconds,
   };
 }
 
@@ -237,9 +246,29 @@ export const mediaRoute = new OpenAPIHono<WorkspaceEnv>()
       );
     }
 
+    // For the per-platform aspect-ratio checks (websitePlan.md §12). A file
+    // we can't measure is one the platforms can't read either.
+    const shape = await probeMediaAsset(asset).catch((err: unknown) => {
+      console.warn(`probing media ${asset.id} failed:`, err);
+      return null;
+    });
+    if (!shape) {
+      await reject(
+        asset,
+        `${asset.originalFilename} couldn't be read — it may be damaged. Export it again and re-upload`,
+      );
+    }
+
     const ready = await prisma.mediaAsset.update({
       where: { id: asset.id },
-      data: { status: "READY", completedAt: new Date(), multipartUploadId: null },
+      data: {
+        status: "READY",
+        completedAt: new Date(),
+        multipartUploadId: null,
+        width: shape?.width,
+        height: shape?.height,
+        durationSeconds: shape?.durationSeconds,
+      },
     });
     return c.json(serializeAsset(ready), 200);
   })

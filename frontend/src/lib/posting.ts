@@ -8,6 +8,7 @@ export type MediaType = PostTarget["mediaType"];
 export type Platform = PostTarget["platform"];
 export type Capabilities = components["schemas"]["Capabilities"];
 export type PlatformCapabilities = Capabilities["platforms"][number];
+export type SurfaceFit = Capabilities["surfaces"][number];
 export type YouTubeOptions = components["schemas"]["YouTubeOptions"];
 export type PostGroupValidationError = components["schemas"]["PostGroupValidationError"];
 
@@ -102,6 +103,33 @@ export function captionLength(caption: string): number {
 
 export function countHashtags(caption: string): number {
   return caption.match(/#[\p{L}\p{N}_]+/gu)?.length ?? 0;
+}
+
+// Aspect ratios (width / height), same as the backend (lib/capabilities.ts).
+const RATIO_TOLERANCE = 0.01;
+
+export function ratioWithin(ratio: number, range: { min: number; max: number }): boolean {
+  return ratio >= range.min * (1 - RATIO_TOLERANCE) && ratio <= range.max * (1 + RATIO_TOLERANCE);
+}
+
+const NAMED_RATIOS: [number, string][] = [
+  [9 / 16, "9:16"],
+  [2 / 3, "2:3"],
+  [3 / 4, "3:4"],
+  [4 / 5, "4:5"],
+  [1, "1:1"],
+  [5 / 4, "5:4"],
+  [4 / 3, "4:3"],
+  [3 / 2, "3:2"],
+  [16 / 9, "16:9"],
+  [1.91, "1.91:1"],
+];
+
+// "4:5" for the usual shapes, "1.43:1" otherwise.
+export function formatRatio(ratio: number): string {
+  const named = NAMED_RATIOS.find(([value]) => Math.abs(ratio / value - 1) <= RATIO_TOLERANCE);
+  if (named) return named[1];
+  return ratio >= 1 ? `${ratio.toFixed(2)}:1` : `1:${(1 / ratio).toFixed(2)}`;
 }
 
 // The newest log explains the current state — older ones are earlier attempts.

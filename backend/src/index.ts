@@ -8,6 +8,7 @@ import { corsMiddleware } from "./middleware/cors";
 import { errorHandler } from "./middleware/error-handler";
 import { rateLimit } from "./middleware/rate-limit";
 import { startPublishWorker, startScheduleReconciler } from "./queue/publish-worker";
+import { startRenderReconciler, startRenderWorker } from "./queue/render-worker";
 import { startVideoStatusWorker } from "./queue/video-status-worker";
 import { facebookAuthRoute } from "./routes/auth/facebook";
 import { instagramAuthRoute } from "./routes/auth/instagram";
@@ -89,6 +90,8 @@ const server = Bun.serve({
 startVideoStatusWorker();
 startPublishWorker();
 startScheduleReconciler();
+startRenderWorker();
+startRenderReconciler();
 startMediaCleaner();
 
 console.log(`smPosting backend listening on ${server.url}`);

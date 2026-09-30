@@ -11,6 +11,9 @@ export const PUBLISH_QUEUE = "post-publish";
 export interface PublishJobData {
   postId: string;
   attempt: number;
+  // Set while a publish waits for its cropped/padded media to finish
+  // rendering (websitePlan.md §12.5): when the wait began.
+  waitingSince?: number;
 }
 
 const publishQueue = new Queue<PublishJobData>(PUBLISH_QUEUE, { connection: redisConnection() });

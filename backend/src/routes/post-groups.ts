@@ -11,15 +11,17 @@ import {
   isPostablePlatform,
   mediaTypesFor,
   type PostablePlatform,
+  ratioWithin,
   reconnectReason,
   SHORTS_MAX_DURATION_SECONDS,
 } from "../lib/capabilities";
 import { isVideoType } from "../lib/media-files";
-import { probeVideo } from "../lib/media-probe";
-import { presignDownload } from "../lib/s3";
+import { renditionKey } from "../lib/render";
 import type { WorkspaceEnv } from "../middleware/auth";
 import { enqueuePublish, removePublishJob } from "../queue/publish-queue";
-import { mediaExpiry } from "../service/media";
+import { enqueueRender } from "../queue/render-queue";
+import { mediaExpiry, probeMediaAsset, resetFailedRenditions } from "../service/media";
+import { resolveTargetMedia, type TargetMedia } from "../service/media-fits";
 import {
   MAX_ATTEMPTS,
   markTargetCancelled,
@@ -42,8 +44,6 @@ const MIN_SCHEDULE_LEAD_MS = 60_000;
 const MAX_SCHEDULE_AHEAD_MS = 90 * 24 * 60 * 60_000;
 const MAX_TARGETS = 25;
 const MAX_MEDIA = 20;
-// Only for ffprobe's Shorts check, which reads the file right away.
-const PROBE_URL_TTL_SECONDS = 15 * 60;
 
 const targetInputSchema = z.object({
   connectedAccountId: z.string(),
@@ -54,6 +54,21 @@ const targetInputSchema = z.object({
   mediaType: mediaTypeSchema.optional(),
   // Required for YouTube targets, ignored otherwise.
   youtubeOptions: youtubeOptionsSchema.optional(),
+  // Crop or pad files for this target (websitePlan.md §12). Files without an
+  // entry are sent as uploaded (Instagram: converted to JPEG if needed).
+  mediaFits: z
+    .array(
+      z.object({
+        mediaAssetId: z.string(),
+        mode: z.enum(["CROP", "PAD"]),
+        // Output width / height — one of the surface's presets.
+        ratio: z.number().positive(),
+        // CROP only: the region kept, as fractions (0-1) of the file as displayed.
+        rect: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional(),
+      }),
+    )
+    .max(MAX_MEDIA)
+    .default([]),
 });
 
 const createPostGroupSchema = z
@@ -189,6 +204,7 @@ interface ResolvedTarget {
   account: ConnectedAccount & { platform: PostablePlatform };
   mediaType: MediaType;
   caption: string;
+  media: TargetMedia;
 }
 
 // All-or-nothing (websitePlan.md §10.1 decision 3): every problem is collected
@@ -243,7 +259,6 @@ async function validate(workspaceId: string, body: CreateBody) {
       );
     }
   }
-  const nonJpeg = media.filter((asset) => !wantVideo && asset.contentType !== "image/jpeg");
 
   // The same account twice in one request is posted to once.
   const inputs = [
@@ -317,37 +332,47 @@ async function validate(workspaceId: string, body: CreateBody) {
         addTargetError(id, `${platform} carousels take ${min}-${max} images`);
       }
     }
-    // Instagram's content publishing API takes JPEG images only.
-    if (platform === "INSTAGRAM" && nonJpeg.length > 0) {
-      addTargetError(
-        id,
-        `Instagram only accepts JPEG images — ${nonJpeg.map((asset) => asset.originalFilename).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
-      );
-    }
+    // Crops, pads, Instagram's JPEG conversion, and shapes the API refuses.
+    const targetMedia = resolveTargetMedia(platform, mediaType, media, input.mediaFits);
+    for (const error of targetMedia.errors) addTargetError(id, error);
     if (platform === "YOUTUBE" && !input.youtubeOptions)
       addTargetError(id, "YouTube needs a video title");
 
-    resolved.push({ input, account: account as ResolvedTarget["account"], mediaType, caption });
+    resolved.push({
+      input,
+      account: account as ResolvedTarget["account"],
+      mediaType,
+      caption,
+      media: targetMedia,
+    });
   }
 
-  // Network check last, and only on otherwise-valid input.
+  // Uses the dimensions stored at upload. Only videos uploaded before those
+  // were stored need a network probe — last, and only on otherwise-valid input.
   const shorts = resolved.filter((target) => target.mediaType === "SHORTS");
   const [video] = media;
   if (errors.length === 0 && shorts.length > 0 && video) {
     try {
-      const shape = await probeVideo(await presignDownload(video.key, PROBE_URL_TTL_SECONDS));
-      const problems: string[] = [];
-      if (shape.height < shape.width)
-        problems.push(
-          `it's landscape (${shape.width}x${shape.height}) — Shorts must be vertical or square`,
-        );
-      if (shape.durationSeconds > SHORTS_MAX_DURATION_SECONDS) {
-        problems.push(
-          `it's ${Math.round(shape.durationSeconds)}s long — Shorts can be at most ${SHORTS_MAX_DURATION_SECONDS}s`,
-        );
-      }
-      for (const problem of problems) {
-        for (const target of shorts)
+      const shape =
+        video.width && video.height && video.durationSeconds != null
+          ? { width: video.width, height: video.height, durationSeconds: video.durationSeconds }
+          : await probeMediaAsset(video);
+      if (shape.durationSeconds == null) throw new Error("Couldn't read the video's duration");
+      for (const target of shorts) {
+        const problems: string[] = [];
+        // A landscape video cropped or padded to 9:16 for this target is fine.
+        const ratio = target.media.ratios.get(video.id) ?? shape.width / shape.height;
+        if (!ratioWithin(ratio, { min: 0, max: 1 })) {
+          problems.push(
+            `it's landscape (${shape.width}x${shape.height}) — Shorts must be vertical or square. Crop or pad it for YouTube`,
+          );
+        }
+        if (shape.durationSeconds > SHORTS_MAX_DURATION_SECONDS) {
+          problems.push(
+            `it's ${Math.round(shape.durationSeconds)}s long — Shorts can be at most ${SHORTS_MAX_DURATION_SECONDS}s`,
+          );
+        }
+        for (const problem of problems)
           addTargetError(target.account.id, `Can't post as a Short: ${problem}`);
       }
     } catch (err) {
@@ -398,8 +423,11 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     }
 
     let group: Prisma.PostGroupGetPayload<{ include: typeof postGroupInclude }>;
+    // Renditions to render once the transaction has committed.
+    let toRender: string[] = [];
     try {
       group = await prisma.$transaction(async (tx) => {
+        toRender = [];
         const created = await tx.postGroup.create({
           data: {
             workspaceId,
@@ -435,6 +463,42 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
           });
           if (count !== 1) throw new MediaTakenError();
         }
+
+        // Targets asking for the same crop of a file share one rendition.
+        const postIdByAccount = new Map(
+          created.posts.map((post) => [post.connectedAccountId, post.id]),
+        );
+        for (const target of resolved) {
+          const postId = postIdByAccount.get(target.account.id);
+          if (!postId) continue;
+          for (const { asset, spec } of target.media.renditions) {
+            const rendition = await tx.mediaRendition.upsert({
+              where: {
+                mediaAssetId_specHash: { mediaAssetId: asset.id, specHash: spec.specHash },
+              },
+              create: {
+                mediaAssetId: asset.id,
+                specHash: spec.specHash,
+                mode: spec.mode,
+                cropX: spec.crop?.x,
+                cropY: spec.crop?.y,
+                cropW: spec.crop?.w,
+                cropH: spec.crop?.h,
+                width: spec.width,
+                height: spec.height,
+                contentType: spec.contentType,
+                key: renditionKey(asset.key, spec.specHash, spec.contentType),
+              },
+              update: {},
+              select: { id: true, status: true },
+            });
+            await tx.postMediaRendition.create({
+              data: { postId, mediaAssetId: asset.id, renditionId: rendition.id },
+            });
+            if (rendition.status === "PENDING" && !toRender.includes(rendition.id))
+              toRender.push(rendition.id);
+          }
+        }
         return created;
       });
     } catch (err) {
@@ -459,6 +523,15 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
         return c.json(serializePostGroup(winner), 200);
       }
       throw err;
+    }
+
+    // Rendered now, not at send time, so scheduled posts are ready early and
+    // a failure shows up while the user is still here. A lost enqueue is
+    // picked up by the render reconciler.
+    for (const renditionId of toRender) {
+      await enqueueRender(renditionId).catch((err: unknown) =>
+        console.error(`couldn't queue render ${renditionId}:`, err),
+      );
     }
 
     await Promise.all(
@@ -532,6 +605,9 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
       });
     }
     try {
+      // A render that failed gets another go along with the post.
+      for (const renditionId of await resetFailedRenditions(postId))
+        await enqueueRender(renditionId);
       await enqueuePublish(postId, attempt);
     } catch (err) {
       console.error(`couldn't queue retry of post ${postId}:`, err);

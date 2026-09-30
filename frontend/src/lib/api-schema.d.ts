@@ -1254,8 +1254,31 @@ export interface components {
                     mediaTypes: ("TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS")[];
                 }[];
             }[];
+            surfaces: components["schemas"]["SurfaceFit"][];
             instagramMaxHashtags: number;
             shortsMaxDurationSeconds: number;
+        };
+        SurfaceFit: {
+            /** @enum {string} */
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+            /** @enum {string} */
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
+            display: {
+                min: number;
+                max: number;
+            };
+            /** @enum {string} */
+            beyond: "CROP" | "LETTERBOX";
+            accepted?: {
+                min: number;
+                max: number;
+            };
+            safeZone?: {
+                top: number;
+                bottom: number;
+            };
+            carouselUsesFirstRatio?: boolean;
+            presets: number[];
         };
         WorkspaceBody: {
             name: string;
@@ -1340,6 +1363,7 @@ export interface components {
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
             attempt: number;
             canRetry: boolean;
+            preparingMedia: boolean;
             youtubeTitle: string | null;
             logs: components["schemas"]["PostLog"][];
         };
@@ -1374,6 +1398,19 @@ export interface components {
                 /** @enum {string} */
                 mediaType?: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
                 youtubeOptions?: components["schemas"]["YouTubeOptions"];
+                /** @default [] */
+                mediaFits: {
+                    mediaAssetId: string;
+                    /** @enum {string} */
+                    mode: "CROP" | "PAD";
+                    ratio: number;
+                    rect?: {
+                        x: number;
+                        y: number;
+                        w: number;
+                        h: number;
+                    };
+                }[];
             }[];
         };
         YouTubeOptions: {
@@ -1400,6 +1437,9 @@ export interface components {
             sizeBytes: number;
             /** @enum {string} */
             status: "PENDING" | "READY" | "DELETED";
+            width: number | null;
+            height: number | null;
+            durationSeconds: number | null;
         };
         MediaUploadInstructions: {
             /** @enum {string} */
