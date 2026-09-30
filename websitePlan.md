@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Oct 1, 2026):** steps 1-4 built (§14.11.1-§14.11.4); the n8n leg of step 3 waits on upgrading the running n8n container. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+> **Status (Oct 1, 2026):** steps 1-5 built (§14.11.1-§14.11.5); step 6 (dashboards, alerts, Grafana Cloud) not started; the n8n leg of step 3 waits on upgrading the running n8n container. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1595,6 +1595,25 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - Host/runtime metrics: not tried under Bun.
 - **Checked:** a 45 s run of the backend exported all 12 `smposting_queue_jobs` series and the BullMQ and HTTP metrics to local Prometheus. The business counters only appear once their event happens; with no real posts in the test they're covered by `tsc` only. `bun test` 51/51.
 
+### 14.11.5 Step 5 as built (Oct 1, 2026)
+
+- **`frontend/src/lib/telemetry.ts`:** `@grafana/faro-web-sdk` + `@grafana/faro-web-tracing` 2.12, started from `main.tsx` **only when `VITE_FARO_URL` is set**.
+  - The SDK is loaded with a dynamic `import()`. Unset, Vite drops it entirely (one 589 kB bundle, as before). Set, it's two lazy chunks of 84 kB and 116 kB.
+  - `getWebInstrumentations()` + `TracingInstrumentation`. The API is same-origin, so fetches carry `traceparent` with no CORS changes.
+  - `trackView`, `setTelemetryUser` and `trackEvent` are no-ops when off. A view or user set before the SDK finishes loading is applied once it has.
+- **`App.tsx`:** `useTelemetryContext()` sets the Faro view on every route change, with UUID path segments replaced by `:id` (e.g. `/w/:id/compose`), and sets the user id (id only) from `/api/me`.
+- **Events** (string attributes only):
+  - `post_group_created` {kind, targets, scheduled} and `post_group_create_failed` {reason=targets_refused|error} in the composer;
+  - `media_upload_failed` {kind} in the media picker;
+  - `media_fit_applied` {mode} in the crop dialog.
+- **Local receiver (§14.10 decision 3):** `alloy` compose service under the `faro` profile (`grafana/alloy:v1.20.1`, port 12347, config `backend/alloy/faro.alloy`). `faro.receiver` → logs through `otelcol.receiver.loki` and a transform setting `service.name=smposting-frontend` → OTLP to otel-lgtm; traces straight to OTLP. CORS allows `http://localhost:5173`.
+- **`frontend/.env.example`:** `VITE_FARO_URL`, `VITE_APP_VERSION`.
+- **Checked:**
+  - `tsc -b` and `vite build` pass, with and without `VITE_FARO_URL`.
+  - Alloy started cleanly.
+  - A Faro-format event posted to `/collect` reached Loki as `service_name="smposting-frontend"` with `event_name` and `view_name`.
+- **Not yet checked:** the app itself in a browser. That means real Faro sessions, Web Vitals, and a browser fetch span becoming the parent of the backend's request span (step 5's exit check).
+
 ### 14.12 Risks
 
 - **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
@@ -1640,3 +1659,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-10-01 | §14 step 2 built (§14.11.2): `lib/logger.ts` (pino with trace ids, in-process bridge to the OTel Logs SDK → Loki, `err` as `exception.*`), `middleware/request-log.ts` replacing `hono/logger`, and every `console.*` call except `lib/env.ts` moved to structured fields with fixed messages. Log → trace link checked in local Grafana. 51/51 tests pass.*
 *Updated: 2026-10-01 | §14 step 3 built (§14.11.3): `bullmq-otel` on every queue and worker; delayed publishes, deadlines and video-status polls start their own trace with a span link back (`queue/telemetry.ts`); root spans for the reconcilers and media cleaner; `tracedFetch` for all 17 outbound calls, sending `traceparent` only to n8n; n8n pinned to 2.41.4 with `N8N_OTEL_*` in compose. Parent/link/propagation/redaction checked in Tempo with a throwaway queue. The n8n leg needs the running n8n container upgraded from 2.13.4.*
 *Updated: 2026-10-01 | §14 step 4 built (§14.11.4): `lib/metrics.ts` business metrics (dispatched, completed by outcome, deadline hits, n8n dispatch time, limit pauses and refusals, render time, uploads) with fixed-set labels only, and a `smposting_queue_jobs` gauge per queue and state. Send-to-published duration deferred (needs a dispatch timestamp column). Queue gauge, BullMQ and HTTP metrics checked in local Prometheus.*
+*Updated: 2026-10-01 | §14 step 5 built (§14.11.5): Grafana Faro in the frontend (`lib/telemetry.ts`), lazy-loaded and only when `VITE_FARO_URL` is set, with route views (ids as `:id`), user id, and composer/upload/crop events. Optional local receiver: `alloy` compose service under the `faro` profile forwarding to otel-lgtm. Build and the receiver → Loki path checked; not yet checked in a browser.*

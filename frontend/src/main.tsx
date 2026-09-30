@@ -5,6 +5,9 @@ import { BrowserRouter } from "react-router";
 import { App } from "@/App";
 import { Toaster } from "@/components/ui/sonner";
 import "@/index.css";
+import { initTelemetry } from "@/lib/telemetry";
+
+void initTelemetry();
 
 const queryClient = new QueryClient({
   defaultOptions: {

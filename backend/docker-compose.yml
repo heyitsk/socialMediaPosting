@@ -70,6 +70,22 @@ services:
       - "4318:4318" # OTLP HTTP
     # No volume: local telemetry is throwaway and resets with the container.
 
+  # Optional: receives the frontend's Faro telemetry locally and forwards it to
+  # otel-lgtm. Off by default (§14.10 decision 3) —
+  # `docker compose --profile faro up -d alloy`. See alloy/faro.alloy.
+  alloy:
+    image: grafana/alloy:v1.20.1
+    container_name: smposting-alloy
+    profiles: ["faro"]
+    restart: unless-stopped
+    command: ["run", "/etc/alloy/faro.alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+    ports:
+      - "12347:12347" # Faro receiver
+    volumes:
+      - ./alloy/faro.alloy:/etc/alloy/faro.alloy:ro
+    depends_on:
+      - otel-lgtm
+
 volumes:
   smposting_postgres_data:
   smposting_redis_data:

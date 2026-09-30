@@ -43,6 +43,7 @@ import {
 } from "@/lib/posting";
 import { AUTO_DELAY_MS, formatWhen, pausedText, usePostingLimits } from "@/lib/posting-limits";
 import { useWorkspaceId } from "@/lib/session";
+import { trackEvent } from "@/lib/telemetry";
 import { cn } from "@/lib/utils";
 
 type Account = components["schemas"]["ConnectedAccountSummary"];
@@ -481,6 +482,11 @@ export function ComposerPage() {
       queryClient.invalidateQueries({ queryKey: ["post-groups", workspaceId] });
       queryClient.invalidateQueries({ queryKey: ["posting-limits", workspaceId] });
       setResultGroupId(group.id);
+      trackEvent("post_group_created", {
+        kind: group.contentKind,
+        targets: String(group.targets.length),
+        scheduled: String(Boolean(group.scheduledFor)),
+      });
       // "Post now" targets the limiter pushed back wait as SCHEDULED.
       const waiting = group.scheduledFor
         ? 0
@@ -504,7 +510,9 @@ export function ComposerPage() {
       setSubmitAttempted(false);
     },
     onError: (err) => {
-      if (err && typeof err === "object" && "targets" in err) {
+      const refused = !!err && typeof err === "object" && "targets" in err;
+      trackEvent("post_group_create_failed", { reason: refused ? "targets_refused" : "error" });
+      if (refused) {
         setServerErrors(err as unknown as PostGroupValidationError);
         toast.error("Some accounts can't take this post — see below");
       } else {
