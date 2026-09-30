@@ -1226,6 +1226,24 @@ While an account is cooling down:
 5. `GET /posting-limits` + frontend (dashboard usage, composer disabled/next slot, results panel and History messages).
 6. **Later:** have n8n callbacks pass `X-Business-Use-Case-Usage` / `x-ratelimit-*` through (the §6 `usage` field) to pause proactively above 80 %. Before an Instagram/Threads publish when our own count is above 80 %, call `content_publishing_limit` / `threads_publishing_limit`. That catches posts made through other tools on the same account. Add Pinterest limits when it's wired.
 
+### 13.10.1 Step 1 as built (Sep 30, 2026)
+
+- **Migration `20260930170000_add_posting_limits`** (applied to the dev database): `dispatch_slots`, `account_cooldowns` and the `CooldownReason` enum, as in §13.5. Two changes from the sketch:
+  - Timestamps are `TIMESTAMP(3)`, like every other table, not `timestamptz`.
+  - `dispatch_slots` is unique on `(post_id, attempt, platform_account_id)`, because a YouTube target takes two slots: its channel's and the app-wide `"*"` one.
+- **`lib/posting-limits.ts`:**
+  - the §13.3 policy table, and LinkedIn's call cost read from `linkedin-poster.json`
+  - `budgetsFor(platform, platformAccountId, profile)`
+  - UTC and Pacific calendar days, with the DST changes handled
+  - `fitsAt` / `nextFreeTime`, the slot search. It moved here from step 2 because it's pure maths.
+  - `contentHash` + `mediaFingerprint` for the duplicate guard. Uploads keep no checksum, so a file is identified by its type, exact size, dimensions and duration. The same file uploaded again still matches.
+
+  The file doesn't read `env`: callers pass `env.POSTING_LIMITS_PROFILE`, so it can be tested on its own.
+- **YouTube app-wide budget** counts only `videos.insert` (80/day). The status polls' units (about 15 per upload) run out long after the inserts do.
+- **`POSTING_LIMITS_PROFILE`** (`standard` | `dev`, default `standard`). `.env.example` suggests `dev` while the Meta app is in development mode.
+- **Tests:** `bun test` (new `test` script), 22 cases in `lib/posting-limits.test.ts`: gap on both sides, hourly and rolling-24 h windows including scheduled sends, calendar-day resets, both Pacific DST days, and a brute-force check that `nextFreeTime` returns the earliest time that fits.
+- **Not wired yet:** nothing reads or writes the new tables until steps 2-3.
+
 ### 13.11 Risks
 
 - Meta publishes no Facebook post limit or spam threshold, so the Facebook numbers are guesses. Start strict and loosen them based on what we see.
@@ -1258,3 +1276,4 @@ While an account is cooling down:
 *Updated: 2026-09-30 | §12 step 2 built (§12.11): per-platform crop / blur-pad / Instagram JPEG conversion. `media_renditions` + `post_media_renditions` (migration `20260930120000_add_media_renditions`), presets in `/api/capabilities`, `mediaFits` per target on `POST /post-groups`, `media-render` BullMQ queue rendering with `sharp` (images) and `ffmpeg` (video) right after create, publish waits for renders and signs rendition keys, Adjust dialog with `react-easy-crop` and per-account customizing in the composer. The "Instagram only accepts JPEG" error is gone. Renders verified against S3; composer dialog and live posts not yet tested.*
 *Updated: 2026-09-30 | Planning only: new §13 "Per-Platform Posting Limits". Official limits checked per platform (Instagram 50-100 and Threads 250 posts per rolling 24 h, LinkedIn 150 calls per member per UTC day, YouTube project-wide units, Facebook none published). The Sep 2026 block was Meta's code 368 spam check, not a quota, so the plan adds pacing (minimum gap, per-hour cap), daily caps at about half the published limits, a 24 h duplicate guard and a cooldown circuit breaker. Limits are keyed on the platform account, not the app user or `ConnectedAccount`. Reservations live in a Postgres `dispatch_slots` table behind an advisory lock. Open questions in §13.9.*
 *Updated: 2026-09-30 | §13.9 decisions recorded: 1 h auto-delay allowance, fixed caps (not adjustable per workspace), duplicates blocked outright, targets waiting on a cooled-down account fail (for every cooldown reason) instead of being held, and no early clearing. First build covers Facebook, Instagram, Threads, LinkedIn and YouTube.*
+*Updated: 2026-09-30 | §13 step 1 built (§13.10.1): migration `20260930170000_add_posting_limits` (`dispatch_slots`, `account_cooldowns`, `CooldownReason`), `lib/posting-limits.ts` with the fixed policy table, LinkedIn call costs, UTC/Pacific calendar days, the `fitsAt`/`nextFreeTime` slot search and the duplicate-guard hash, `POSTING_LIMITS_PROFILE` (`standard`|`dev`), and 22 `bun test` cases. Nothing wired into posting yet.*

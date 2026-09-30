@@ -53,6 +53,10 @@ const envSchema = z.object({
 
   N8N_BASE_URL: z.url(),
   N8N_CALLBACK_SECRET: z.string().min(1),
+
+  // "dev" halves every posting cap and doubles the gaps, for while the Meta
+  // app is still in development mode. See lib/posting-limits.ts.
+  POSTING_LIMITS_PROFILE: z.enum(["standard", "dev"]).default("standard"),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -89,6 +89,12 @@ enum PostLogStatus {
 }
 
 // How a rendition is made from its master. websitePlan.md §12.
+enum CooldownReason {
+  ABUSE_BLOCK // Meta code 368 "spam prevention"
+  RATE_LIMIT // Throttled (429, Meta 4/17/32/613), usually short
+  QUOTA // A daily or rolling posting quota is used up
+}
+
 enum RenditionMode {
   CROP // Keep a region of the master, scaled to the output size
   PAD // Whole master centred on a blurred, zoomed copy of itself
@@ -284,9 +290,11 @@ model Post {
   attempt            Int              @default(1)
   createdAt          DateTime         @default(now()) @map("created_at")
 
-  logs       PostLog[]
+  logs          PostLog[]
   // Files this target sends as a rendition instead of the master.
-  renditions PostMediaRendition[]
+  renditions    PostMediaRendition[]
+  // Posting-limit reservations, one per attempt (websitePlan.md §13).
+  dispatchSlots DispatchSlot[]
 
   @@index([groupId])
   @@map("posts")
@@ -397,4 +405,52 @@ model PostMediaRendition {
   @@id([postId, mediaAssetId])
   @@index([renditionId])
   @@map("post_media_renditions")
+}
+
+// One per target attempt that the posting limiter let through, at the time it
+// may go out (websitePlan.md §13.5). Usage in a window is the sum of `cost`
+// over unreleased slots, so scheduled posts count against the day they're sent.
+// Keyed on the platform's own account id, not the ConnectedAccount row: the
+// same Page connected in two workspaces shares one budget.
+model DispatchSlot {
+  id                String    @id @default(uuid())
+  platform          Platform
+  // "*" is the app-wide budget (YouTube's project quota), taken as well as
+  // the channel's own slot.
+  platformAccountId String    @map("platform_account_id")
+  postId            String    @map("post_id")
+  post              Post      @relation(fields: [postId], references: [id])
+  attempt           Int
+  // 1 per post, except LinkedIn (API calls). See lib/posting-limits.ts.
+  cost              Int
+  slotAt            DateTime  @map("slot_at")
+  // Normalized caption + media fingerprints, for the 24 h duplicate guard.
+  contentHash       String    @map("content_hash")
+  // Set when the target failed or was cancelled before reaching n8n — the
+  // platform never saw it, so it stops counting.
+  releasedAt        DateTime? @map("released_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  @@unique([postId, attempt, platformAccountId])
+  @@index([platform, platformAccountId, slotAt])
+  @@map("dispatch_slots")
+}
+
+// A platform account the limiter won't send to until `until` (websitePlan.md
+// §13.7). One row per account; a newer block overwrites it.
+model AccountCooldown {
+  platform          Platform
+  platformAccountId String         @map("platform_account_id")
+  until             DateTime
+  reason            CooldownReason
+  // Shown to the user as is.
+  message           String
+  // The target whose failure started it. Plain id, not a relation — only
+  // kept for debugging.
+  sourcePostId      String?        @map("source_post_id")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  @@id([platform, platformAccountId])
+  @@map("account_cooldowns")
 }
