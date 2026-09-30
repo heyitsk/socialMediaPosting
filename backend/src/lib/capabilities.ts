@@ -79,6 +79,9 @@ export interface SurfaceFit {
   safeZone?: { top: number; bottom: number };
   // Instagram shows every carousel item at the first item's shape.
   carouselUsesFirstRatio?: boolean;
+  // Shapes the composer's cropper offers, best first. A crop or pad must use
+  // one of these (routes/post-groups.ts).
+  presets: number[];
 }
 
 const PORTRAIT = 4 / 5;
@@ -86,8 +89,16 @@ const LANDSCAPE = 1.91;
 const VERTICAL = 9 / 16;
 const WIDESCREEN = 16 / 9;
 
-const FEED_IMAGE: SurfaceFit = { display: { min: PORTRAIT, max: LANDSCAPE }, beyond: "CROP" };
-const FEED_VIDEO: SurfaceFit = { display: { min: PORTRAIT, max: WIDESCREEN }, beyond: "CROP" };
+const FEED_IMAGE: SurfaceFit = {
+  display: { min: PORTRAIT, max: LANDSCAPE },
+  beyond: "CROP",
+  presets: [PORTRAIT, 1, LANDSCAPE],
+};
+const FEED_VIDEO: SurfaceFit = {
+  display: { min: PORTRAIT, max: WIDESCREEN },
+  beyond: "CROP",
+  presets: [PORTRAIT, 1, WIDESCREEN],
+};
 const FULL_SCREEN = { min: VERTICAL, max: VERTICAL };
 
 export const SURFACE_FITS: Record<PostablePlatform, Partial<Record<MediaType, SurfaceFit>>> = {
@@ -99,8 +110,18 @@ export const SURFACE_FITS: Record<PostablePlatform, Partial<Record<MediaType, Su
       accepted: { min: PORTRAIT, max: LANDSCAPE },
       carouselUsesFirstRatio: true,
     },
-    REELS: { display: FULL_SCREEN, beyond: "LETTERBOX", safeZone: { top: 0.14, bottom: 0.2 } },
-    STORIES: { display: FULL_SCREEN, beyond: "LETTERBOX", safeZone: { top: 0.14, bottom: 0.14 } },
+    REELS: {
+      display: FULL_SCREEN,
+      beyond: "LETTERBOX",
+      safeZone: { top: 0.14, bottom: 0.2 },
+      presets: [VERTICAL],
+    },
+    STORIES: {
+      display: FULL_SCREEN,
+      beyond: "LETTERBOX",
+      safeZone: { top: 0.14, bottom: 0.14 },
+      presets: [VERTICAL],
+    },
   },
   THREADS: { IMAGE: FEED_IMAGE, CAROUSEL: FEED_IMAGE, VIDEO: FEED_VIDEO },
   LINKEDIN: {
@@ -110,10 +131,19 @@ export const SURFACE_FITS: Record<PostablePlatform, Partial<Record<MediaType, Su
     VIDEO: { ...FEED_VIDEO, accepted: { min: 1 / 2.4, max: 2.4 } },
   },
   YOUTUBE: {
-    VIDEO: { display: { min: WIDESCREEN, max: WIDESCREEN }, beyond: "LETTERBOX" },
+    VIDEO: {
+      display: { min: WIDESCREEN, max: WIDESCREEN },
+      beyond: "LETTERBOX",
+      presets: [WIDESCREEN],
+    },
     // Vertical/square only — the Shorts check in routes/post-groups.ts covers
     // that together with the duration, so no `accepted` here.
-    SHORTS: { display: FULL_SCREEN, beyond: "LETTERBOX", safeZone: { top: 0.14, bottom: 0.25 } },
+    SHORTS: {
+      display: FULL_SCREEN,
+      beyond: "LETTERBOX",
+      safeZone: { top: 0.14, bottom: 0.25 },
+      presets: [VERTICAL, 1],
+    },
   },
 };
 

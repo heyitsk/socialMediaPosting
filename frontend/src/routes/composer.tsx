@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { MediaFitPreview, type PreviewSurface } from "@/components/media-fit-preview";
+import { MediaFitDialog } from "@/components/media-fit-dialog";
+import { MediaFitPreview, type PreviewTile } from "@/components/media-fit-preview";
 import { MediaPicker, useMediaUploads } from "@/components/media-picker";
 import { PlatformMark } from "@/components/platform-mark";
 import { PostGroupCard } from "@/components/post-group-card";
@@ -19,6 +20,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api, apiErrorMessage } from "@/lib/api";
 import type { components } from "@/lib/api-schema";
+import { defaultTileFit, effectiveRatio, mediaFitsFor, type TileFit } from "@/lib/media-fit";
 import { isVideoFile } from "@/lib/media-upload";
 import {
   CONTENT_KIND_LABELS,
@@ -128,6 +130,12 @@ export function ComposerPage() {
   const [serverErrors, setServerErrors] = useState<PostGroupValidationError | null>(null);
   const [resultGroupId, setResultGroupId] = useState<string | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
+  // Per-platform crop/pad, by preview tile key; tiles not in here use their
+  // default. Accounts in `customized` have a tile of their own.
+  const [tileFits, setTileFits] = useState<Record<string, TileFit>>({});
+  const [customized, setCustomized] = useState<string[]>([]);
+  // The tile whose Adjust dialog is open.
+  const [adjusting, setAdjusting] = useState<string | null>(null);
 
   const capabilitiesByPlatform = new Map(
     capabilities?.platforms.map((platform) => [platform.platform, platform]) ?? [],
@@ -183,10 +191,6 @@ export function ComposerPage() {
   const mediaAssetIds = mediaItems.flatMap((item) =>
     item.status === "ready" && item.assetId ? [item.assetId] : [],
   );
-  const nonJpeg = mediaItems.filter(
-    (item) => kind !== "VIDEO" && item.contentType !== "image/jpeg",
-  );
-
   // Read from the local file first, so the Shorts and aspect-ratio checks
   // don't wait for the upload.
   const videoShape = kind === "VIDEO" ? (mediaItems[0]?.shape ?? null) : null;
@@ -211,16 +215,49 @@ export function ComposerPage() {
     );
   }
 
-  // One preview per platform + media type; its accounts show the same thing.
-  const previewSurfaces = new Map<string, PreviewSurface>();
+  // One preview tile per platform + media type, shared by its accounts —
+  // unless an account was customized, which then gets a tile of its own
+  // (websitePlan.md §12.9).
+  const tileKeyFor = (account: Account, surface: SurfaceFit) =>
+    customized.includes(account.id)
+      ? `account:${account.id}`
+      : `${surface.platform}:${surface.mediaType}`;
+  const tileFitFor = (key: string, surface: SurfaceFit): TileFit =>
+    tileFits[key] ?? defaultTileFit(surface, mediaItems);
+
+  const tilesByKey = new Map<string, PreviewTile>();
   for (const account of selectedAccounts) {
-    const fit = fitFor(account);
-    if (!fit) continue;
-    const key = `${fit.platform}:${fit.mediaType}`;
-    const surface = previewSurfaces.get(key) ?? { fit, accountNames: [] };
-    surface.accountNames.push(account.accountName);
-    previewSurfaces.set(key, surface);
+    const surface = fitFor(account);
+    if (!surface) continue;
+    const key = tileKeyFor(account, surface);
+    const tile = tilesByKey.get(key) ?? {
+      key,
+      surface,
+      fit: tileFitFor(key, surface),
+      accounts: [],
+      customized: key.startsWith("account:"),
+    };
+    tile.accounts.push({ id: account.id, name: account.accountName });
+    tilesByKey.set(key, tile);
   }
+  const tiles = [...tilesByKey.values()];
+  const tileFor = (account: Account) =>
+    tiles.find((tile) => tile.accounts.some((member) => member.id === account.id)) ?? null;
+  const adjustingTile = tiles.find((tile) => tile.key === adjusting) ?? null;
+
+  // Starts from what the account's shared tile has now.
+  const customize = (accountId: string) => {
+    const account = selectedAccounts.find((candidate) => candidate.id === accountId);
+    const surface = account && fitFor(account);
+    if (!account || !surface) return;
+    const shared = `${surface.platform}:${surface.mediaType}`;
+    setTileFits((all) => ({ ...all, [`account:${accountId}`]: tileFitFor(shared, surface) }));
+    setCustomized((ids) => [...ids, accountId]);
+  };
+  const resetCustomized = (accountId: string) => {
+    setCustomized((ids) => ids.filter((id) => id !== accountId));
+    setTileFits(({ [`account:${accountId}`]: _dropped, ...rest }) => rest);
+  };
 
   // --- Validation (mirrors the backend's; the backend has the final say) ---
 
@@ -279,23 +316,20 @@ export function ComposerPage() {
       if (mediaItems.length >= 2 && (mediaItems.length < min || mediaItems.length > max))
         errors.push({ message: `${label} carousels take ${min}-${max} images` });
     }
-    // Instagram's publishing API takes JPEG images only.
-    if (account.platform === "INSTAGRAM" && nonJpeg.length > 0) {
-      errors.push({
-        message: `Instagram only accepts JPEG images — ${nonJpeg.map((item) => item.file.name).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
+    // Shapes the platform's API refuses (websitePlan.md §12.2), after any crop
+    // or pad. Instagram's JPEG-only rule is handled by the backend converting.
+    const tile = tileFor(account);
+    const accepted = tile?.surface.accepted;
+    if (tile && accepted) {
+      const outside = mediaItems.flatMap((item) => {
+        const ratio = effectiveRatio(tile.fit, item);
+        return ratio !== null && !ratioWithin(ratio, accepted)
+          ? [`${item.file.name} is ${formatRatio(ratio)}`]
+          : [];
       });
-    }
-    // Shapes the platform's API refuses (websitePlan.md §12.2).
-    const accepted = fitFor(account)?.accepted;
-    if (accepted) {
-      const outside = mediaItems.flatMap((item) =>
-        item.shape && !ratioWithin(item.shape.width / item.shape.height, accepted)
-          ? [`${item.file.name} is ${formatRatio(item.shape.width / item.shape.height)}`]
-          : [],
-      );
       if (outside.length > 0) {
         errors.push({
-          message: `${label} only takes ${formatRatio(accepted.min)} to ${formatRatio(accepted.max)} ${kind === "VIDEO" ? "videos" : "images"} — ${outside.join(", ")}`,
+          message: `${label} only takes ${formatRatio(accepted.min)} to ${formatRatio(accepted.max)} ${kind === "VIDEO" ? "videos" : "images"} — ${outside.join(", ")}. Use Adjust under "How it will look" to crop or pad it`,
         });
       }
     }
@@ -304,9 +338,14 @@ export function ComposerPage() {
         errors.push({ message: "Add a video title", missing: true });
       if (/[<>]/.test(own.youtubeTitle)) errors.push({ message: "The title can't contain < or >" });
       if (own.youtubeMediaType === "SHORTS" && videoShape && capabilities) {
-        if (videoShape.height < videoShape.width)
+        // A landscape video cropped or padded to vertical is fine.
+        const video = mediaItems[0];
+        const ratio =
+          (tile && video && effectiveRatio(tile.fit, video)) ??
+          videoShape.width / videoShape.height;
+        if (!ratioWithin(ratio, { min: 0, max: 1 }))
           errors.push({
-            message: `Can't post as a Short: it's landscape (${videoShape.width}x${videoShape.height}) — Shorts must be vertical or square`,
+            message: `Can't post as a Short: it's landscape (${videoShape.width}x${videoShape.height}) — Shorts must be vertical or square. Use Adjust to crop or pad it`,
           });
         if (
           videoShape.durationSeconds != null &&
@@ -367,6 +406,10 @@ export function ComposerPage() {
               return {
                 connectedAccountId: account.id,
                 captionOverride: own.overrideCaption ? own.caption : undefined,
+                mediaFits: (() => {
+                  const tile = tileFor(account);
+                  return tile ? mediaFitsFor(tile.fit, mediaItems) : [];
+                })(),
                 mediaType: account.platform === "YOUTUBE" ? own.youtubeMediaType : undefined,
                 youtubeOptions:
                   account.platform === "YOUTUBE"
@@ -402,6 +445,8 @@ export function ComposerPage() {
       setCaption("");
       media.clear();
       setSettings({});
+      setTileFits({});
+      setCustomized([]);
       setScheduleMode("now");
       setScheduledAt("");
       setSubmitAttempted(false);
@@ -639,14 +684,32 @@ export function ComposerPage() {
                   </div>
                 )}
 
-                {kind !== "TEXT" && mediaItems.length > 0 && previewSurfaces.size > 0 && (
+                {kind !== "TEXT" && mediaItems.length > 0 && tiles.length > 0 && (
                   <div className="space-y-2">
                     <Label>How it will look</Label>
                     <p className="text-xs text-muted-foreground">
-                      Each platform shows your media at its own shape.
+                      Each platform shows your media at its own shape. Use Adjust to crop or pad it
+                      for one platform — your upload and the other platforms stay as they are.
                     </p>
-                    <MediaFitPreview surfaces={[...previewSurfaces.values()]} items={mediaItems} />
+                    <MediaFitPreview
+                      tiles={tiles}
+                      items={mediaItems}
+                      onAdjust={(tile) => setAdjusting(tile.key)}
+                      onCustomize={customize}
+                      onReset={resetCustomized}
+                    />
                   </div>
+                )}
+                {adjustingTile && (
+                  <MediaFitDialog
+                    tile={adjustingTile}
+                    items={mediaItems}
+                    onClose={() => setAdjusting(null)}
+                    onSave={(fit) => {
+                      setTileFits((all) => ({ ...all, [adjustingTile.key]: fit }));
+                      setAdjusting(null);
+                    }}
+                  />
                 )}
               </section>
             )}

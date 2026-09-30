@@ -1278,6 +1278,7 @@ export interface components {
                 bottom: number;
             };
             carouselUsesFirstRatio?: boolean;
+            presets: number[];
         };
         WorkspaceBody: {
             name: string;
@@ -1362,6 +1363,7 @@ export interface components {
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
             attempt: number;
             canRetry: boolean;
+            preparingMedia: boolean;
             youtubeTitle: string | null;
             logs: components["schemas"]["PostLog"][];
         };
@@ -1396,6 +1398,19 @@ export interface components {
                 /** @enum {string} */
                 mediaType?: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
                 youtubeOptions?: components["schemas"]["YouTubeOptions"];
+                /** @default [] */
+                mediaFits: {
+                    mediaAssetId: string;
+                    /** @enum {string} */
+                    mode: "CROP" | "PAD";
+                    ratio: number;
+                    rect?: {
+                        x: number;
+                        y: number;
+                        w: number;
+                        h: number;
+                    };
+                }[];
             }[];
         };
         YouTubeOptions: {

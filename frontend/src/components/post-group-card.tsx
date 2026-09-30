@@ -151,7 +151,11 @@ function TargetRow({
               Retry limit reached — create the post again
             </span>
           )}
-          <Badge variant={STATUS_VARIANT[target.status]}>{STATUS_LABELS[target.status]}</Badge>
+          {target.preparingMedia && target.status === "PROCESSING" ? (
+            <Badge variant="secondary">Preparing media…</Badge>
+          ) : (
+            <Badge variant={STATUS_VARIANT[target.status]}>{STATUS_LABELS[target.status]}</Badge>
+          )}
         </div>
       </div>
       {(target.youtubeTitle || target.caption !== sharedCaption || error || target.attempt > 1) && (

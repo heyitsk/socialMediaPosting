@@ -79,7 +79,8 @@ const ERROR_RULES: ErrorRule[] = [
   },
   {
     text: /aspect ratio/i,
-    message: "The platform doesn't accept this image or video's aspect ratio.",
+    message:
+      "The platform doesn't accept this image or video's aspect ratio — crop or pad it for this platform in the composer.",
   },
   {
     text: /media (?:download has failed|could not be (?:fetched|downloaded))|failed to (?:fetch|download) (?:the )?media/i,

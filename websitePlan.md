@@ -506,8 +506,8 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 ### Phase 2 — Media Engine & Post Composer
 - [x] Set up AWS S3 bucket and presigned URL upload handler (§11, Sep 29 2026 — code done; bucket deploy + live test pending).
 - [x] Pre-dispatch media dimension probe + per-platform aspect-ratio warnings and read-only preview grid in the composer (§3 "Per-Platform Media Fitting", step 1; implementation plan §12.7 step 1 — code done Sep 30 2026, see §12.10; live upload test pending).
-- [ ] Ratio-locked cropper with safe-zone overlays; store per-target crop settings against a single master upload (§3, step 2; §12.7 step 2, ships with rendering).
-- [ ] `sharp`/`ffmpeg` render worker on its own BullMQ queue (crop or blurred-background pad, images and video in one release), dispatching rendered-version S3 URLs to n8n (§3, step 3; §12.7 step 2).
+- [x] Ratio-locked cropper with safe-zone overlays; store per-target crop settings against a single master upload (§3, step 2; §12.7 step 2 — code done Sep 30 2026, see §12.11; composer not yet tried in a browser).
+- [x] `sharp`/`ffmpeg` render worker on its own BullMQ queue (crop or blurred-background pad, images and video in one release), dispatching rendered-version S3 URLs to n8n (§3, step 3; §12.7 step 2 — renders verified against S3 Sep 30 2026, see §12.11; no live post yet).
 - [ ] Smart-crop defaults, video auto-reframing, optional generative outpainting (§3, step 4 — later; §12.7 step 3).
 - [ ] Build Post Composer UI with real-time platform validation rules.
 
@@ -1051,7 +1051,48 @@ MediaRendition
   - The new `components/media-fit-preview.tsx` shows one tile per platform + media type under the media picker, covering the tile's accounts. Each tile has a frame per file at the shape the platform will show, drawn with CSS only.
   - Each tile gets a verdict: fits, cropped, letterboxed, or rejected. Shaded safe-zone bands appear on full-screen vertical surfaces.
   - Rejected shapes block submit with the same message the backend gives.
-- **Not built yet:** cropping, padding and JPEG conversion (step 2). The "Instagram only accepts JPEG" error stays until then.
+- **Not built yet:** cropping, padding and JPEG conversion (step 2 — built next, see §12.11).
+
+### 12.11 Step 2 as built (Sep 30, 2026)
+
+- **Data model (refines §12.3).** The fit spec lives on the rendition, and a thin join table says which target uses which one. This way the render worker never looks at posts, and identical fits share a row and a file without extra bookkeeping. Migration `20260930120000_add_media_renditions`:
+  - `media_renditions`: `mode` (`CROP` | `PAD` | `CONVERT`), the crop rect (`crop_x/y/w/h`, 0-1 of the displayed master), output `width`/`height`, `content_type`, `key` = `<workspaceId>/<assetId>/r/<specHash>.<jpg|mp4>`, and `status` (`PENDING` | `READY` | `FAILED` | `DELETED`). Unique on `(media_asset_id, spec_hash)`.
+  - `post_media_renditions (post_id, media_asset_id, rendition_id)`: a target with no row for a file sends the master.
+- **Output size (`lib/render.ts` `renditionSpec`).** At most 1080 on the short edge and 1920 on the long one, never upscaled, even dimensions. `CONVERT` keeps the master's size. `specHash` covers mode, rect, size and type, so two targets with the same fit share one render.
+- **Presets.** `SURFACE_FITS[...].presets` (served in `/api/capabilities`) lists the shapes the cropper offers:
+  - feed images: 4:5, 1:1, 1.91:1
+  - feed video: 4:5, 1:1, 16:9
+  - Reels and Stories: 9:16
+  - YouTube video: 16:9
+  - Shorts: 9:16, 1:1
+
+  The API only accepts a crop or pad at one of these.
+- **API.** Each `POST /post-groups` target gains `mediaFits: [{ mediaAssetId, mode: CROP|PAD, ratio, rect? }]`. `service/media-fits.ts` `resolveTargetMedia`:
+  - validates the fits: the shape must be a preset, the rect must be inside the picture and match the shape within 2%, the file must have stored dimensions, and each file can have one fit
+  - drops no-op fits
+  - adds a `CONVERT` for Instagram non-JPEG images, which replaces the old "JPEG only" error
+  - checks each file's final shape against `accepted` and the Shorts rule
+
+  The group transaction upserts renditions and links them. Pending renders are queued right after it commits.
+- **Rendering (`queue/render-worker.ts`).** The `media-render` queue has concurrency 2 and 2 attempts, and one job per rendition.
+  - Images: `sharp` auto-orients, then extract + resize (crop) or composites onto a blurred, darkened cover (pad). Output is always JPEG (mozjpeg q90, white background for transparent PNGs).
+  - Video: `ffmpeg` reads a presigned URL of the master and crops/scales or blur-pads (H.264 CRF 20 veryfast, AAC, `+faststart`) into a temp file, which is streamed to S3 with `@aws-sdk/lib-storage`.
+  - A reconciler re-queues `PENDING` renditions every 5 minutes. When a master is deleted, the media cleaner deletes its renditions too.
+- **Publishing.**
+  - The publish worker waits for this target's renditions by re-delaying its own job every 15 s. It gives up after 10 minutes for images and 45 for video with a readable failure.
+  - A `FAILED` rendition fails the target. Retrying the target re-queues its failed renders.
+  - `mediaUrlsForDispatch` signs the rendition's key when there is one, so n8n payloads are unchanged.
+  - Targets expose `preparingMedia`, and History shows "Preparing media…".
+- **Composer.**
+  - Each preview tile has an **Adjust** button that opens `media-fit-dialog.tsx`: As uploaded / Crop / Blur-pad, a shape picker from the presets, `react-easy-crop` for images and video, a per-file strip for carousels, and a live platform-shaped preview with safe zones.
+  - A tile's fit covers all its accounts. "Different for one account?" splits an account into its own tile, and "Use the same as other … accounts" merges it back.
+  - Defaults: Stories images that aren't 9:16 start blur-padded. Everything else starts as uploaded, and a shape the platform refuses blocks submit until the user crops or pads it.
+  - The tile previews draw crops and pads with CSS from the same rect the backend renders.
+- **Verified:**
+  - Validation rules checked in isolation.
+  - Real renders through the running render worker against S3: PNG crop to 4:5, pad to 9:16 and JPEG convert, plus video crop to 9:16 and pad to 9:16. All came out at the expected sizes and codecs in about 4 s, and dispatch signed the rendition keys.
+  - EXIF-rotated photos and rotated phone videos checked locally.
+- **Not verified yet:** the composer's Adjust dialog in a browser, and a real post of a rendered file to each platform.
 
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
@@ -1076,3 +1117,4 @@ MediaRendition
 *Updated: 2026-09-30 | New §10.9: n8n failure text is mapped to short user-facing messages by a rules table (`lib/platform-error.ts`), raw text kept in `PostLog`; manual retry capped at 5 sends per target (`canRetry` in the API). LinkedIn video size probe switched from HEAD to a ranged GET (HEAD is refused on GET-presigned S3 URLs).*
 *Updated: 2026-09-30 | Planning only: new §12 "Per-Platform Media Fitting — Implementation Plan" turning §3 into three build steps: dimensions probed at upload complete, `surfaces` fit rules in `/api/capabilities`, CSS-only preview grid (plain ratio frames) with safe zones, `react-easy-crop` cropper, `media_fits` (per target × asset, relative rect, CROP/PAD) and shared `media_renditions`, eager `render` BullMQ queue (`sharp` images, `ffmpeg` video), per-target dispatch URLs, Instagram images always rendered to JPEG. §12.9 records Kushagra's decisions: server-side rendering for images and video, fits editable per account (shared per surface by default), user must choose crop or pad on strict surfaces, video ships with images, blur-pad default for Story/Reels images. Phase 2 roadmap items point at §12.*
 *Updated: 2026-09-30 | §12 step 1 built (§12.10): media dimensions stored at upload (`sharp` for images, ffprobe for video; migration `20260930090000_add_media_dimensions`), per-platform `surfaces` fit rules in `/api/capabilities`, API-rejected shapes validated per target, Shorts check on stored dimensions, and a read-only per-platform preview grid with safe zones in the composer. Phase 2 roadmap item ticked; live upload test pending.*
+*Updated: 2026-09-30 | §12 step 2 built (§12.11): per-platform crop / blur-pad / Instagram JPEG conversion. `media_renditions` + `post_media_renditions` (migration `20260930120000_add_media_renditions`), presets in `/api/capabilities`, `mediaFits` per target on `POST /post-groups`, `media-render` BullMQ queue rendering with `sharp` (images) and `ffmpeg` (video) right after create, publish waits for renders and signs rendition keys, Adjust dialog with `react-easy-crop` and per-account customizing in the composer. The "Instagram only accepts JPEG" error is gone. Renders verified against S3; composer dialog and live posts not yet tested.*

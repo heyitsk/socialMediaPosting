@@ -40,6 +40,8 @@ const capabilitiesSchema = z
           accepted: ratioRangeSchema.optional(),
           safeZone: z.object({ top: z.number(), bottom: z.number() }).optional(),
           carouselUsesFirstRatio: z.boolean().optional(),
+          // Shapes a crop or pad may use, best first.
+          presets: z.array(z.number()),
         })
         .openapi("SurfaceFit"),
     ),

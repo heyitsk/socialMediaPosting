@@ -1,4 +1,4 @@
-import { Worker } from "bullmq";
+import { DelayedError, type Job, Worker } from "bullmq";
 import { prisma } from "../db/client";
 import { reconnectReason } from "../lib/capabilities";
 import { mediaUrlsForDispatch } from "../service/media";
@@ -26,7 +26,15 @@ const CONCURRENCY = 10;
 // to send it now. websitePlan.md §10.6.
 const MAX_SCHEDULE_LATENESS_MS = 60 * 60_000;
 
-async function publish({ postId, attempt }: PublishJobData): Promise<void> {
+// Cropped/padded media is rendered right after the post is created, so it's
+// usually ready long before sending. If not, the publish re-checks this often
+// and gives up after this long (websitePlan.md §12.5).
+const RENDER_POLL_MS = 15_000;
+const IMAGE_RENDER_WAIT_MS = 10 * 60_000;
+const VIDEO_RENDER_WAIT_MS = 45 * 60_000;
+
+async function publish(job: Job<PublishJobData>, token?: string): Promise<void> {
+  const { postId, attempt, waitingSince } = job.data;
   const post = await prisma.post.findUnique({
     where: { id: postId },
     include: {
@@ -34,7 +42,13 @@ async function publish({ postId, attempt }: PublishJobData): Promise<void> {
       group: {
         include: {
           workspace: { select: { deletedAt: true } },
-          media: { orderBy: { position: "asc" }, select: { key: true, status: true } },
+          media: { orderBy: { position: "asc" }, select: { id: true, key: true, status: true } },
+        },
+      },
+      renditions: {
+        select: {
+          mediaAssetId: true,
+          rendition: { select: { key: true, status: true, contentType: true, error: true } },
         },
       },
     },
@@ -52,8 +66,10 @@ async function publish({ postId, attempt }: PublishJobData): Promise<void> {
     await markTargetCancelled(postId);
     return;
   }
+  // Not while waiting for renders — that wait has its own limit below.
   if (
     attempt === 1 &&
+    waitingSince === undefined &&
     group.scheduledFor &&
     Date.now() - group.scheduledFor.getTime() > MAX_SCHEDULE_LATENESS_MS
   ) {
@@ -83,11 +99,46 @@ async function publish({ postId, attempt }: PublishJobData): Promise<void> {
     return;
   }
 
+  // This target's cropped/padded/converted files.
+  const renditions = post.renditions.map((link) => link.rendition);
+  const failedRender = renditions.find((rendition) => rendition.status === "FAILED");
+  if (failedRender) {
+    console.error(`publish ${postId}: a rendition failed:`, failedRender.error);
+    await markTargetFailed(
+      postId,
+      platform,
+      "Couldn't prepare the cropped media for this platform — retry to render it again",
+      { attempt },
+    );
+    return;
+  }
+  const rendering = renditions.filter((rendition) => rendition.status === "PENDING");
+  if (rendering.length > 0 && token) {
+    const since = waitingSince ?? Date.now();
+    const limit = rendering.some((rendition) => rendition.contentType === "video/mp4")
+      ? VIDEO_RENDER_WAIT_MS
+      : IMAGE_RENDER_WAIT_MS;
+    if (Date.now() - since > limit) {
+      await markTargetFailed(
+        postId,
+        platform,
+        "Preparing the cropped media took too long — retry to try again",
+        { attempt },
+      );
+      return;
+    }
+    // Same job, checked again shortly — it stays pending, so the schedule
+    // reconciler leaves it alone.
+    await job.updateData({ ...job.data, waitingSince: since });
+    await job.moveToDelayed(Date.now() + RENDER_POLL_MS, token);
+    throw new DelayedError();
+  }
+
   if (post.status === "SCHEDULED" && !(await markTargetProcessing(postId, attempt))) return;
 
   try {
     // Uploaded media gets freshly signed S3 URLs on every attempt.
-    const mediaUrls = await mediaUrlsForDispatch(group.media, post.mediaUrls);
+    const mediaUrls = await mediaUrlsForDispatch(group.media, post.renditions, post.mediaUrls);
     await dispatchPost({ ...post, mediaUrls }, account);
   } catch (err) {
     console.error(`publish ${postId} (${platform}) failed:`, err);
@@ -121,9 +172,9 @@ async function enforceDeadline({ postId, attempt }: PublishJobData): Promise<voi
 export function startPublishWorker(): Worker<PublishJobData> {
   const worker = new Worker<PublishJobData>(
     PUBLISH_QUEUE,
-    async (job) => {
+    async (job, token) => {
       if (job.name === "deadline") return enforceDeadline(job.data);
-      return publish(job.data);
+      return publish(job, token);
     },
     { connection: redisConnection(), concurrency: CONCURRENCY },
   );

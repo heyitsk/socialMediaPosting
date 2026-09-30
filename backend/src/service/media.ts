@@ -1,4 +1,4 @@
-import type { MediaAsset } from "@prisma/client";
+import type { MediaAsset, MediaRendition } from "@prisma/client";
 import { prisma } from "../db/client";
 import { isVideoType } from "../lib/media-files";
 import { type ImageShape, probeImage, probeVideo, type VideoShape } from "../lib/media-probe";
@@ -35,19 +35,28 @@ export function mediaExpiry(scheduledFor: Date | null): Date {
   return new Date((scheduledFor ?? new Date()).getTime() + MEDIA_RETENTION_MS);
 }
 
-// The URLs a target's n8n payload carries. Groups created before S3 uploads
-// have no media rows and keep the public URLs they were created with.
+// The URLs a target's n8n payload carries: each file's rendition for this
+// target if it has one (cropped, padded or converted — websitePlan.md §12),
+// else the master. Signing is local, so every target signing its own is
+// free. Groups created before S3 uploads have no media rows and keep the
+// public URLs they were created with.
 export async function mediaUrlsForDispatch(
-  media: Pick<MediaAsset, "key" | "status">[],
+  media: Pick<MediaAsset, "id" | "key" | "status">[],
+  renditions: { mediaAssetId: string; rendition: Pick<MediaRendition, "key" | "status"> }[],
   legacyUrls: unknown,
 ): Promise<string[]> {
   if (media.length === 0) return legacyUrls as string[];
-  if (media.some((asset) => asset.status !== "READY")) {
-    throw new Error(
-      "This post's media was deleted (uploads are kept 15 days) — create the post again",
-    );
-  }
-  return Promise.all(media.map((asset) => presignDownload(asset.key, PUBLISH_URL_TTL_SECONDS)));
+  const deleted = () =>
+    new Error("This post's media was deleted (uploads are kept 15 days) — create the post again");
+  if (media.some((asset) => asset.status !== "READY")) throw deleted();
+  const renditionFor = new Map(renditions.map((link) => [link.mediaAssetId, link.rendition]));
+  return Promise.all(
+    media.map((asset) => {
+      const rendition = renditionFor.get(asset.id);
+      if (rendition && rendition.status !== "READY") throw deleted();
+      return presignDownload(rendition?.key ?? asset.key, PUBLISH_URL_TTL_SECONDS);
+    }),
+  );
 }
 
 // Removes the object (and any unfinished multipart upload) and marks the row
@@ -64,15 +73,44 @@ export async function deleteMediaAsset(
       });
     }
     await deleteObject(asset.key);
+    // Its per-platform versions go with it (websitePlan.md §12).
+    const renditions = await prisma.mediaRendition.findMany({
+      where: { mediaAssetId: asset.id, status: { not: "DELETED" } },
+      select: { key: true },
+    });
+    for (const rendition of renditions) await deleteObject(rendition.key);
   } catch (err) {
     console.error(`couldn't delete media ${asset.id} from S3:`, err);
     return false;
   }
-  await prisma.mediaAsset.update({
-    where: { id: asset.id },
-    data: { status: "DELETED", deletedAt: new Date(), multipartUploadId: null },
-  });
+  await prisma.$transaction([
+    prisma.mediaRendition.updateMany({
+      where: { mediaAssetId: asset.id },
+      data: { status: "DELETED" },
+    }),
+    prisma.mediaAsset.update({
+      where: { id: asset.id },
+      data: { status: "DELETED", deletedAt: new Date(), multipartUploadId: null },
+    }),
+  ]);
   return true;
+}
+
+// Back to PENDING for another render, when a target that uses them is
+// retried. Returns their ids for the render queue.
+export async function resetFailedRenditions(postId: string): Promise<string[]> {
+  const failed = await prisma.mediaRendition.findMany({
+    where: { status: "FAILED", posts: { some: { postId } } },
+    select: { id: true },
+  });
+  const ids = failed.map((rendition) => rendition.id);
+  if (ids.length > 0) {
+    await prisma.mediaRendition.updateMany({
+      where: { id: { in: ids }, status: "FAILED" },
+      data: { status: "PENDING", error: null },
+    });
+  }
+  return ids;
 }
 
 const CLEAN_INTERVAL_MS = 60 * 60_000;

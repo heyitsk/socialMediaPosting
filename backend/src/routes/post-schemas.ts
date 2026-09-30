@@ -6,6 +6,7 @@ import type {
   Platform,
   PostStatus,
   Prisma,
+  RenditionStatus,
 } from "@prisma/client";
 import { friendlyPlatformError } from "../lib/platform-error";
 import { canRetry } from "../service/post-groups";
@@ -111,6 +112,8 @@ const postTargetSchema = z
     attempt: z.number(),
     // FAILED and under the attempt limit.
     canRetry: z.boolean(),
+    // Its cropped/padded media is still rendering (websitePlan.md §12.5).
+    preparingMedia: z.boolean(),
     // YouTube targets only — the caption is the video's description, so the
     // title is what History leads with instead.
     youtubeTitle: z.string().nullable(),
@@ -163,6 +166,7 @@ export const postGroupInclude = {
     include: {
       connectedAccount: { select: { platform: true, accountName: true } },
       logs: { orderBy: { executedAt: "asc" } },
+      renditions: { select: { rendition: { select: { status: true } } } },
     },
   },
 } satisfies Prisma.PostGroupInclude;
@@ -193,6 +197,7 @@ interface PostGroupRow {
     attempt: number;
     platformOptions: unknown;
     connectedAccount: { platform: Platform; accountName: string };
+    renditions: { rendition: { status: RenditionStatus } }[];
     logs: {
       status: "SUCCESS" | "FAILED";
       platformPostId: string | null;
@@ -230,6 +235,9 @@ export function serializePostGroup(group: PostGroupRow): z.infer<typeof postGrou
       status: post.status,
       attempt: post.attempt,
       canRetry: canRetry(post),
+      preparingMedia:
+        (post.status === "PROCESSING" || post.status === "SCHEDULED") &&
+        post.renditions.some((link) => link.rendition.status === "PENDING"),
       youtubeTitle: (post.platformOptions as { title?: string } | null)?.title ?? null,
       logs: post.logs.map((log) => ({
         status: log.status,

@@ -88,6 +88,20 @@ enum PostLogStatus {
   FAILED
 }
 
+// How a rendition is made from its master. websitePlan.md §12.
+enum RenditionMode {
+  CROP // Keep a region of the master, scaled to the output size
+  PAD // Whole master centred on a blurred, zoomed copy of itself
+  CONVERT // Same picture re-encoded as JPEG (Instagram takes JPEG only)
+}
+
+enum RenditionStatus {
+  PENDING // Queued for the render worker
+  READY
+  FAILED
+  DELETED // Object removed from S3 along with its master
+}
+
 model User {
   id          String    @id @default(uuid())
   email       String    @unique
@@ -270,7 +284,9 @@ model Post {
   attempt            Int              @default(1)
   createdAt          DateTime         @default(now()) @map("created_at")
 
-  logs PostLog[]
+  logs       PostLog[]
+  // Files this target sends as a rendition instead of the master.
+  renditions PostMediaRendition[]
 
   @@index([groupId])
   @@map("posts")
@@ -325,7 +341,60 @@ model MediaAsset {
   completedAt       DateTime?        @map("completed_at")
   deletedAt         DateTime?        @map("deleted_at")
 
+  renditions     MediaRendition[]
+  postRenditions PostMediaRendition[]
+
   @@index([groupId])
   @@index([status, createdAt])
   @@map("media_assets")
+}
+
+// A version of a master upload fitted to one platform shape — cropped,
+// padded or converted to JPEG (websitePlan.md §12). Rendered by
+// queue/render-worker.ts right after the post is created. Targets asking for
+// the same thing share one rendition (unique specHash per master).
+model MediaRendition {
+  id           String          @id @default(uuid())
+  mediaAssetId String          @map("media_asset_id")
+  mediaAsset   MediaAsset      @relation(fields: [mediaAssetId], references: [id])
+  // Hash of everything below that shapes the output.
+  specHash     String          @map("spec_hash")
+  mode         RenditionMode
+  // CROP only: the region kept, as fractions (0-1) of the master as displayed.
+  cropX        Float?          @map("crop_x")
+  cropY        Float?          @map("crop_y")
+  cropW        Float?          @map("crop_w")
+  cropH        Float?          @map("crop_h")
+  // Output pixels (even, never upscaled). CONVERT keeps the master's size.
+  width        Int
+  height       Int
+  contentType  String          @map("content_type")
+  // `<workspaceId>/<mediaAssetId>/r/<specHash>.<jpg|mp4>`
+  key          String          @unique
+  status       RenditionStatus @default(PENDING)
+  sizeBytes    Int?            @map("size_bytes")
+  error        String?
+  createdAt    DateTime        @default(now()) @map("created_at")
+  completedAt  DateTime?       @map("completed_at")
+
+  posts PostMediaRendition[]
+
+  @@unique([mediaAssetId, specHash])
+  @@index([status])
+  @@map("media_renditions")
+}
+
+// Which rendition a target sends for one of the group's files. No row means
+// the master goes out as uploaded.
+model PostMediaRendition {
+  postId       String         @map("post_id")
+  post         Post           @relation(fields: [postId], references: [id])
+  mediaAssetId String         @map("media_asset_id")
+  mediaAsset   MediaAsset     @relation(fields: [mediaAssetId], references: [id])
+  renditionId  String         @map("rendition_id")
+  rendition    MediaRendition @relation(fields: [renditionId], references: [id])
+
+  @@id([postId, mediaAssetId])
+  @@index([renditionId])
+  @@map("post_media_renditions")
 }
