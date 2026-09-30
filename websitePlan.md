@@ -1096,7 +1096,7 @@ MediaRendition
 
 ## 13. Per-Platform Posting Limits — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status:** planned, not built. Makes the §5 "per-`(user, platform)` rate limiter" and "circuit breaker" concrete. Kushagra's decisions are in §13.9. Scope: Facebook, Instagram, Threads, LinkedIn and YouTube. Pinterest gets a policy row when it's wired.
+> **Status (Sep 30, 2026):** steps 1-5 built on branch `worktree-rate-limit-plan` (§13.10.1-13.10.5). Step 6 is deferred to V2 (§13.12). Makes the §5 "per-`(user, platform)` rate limiter" and "circuit breaker" concrete. Kushagra's decisions are in §13.9. Scope: Facebook, Instagram, Threads, LinkedIn and YouTube. Pinterest gets a policy row when it's wired.
 
 **Goal:** a user should never lose an account for hours because the app sent too much, too fast. The backend holds every post back until the platform will accept it. It never sends one that would go over a limit.
 
@@ -1224,7 +1224,7 @@ While an account is cooling down:
 3. Wire into create (duplicate guard, reservation, allowance errors), the publish worker (pace re-delay, cooldown fail), retry and cancel. Add the per-user create limit.
 4. Webhook/poller error classifier → cooldowns, plus the sweep that fails waiting targets. YouTube project-wide budget.
 5. `GET /posting-limits` + frontend (dashboard usage, composer disabled/next slot, results panel and History messages).
-6. **Later:** have n8n callbacks pass `X-Business-Use-Case-Usage` / `x-ratelimit-*` through (the §6 `usage` field) to pause proactively above 80 %. Before an Instagram/Threads publish when our own count is above 80 %, call `content_publishing_limit` / `threads_publishing_limit`. That catches posts made through other tools on the same account. Add Pinterest limits when it's wired.
+6. **Deferred to V2 (Kushagra, Sep 30) — see §13.12.** Have n8n callbacks pass `X-Business-Use-Case-Usage` / `x-ratelimit-*` through (the §6 `usage` field) to pause proactively above 80 %. Before an Instagram/Threads publish when our own count is above 80 %, call `content_publishing_limit` / `threads_publishing_limit`. That catches posts made through other tools on the same account. Add Pinterest limits when it's wired.
 
 ### 13.10.1 Step 1 as built (Sep 30, 2026)
 
@@ -1364,6 +1364,32 @@ Users can now see the limits.
 - Our count can't see posts sent through other tools (Buffer, Meta Business Suite) on the same account. The step 6 live checks and the circuit breaker cover that.
 - The YouTube project budget is shared by every user, so one heavy workspace could use it up for everyone. A per-workspace share of it may be needed once there are real users.
 
+### 13.12 V2: pausing before a limit is hit (step 6, deferred Sep 30, 2026)
+
+**Decision (Kushagra, Sep 30):** not in V1. Test the step 1-5 limiter with real posts first. Build this if History starts showing Meta throttling errors (codes 4 / 17 / 32 / 613 / 80001) once there are real users.
+
+**What it adds.** Today the app only learns about an API limit when a post fails with it. Step 4 then pauses the account for a fixed time. Two sources would let it act earlier:
+
+1. **Meta's usage headers.** Every Graph API response carries a usage meter in its headers: `X-App-Usage`, `X-Page-Usage` and `X-Business-Use-Case-Usage`. They give `call_count`, `total_time` and `total_cputime` as a percentage of the allowance, and `estimated_time_to_regain_access` in minutes once blocked. Example:
+   ```
+   X-Business-Use-Case-Usage: {"<page id>":[{"type":"pages","call_count":85,
+     "total_time":30,"total_cputime":20,"estimated_time_to_regain_access":0}]}
+   ```
+   n8n reads only the response body today, so these are discarded.
+2. **Live post-count endpoints.** `GET /<IG_ID>/content_publishing_limit` (Instagram) and `GET /{threads-user-id}/threads_publishing_limit` (Threads) return how much of the account's rolling 24 h post limit is used. That count includes posts made with other tools (Meta Business Suite, Buffer), which `dispatch_slots` can't see (§13.11).
+
+**Plan.**
+- **n8n:** in `facebook-poster`, `instagram-poster` and `threads-poster`, turn on the HTTP Request nodes' "Include Response Headers and Status" option, then add the highest usage figures to the callback. This is the §6 `usage` field, which was designed but never sent.
+  - **This is the bulk of the work.** With headers included, a node's output changes from `$json` to `$json.body` (e.g. `$json.id` → `$json.body.id`). Every downstream expression in those three workflows must be updated and retested.
+- **Backend:**
+  - `n8nCallbackSchema` accepts an optional `usage`.
+  - Any figure at or above ~80 % sets a short `RATE_LIMIT` cooldown (e.g. 30-60 min) through `setCooldown`. It does **not** fail waiting posts the way a hard error does; they just wait. That may need a softer cooldown kind than §13.9 decision 4's "fail".
+  - A throttling error that arrives with `estimated_time_to_regain_access` pauses for exactly that long instead of step 4's 1 h guess (`lib/limit-errors.ts`).
+- **Before publishing** to Instagram or Threads, when our own count for the account is above ~80 % of its cap, call the live endpoint from the publish worker. If the account is full, re-delay or fail the target the same way a pause does.
+- **Pinterest:** use `x-ratelimit-remaining` / `x-ratelimit-reset` the same way once `pinterest-poster` is wired.
+
+**What it doesn't do.** It would **not** have prevented the Sep 2026 block. That was Meta's code 368 spam check, which has no counter and no warning header. What guards against 368 is the pacing, caps, duplicate guard and cooldown from steps 1-4. This work only helps with API throttling, which grows with user count and posting volume.
+
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
@@ -1395,3 +1421,4 @@ Users can now see the limits.
 *Updated: 2026-09-30 | §13 step 3 built (§13.10.3): the posting limiter now drives real posting. Create books every target inside its transaction (1 h auto-delay, duplicates refused, all-or-nothing 400 with `nextFreeAt`), pushed-back "post now" targets become `SCHEDULED` and are queued at their slot, the publish worker fails paused accounts and releases slots on every failure before hand-off, retry books first (409 when paused or full), cancel releases slots, the reconciler covers pushed-back targets, targets expose `sendAt`, and create is limited to 30 per user per hour. Composer results panel keeps polling mixed groups. 7 route/worker tests (queues and n8n stubbed); 40/40 pass.*
 *Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*
 *Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
+*Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*
