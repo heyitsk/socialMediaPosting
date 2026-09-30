@@ -1,6 +1,8 @@
 import type { MediaAsset } from "@prisma/client";
 import { prisma } from "../db/client";
-import { abortMultipartUpload, deleteObject, presignDownload } from "../lib/s3";
+import { isVideoType } from "../lib/media-files";
+import { type ImageShape, probeImage, probeVideo, type VideoShape } from "../lib/media-probe";
+import { abortMultipartUpload, deleteObject, presignDownload, readObject } from "../lib/s3";
 
 // websitePlan.md §11. Uploaded media is kept this long after the post's send
 // time (not after upload — posts can be scheduled up to 90 days ahead), long
@@ -15,6 +17,19 @@ const ABANDONED_AFTER_MS = 24 * 60 * 60_000;
 // n8n gets outlives the whole publish. Signed at send time, so scheduled
 // posts and retries always get a fresh one.
 const PUBLISH_URL_TTL_SECONDS = 6 * 60 * 60;
+
+// ffprobe reads the video right away.
+const PROBE_URL_TTL_SECONDS = 15 * 60;
+
+// The uploaded file's display dimensions (and a video's duration).
+export async function probeMediaAsset(
+  asset: Pick<MediaAsset, "key" | "contentType">,
+): Promise<ImageShape & { durationSeconds: VideoShape["durationSeconds"] | null }> {
+  if (isVideoType(asset.contentType)) {
+    return probeVideo(await presignDownload(asset.key, PROBE_URL_TTL_SECONDS));
+  }
+  return { ...(await probeImage(await readObject(asset.key))), durationSeconds: null };
+}
 
 export function mediaExpiry(scheduledFor: Date | null): Date {
   return new Date((scheduledFor ?? new Date()).getTime() + MEDIA_RETENTION_MS);

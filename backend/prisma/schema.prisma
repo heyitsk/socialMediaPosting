@@ -312,6 +312,12 @@ model MediaAsset {
   status            MediaAssetStatus @default(PENDING)
   // Videos upload in parts; null for images (single presigned POST).
   multipartUploadId String?          @map("multipart_upload_id")
+  // As displayed (EXIF orientation / rotation flag applied), read when the
+  // upload completes. Null for uploads from before the probe existed.
+  width             Int?
+  height            Int?
+  // Videos only.
+  durationSeconds   Float?           @map("duration_seconds")
   // Set when attached to a post: 15 days after it's sent. The media cleaner
   // deletes the object after this.
   expiresAt         DateTime?        @map("expires_at")

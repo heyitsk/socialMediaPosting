@@ -7,19 +7,21 @@ import {
   CAROUSEL_LIMITS,
   captionLength,
   countHashtags,
+  formatRatio,
   INSTAGRAM_MAX_HASHTAGS,
   isPostablePlatform,
   mediaTypesFor,
+  PLATFORM_NAMES,
   type PostablePlatform,
+  ratioWithin,
   reconnectReason,
   SHORTS_MAX_DURATION_SECONDS,
+  surfaceFit,
 } from "../lib/capabilities";
 import { isVideoType } from "../lib/media-files";
-import { probeVideo } from "../lib/media-probe";
-import { presignDownload } from "../lib/s3";
 import type { WorkspaceEnv } from "../middleware/auth";
 import { enqueuePublish, removePublishJob } from "../queue/publish-queue";
-import { mediaExpiry } from "../service/media";
+import { mediaExpiry, probeMediaAsset } from "../service/media";
 import {
   MAX_ATTEMPTS,
   markTargetCancelled,
@@ -42,8 +44,6 @@ const MIN_SCHEDULE_LEAD_MS = 60_000;
 const MAX_SCHEDULE_AHEAD_MS = 90 * 24 * 60 * 60_000;
 const MAX_TARGETS = 25;
 const MAX_MEDIA = 20;
-// Only for ffprobe's Shorts check, which reads the file right away.
-const PROBE_URL_TTL_SECONDS = 15 * 60;
 
 const targetInputSchema = z.object({
   connectedAccountId: z.string(),
@@ -324,18 +324,43 @@ async function validate(workspaceId: string, body: CreateBody) {
         `Instagram only accepts JPEG images — ${nonJpeg.map((asset) => asset.originalFilename).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
       );
     }
+    // Shapes the publishing API refuses outright (websitePlan.md §12.2). Files
+    // uploaded before dimensions were stored have none and aren't checked.
+    const accepted = surfaceFit(platform, mediaType)?.accepted;
+    if (accepted) {
+      const outside = media.filter(
+        (asset) =>
+          asset.width && asset.height && !ratioWithin(asset.width / asset.height, accepted),
+      );
+      if (outside.length > 0) {
+        addTargetError(
+          id,
+          `${PLATFORM_NAMES[platform]} only takes ${formatRatio(accepted.min)} to ${formatRatio(accepted.max)} ${wantVideo ? "videos" : "images"} — ${outside
+            .map(
+              (asset) =>
+                `${asset.originalFilename} is ${formatRatio((asset.width ?? 1) / (asset.height ?? 1))}`,
+            )
+            .join(", ")}`,
+        );
+      }
+    }
     if (platform === "YOUTUBE" && !input.youtubeOptions)
       addTargetError(id, "YouTube needs a video title");
 
     resolved.push({ input, account: account as ResolvedTarget["account"], mediaType, caption });
   }
 
-  // Network check last, and only on otherwise-valid input.
+  // Uses the dimensions stored at upload. Only videos uploaded before those
+  // were stored need a network probe — last, and only on otherwise-valid input.
   const shorts = resolved.filter((target) => target.mediaType === "SHORTS");
   const [video] = media;
   if (errors.length === 0 && shorts.length > 0 && video) {
     try {
-      const shape = await probeVideo(await presignDownload(video.key, PROBE_URL_TTL_SECONDS));
+      const shape =
+        video.width && video.height && video.durationSeconds != null
+          ? { width: video.width, height: video.height, durationSeconds: video.durationSeconds }
+          : await probeMediaAsset(video);
+      if (shape.durationSeconds == null) throw new Error("Couldn't read the video's duration");
       const problems: string[] = [];
       if (shape.height < shape.width)
         problems.push(

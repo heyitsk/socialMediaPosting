@@ -125,6 +125,13 @@ export async function readObjectHead(key: string): Promise<Uint8Array> {
   return Body.transformToByteArray();
 }
 
+// The whole object — only for images, which are capped at 8 MB.
+export async function readObject(key: string): Promise<Uint8Array> {
+  const { Body } = await s3.send(new GetObjectCommand({ Bucket, Key: key }));
+  if (!Body) return new Uint8Array();
+  return Body.transformToByteArray();
+}
+
 export async function deleteObject(key: string) {
   await s3.send(new DeleteObjectCommand({ Bucket, Key: key }));
 }

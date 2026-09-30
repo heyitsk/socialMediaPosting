@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
+import { MediaFitPreview, type PreviewSurface } from "@/components/media-fit-preview";
 import { MediaPicker, useMediaUploads } from "@/components/media-picker";
 import { PlatformMark } from "@/components/platform-mark";
 import { PostGroupCard } from "@/components/post-group-card";
@@ -25,10 +26,14 @@ import {
   type ContentKind,
   captionLength,
   countHashtags,
+  formatRatio,
   MEDIA_TYPE_LABELS,
+  type MediaType,
   PLATFORM_LABELS,
   type PlatformCapabilities,
   type PostGroupValidationError,
+  ratioWithin,
+  type SurfaceFit,
   YOUTUBE_CATEGORIES,
   YOUTUBE_PRIVACY_OPTIONS,
   YOUTUBE_TITLE_MAX,
@@ -72,40 +77,6 @@ interface Problem {
   message: string;
   // Not filled in yet, as opposed to filled in wrong.
   missing?: boolean;
-}
-
-interface VideoShape {
-  width: number;
-  height: number;
-  durationSeconds: number;
-}
-
-// Reads a video's dimensions in the browser (metadata only — no download of
-// the whole file) for the Shorts check. The backend re-checks with ffprobe;
-// this just surfaces the problem before submit. null while unknown.
-function useVideoShape(url: string | null): VideoShape | null {
-  const [shape, setShape] = useState<{ url: string; shape: VideoShape } | null>(null);
-  useEffect(() => {
-    if (!url) return;
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.onloadedmetadata = () =>
-      setShape({
-        url,
-        shape: {
-          width: video.videoWidth,
-          height: video.videoHeight,
-          durationSeconds: video.duration,
-        },
-      });
-    video.src = url;
-    return () => {
-      video.onloadedmetadata = null;
-      video.removeAttribute("src");
-      video.load();
-    };
-  }, [url]);
-  return shape && shape.url === url ? shape.shape : null;
 }
 
 // datetime-local wants local time without a zone.
@@ -216,14 +187,40 @@ export function ComposerPage() {
     (item) => kind !== "VIDEO" && item.contentType !== "image/jpeg",
   );
 
-  const wantsShort = selectedAccounts.some(
-    (account) =>
-      account.platform === "YOUTUBE" && settingsFor(account.id).youtubeMediaType === "SHORTS",
-  );
-  // The local file, so the check doesn't wait for the upload.
-  const videoShape = useVideoShape(
-    kind === "VIDEO" && wantsShort ? (mediaItems[0]?.previewUrl ?? null) : null,
-  );
+  // Read from the local file first, so the Shorts and aspect-ratio checks
+  // don't wait for the upload.
+  const videoShape = kind === "VIDEO" ? (mediaItems[0]?.shape ?? null) : null;
+
+  // What the account's workflow is sent for this kind (YouTube: the user's
+  // Video/Short pick), and how that surface shows media.
+  function mediaTypeFor(account: Account): MediaType | null {
+    if (account.platform === "YOUTUBE" && kind === "VIDEO")
+      return settingsFor(account.id).youtubeMediaType;
+    return (
+      capabilitiesByPlatform
+        .get(account.platform)
+        ?.mediaTypes.find((option) => option.kind === kind)?.mediaTypes[0] ?? null
+    );
+  }
+  function fitFor(account: Account): SurfaceFit | null {
+    const mediaType = mediaTypeFor(account);
+    return (
+      capabilities?.surfaces.find(
+        (surface) => surface.platform === account.platform && surface.mediaType === mediaType,
+      ) ?? null
+    );
+  }
+
+  // One preview per platform + media type; its accounts show the same thing.
+  const previewSurfaces = new Map<string, PreviewSurface>();
+  for (const account of selectedAccounts) {
+    const fit = fitFor(account);
+    if (!fit) continue;
+    const key = `${fit.platform}:${fit.mediaType}`;
+    const surface = previewSurfaces.get(key) ?? { fit, accountNames: [] };
+    surface.accountNames.push(account.accountName);
+    previewSurfaces.set(key, surface);
+  }
 
   // --- Validation (mirrors the backend's; the backend has the final say) ---
 
@@ -288,6 +285,20 @@ export function ComposerPage() {
         message: `Instagram only accepts JPEG images — ${nonJpeg.map((item) => item.file.name).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
       });
     }
+    // Shapes the platform's API refuses (websitePlan.md §12.2).
+    const accepted = fitFor(account)?.accepted;
+    if (accepted) {
+      const outside = mediaItems.flatMap((item) =>
+        item.shape && !ratioWithin(item.shape.width / item.shape.height, accepted)
+          ? [`${item.file.name} is ${formatRatio(item.shape.width / item.shape.height)}`]
+          : [],
+      );
+      if (outside.length > 0) {
+        errors.push({
+          message: `${label} only takes ${formatRatio(accepted.min)} to ${formatRatio(accepted.max)} ${kind === "VIDEO" ? "videos" : "images"} — ${outside.join(", ")}`,
+        });
+      }
+    }
     if (account.platform === "YOUTUBE") {
       if (own.youtubeTitle.trim() === "")
         errors.push({ message: "Add a video title", missing: true });
@@ -297,7 +308,10 @@ export function ComposerPage() {
           errors.push({
             message: `Can't post as a Short: it's landscape (${videoShape.width}x${videoShape.height}) — Shorts must be vertical or square`,
           });
-        if (videoShape.durationSeconds > capabilities.shortsMaxDurationSeconds)
+        if (
+          videoShape.durationSeconds != null &&
+          videoShape.durationSeconds > capabilities.shortsMaxDurationSeconds
+        )
           errors.push({
             message: `Can't post as a Short: it's ${Math.round(videoShape.durationSeconds)}s long — Shorts can be at most ${capabilities.shortsMaxDurationSeconds}s`,
           });
@@ -622,6 +636,16 @@ export function ComposerPage() {
                           Instagram posts videos as Reels.
                         </p>
                       )}
+                  </div>
+                )}
+
+                {kind !== "TEXT" && mediaItems.length > 0 && previewSurfaces.size > 0 && (
+                  <div className="space-y-2">
+                    <Label>How it will look</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Each platform shows your media at its own shape.
+                    </p>
+                    <MediaFitPreview surfaces={[...previewSurfaces.values()]} items={mediaItems} />
                   </div>
                 )}
               </section>

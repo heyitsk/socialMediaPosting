@@ -505,7 +505,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 
 ### Phase 2 — Media Engine & Post Composer
 - [x] Set up AWS S3 bucket and presigned URL upload handler (§11, Sep 29 2026 — code done; bucket deploy + live test pending).
-- [ ] Pre-dispatch media dimension probe + per-platform aspect-ratio warnings and read-only preview grid in the composer (§3 "Per-Platform Media Fitting", step 1; implementation plan §12.7 step 1).
+- [x] Pre-dispatch media dimension probe + per-platform aspect-ratio warnings and read-only preview grid in the composer (§3 "Per-Platform Media Fitting", step 1; implementation plan §12.7 step 1 — code done Sep 30 2026, see §12.10; live upload test pending).
 - [ ] Ratio-locked cropper with safe-zone overlays; store per-target crop settings against a single master upload (§3, step 2; §12.7 step 2, ships with rendering).
 - [ ] `sharp`/`ffmpeg` render worker on its own BullMQ queue (crop or blurred-background pad, images and video in one release), dispatching rendered-version S3 URLs to n8n (§3, step 3; §12.7 step 2).
 - [ ] Smart-crop defaults, video auto-reframing, optional generative outpainting (§3, step 4 — later; §12.7 step 3).
@@ -1031,6 +1031,28 @@ MediaRendition
 | Instagram images | **Always converted to JPEG** by the render worker, even uncropped. This replaces the §11.5 "JPEG only" validation error. |
 | Per-target presigned URLs | Not a cost concern. Signing is local, and uncropped targets point at the same S3 object. |
 
+### 12.10 Step 1 as built (Sep 30, 2026)
+
+- **Dimensions at upload.** Migration `20260930090000_add_media_dimensions` adds `media_assets.width`, `height` and `duration_seconds`. `POST /media/:id/complete` fills them through `service/media.ts` `probeMediaAsset`:
+  - Images: `sharp` metadata on the downloaded object, EXIF-oriented (`autoOrient`). `sharp` is a new backend dependency, confirmed working under Bun.
+  - Videos: the existing rotation-aware `probeVideo` (ffprobe) on a 15-minute presigned URL.
+  - A file that can't be measured is rejected and deleted, like a failed magic-byte check.
+  - The `MediaAsset` API response now includes the three fields.
+- **Fit rules.** `lib/capabilities.ts` `SURFACE_FITS` defines, per platform and media type:
+  - `display`: the ratio range shown whole.
+  - `beyond`: what happens outside it, `CROP` or `LETTERBOX`.
+  - `accepted`: the range the API refuses to go beyond. Set for Instagram feed/carousel (4:5-1.91:1) and LinkedIn video (1:2.4-2.4:1).
+  - `safeZone`: set for Reels, Stories and Shorts.
+  - `carouselUsesFirstRatio`: set for Instagram carousels.
+  - These rules are served as `surfaces` in `GET /api/capabilities`. The ratio tolerance is 1%, so a 1080x1349 export still counts as 4:5.
+- **Validation.** `POST /post-groups` adds a per-target error when a file is outside a surface's `accepted` range. Files uploaded before the migration have no dimensions and skip this check. The Shorts check reads the stored dimensions and only probes older uploads.
+- **Composer.**
+  - `media-picker.tsx` reads each file's dimensions in the browser as soon as it's picked, then replaces them with the backend's once the upload completes. This replaces the old Shorts-only `useVideoShape`.
+  - The new `components/media-fit-preview.tsx` shows one tile per platform + media type under the media picker, covering the tile's accounts. Each tile has a frame per file at the shape the platform will show, drawn with CSS only.
+  - Each tile gets a verdict: fits, cropped, letterboxed, or rejected. Shaded safe-zone bands appear on full-screen vertical surfaces.
+  - Rejected shapes block submit with the same message the backend gives.
+- **Not built yet:** cropping, padding and JPEG conversion (step 2). The "Instagram only accepts JPEG" error stays until then.
+
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
@@ -1053,3 +1075,4 @@ MediaRendition
 *Updated: 2026-09-29 | New §11 "Media Uploads to S3": composer URL fields replaced by direct browser-to-S3 uploads (presigned POST for images, presigned multipart for videos), `media_assets` table, magic-byte verification, presigned GETs signed at dispatch time, 15-day retention counted from send time with an hourly cleaner, CloudFormation template for the bucket. Storage client switched from Bun's native S3 client to AWS SDK v3 (§11.2). Phase 2 S3 item ticked.*  
 *Updated: 2026-09-30 | New §10.9: n8n failure text is mapped to short user-facing messages by a rules table (`lib/platform-error.ts`), raw text kept in `PostLog`; manual retry capped at 5 sends per target (`canRetry` in the API). LinkedIn video size probe switched from HEAD to a ranged GET (HEAD is refused on GET-presigned S3 URLs).*
 *Updated: 2026-09-30 | Planning only: new §12 "Per-Platform Media Fitting — Implementation Plan" turning §3 into three build steps: dimensions probed at upload complete, `surfaces` fit rules in `/api/capabilities`, CSS-only preview grid (plain ratio frames) with safe zones, `react-easy-crop` cropper, `media_fits` (per target × asset, relative rect, CROP/PAD) and shared `media_renditions`, eager `render` BullMQ queue (`sharp` images, `ffmpeg` video), per-target dispatch URLs, Instagram images always rendered to JPEG. §12.9 records Kushagra's decisions: server-side rendering for images and video, fits editable per account (shared per surface by default), user must choose crop or pad on strict surfaces, video ships with images, blur-pad default for Story/Reels images. Phase 2 roadmap items point at §12.*
+*Updated: 2026-09-30 | §12 step 1 built (§12.10): media dimensions stored at upload (`sharp` for images, ffprobe for video; migration `20260930090000_add_media_dimensions`), per-platform `surfaces` fit rules in `/api/capabilities`, API-rejected shapes validated per target, Shorts check on stored dimensions, and a read-only per-platform preview grid with safe zones in the composer. Phase 2 roadmap item ticked; live upload test pending.*

@@ -1254,8 +1254,30 @@ export interface components {
                     mediaTypes: ("TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS")[];
                 }[];
             }[];
+            surfaces: components["schemas"]["SurfaceFit"][];
             instagramMaxHashtags: number;
             shortsMaxDurationSeconds: number;
+        };
+        SurfaceFit: {
+            /** @enum {string} */
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+            /** @enum {string} */
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
+            display: {
+                min: number;
+                max: number;
+            };
+            /** @enum {string} */
+            beyond: "CROP" | "LETTERBOX";
+            accepted?: {
+                min: number;
+                max: number;
+            };
+            safeZone?: {
+                top: number;
+                bottom: number;
+            };
+            carouselUsesFirstRatio?: boolean;
         };
         WorkspaceBody: {
             name: string;
@@ -1400,6 +1422,9 @@ export interface components {
             sizeBytes: number;
             /** @enum {string} */
             status: "PENDING" | "READY" | "DELETED";
+            width: number | null;
+            height: number | null;
+            durationSeconds: number | null;
         };
         MediaUploadInstructions: {
             /** @enum {string} */
