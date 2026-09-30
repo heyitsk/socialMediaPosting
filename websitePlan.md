@@ -1390,6 +1390,134 @@ Users can now see the limits.
 
 **What it doesn't do.** It would **not** have prevented the Sep 2026 block. That was Meta's code 368 spam check, which has no counter and no warning header. What guards against 368 is the pacing, caps, duplicate guard and cooldown from steps 1-4. This work only helps with API throttling, which grows with user count and posting volume.
 
+## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
+
+> **Status (Sep 30, 2026):** planning only. Nothing built. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. Open questions are in §14.10.
+
+**Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
+
+### 14.1 Why Grafana Cloud + OpenTelemetry
+
+- **The backend runs on Bun.** Vendor APM agents (New Relic, Datadog) and OTel's `auto-instrumentations-node` rely on patching `require`/`node:http`. `Bun.serve` doesn't go through `node:http`, so auto HTTP spans never appear. What does work under Bun: the OTel `NodeSDK`, OTLP exporters, and instrumentations the library itself calls (Prisma, BullMQ, `@hono/otel`). Grafana speaks plain OTLP end to end, so it needs no agent.
+- **Correlation comes built in.** Loki log → Tempo trace (derived field on `trace_id`), Tempo span → Loki logs, and RED metrics (rate, errors, duration) computed from spans.
+- **The same setup works from laptop to production.** Local dev uses the `grafana/otel-lgtm` Docker image (Grafana :3000, OTLP gRPC :4317, OTLP HTTP :4318; dev-only, not for production). Production points the same OTLP env vars at Grafana Cloud. When the V2 K8s move happens, Grafana Alloy / k8s-monitoring Helm drops in with no app change.
+- **No lock-in.** The app only emits OTLP. Switching vendor means changing an endpoint and a header.
+- **Free tier (third-party figures, check grafana.com/pricing):** 10k active metric series, 50 GB logs, 50 GB traces per month, 14-day retention, 3 users. Enough for V1. The 10k series cap is why §14.6 bans high-cardinality labels.
+
+### 14.2 What already exists
+
+- Logs: 28 `console.log/warn/error` calls across routes, workers and services, plus `hono/logger` text lines (`app.ts`). None carry a request, post or job id in a structured way.
+- `middleware/error-handler.ts` prints unhandled errors with `console.error`.
+- One process runs the API and all workers (`index.ts`): `post-publish`, `media-render` and `video-status` queues and workers, plus three `setInterval` loops (schedule reconciler, render reconciler, media cleaner).
+- n8n dispatch is one `fetch` in `service/n8n.ts`, and the result comes back later on `POST /api/webhooks/n8n-callback`. Nothing ties the two together except `post_id`.
+- The frontend calls the API from the same origin (`lib/api.ts`, Vite proxy in dev, reverse proxy in prod).
+
+### 14.3 Backend tracing (`backend/src/otel.ts`)
+
+- **Bootstrap:** `otel.ts` starts `NodeSDK` with OTLP HTTP exporters for traces, metrics and logs, and a resource of `service.name=smposting-backend`, `service.version` (git sha), `deployment.environment`, `telemetry.sdk.runtime=bun`. It's the **first import in `index.ts`**, so it's loaded before `@prisma/client`. `app.ts` doesn't import it, so `bun run openapi` and `bun test` stay silent. Configuration uses only the standard `OTEL_*` env vars (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SDK_DISABLED`, `OTEL_TRACES_SAMPLER`), so there's no new `env.ts` schema beyond an optional `OTEL_SERVICE_VERSION`.
+- **HTTP:** `httpInstrumentationMiddleware` from `@hono/otel` is registered as the **first** `app.use` in `app.ts`, before CORS, CSRF and the logger, so every later middleware and log line runs inside the request span. Spans are renamed to the route template (`POST /api/workspaces/:workspaceId/post-groups`), never the raw path.
+- **Redaction (must have):** `@hono/otel` records `url.full` including the query string. OAuth callbacks (`/api/auth/*/callback`, `/api/login/*`) carry `code` and `state` there, so a span processor strips query strings from `url.full` before export. Request/response headers are **not** captured (`cookie`, `x-callback-secret`). No request or response bodies ever go into spans or logs, because dispatch payloads contain decrypted platform tokens.
+- **Prisma:** `PrismaInstrumentation` from `@prisma/instrumentation` (pin to 6.19.3, same as `@prisma/client`). Tracing is GA since 6.1, so no preview flag is needed. There's a known issue where `prisma:engine:db_query` spans lose their SQL text on some 6.x versions (prisma#27666). Acceptable: the `prisma:client:operation` span still names the model and action.
+- **Outbound HTTP:** Bun's global `fetch` isn't auto-instrumented. A small `lib/traced-fetch.ts` wraps it in a CLIENT span and injects `traceparent` with `propagation.inject`. It's used by `service/n8n.ts` (dispatch) and the platform clients in `lib/*.ts` (OAuth token exchanges, video-status polls). S3 calls go through the AWS SDK and are left untraced in V1.
+- **User context:** `requireAuth`/`requireWorkspace` set `enduser.id` and `smposting.workspace_id` on the active span. They're span attributes only, never metric labels (§14.6).
+- **Errors:** `error-handler.ts` calls `span.recordException(err)` + `setStatus(ERROR)` and logs through the logger (§14.4).
+
+### 14.4 Logs (`backend/src/lib/logger.ts`)
+
+- **pino**, JSON. A `mixin` adds `trace_id`/`span_id` from `trace.getActiveSpan()` to every line.
+- **Shipping:** logs go out through the OTel Logs SDK (OTLP → Loki), so no file tailing or agent is needed locally. Transports that run in a worker thread (`pino-opentelemetry-transport`) are avoided because the log context must stay in-process under Bun. Instead, a small in-process pino destination emits each record to the SDK `LoggerProvider` with its severity and the active context. Logs also stay on stdout, which K8s/Alloy will scrape later.
+- **Replace all 28 `console.*` calls** with `logger.info/warn/error({ postId, jobId, platform, err }, "message")`. Fields become structured attributes, and messages stay short and fixed so they can be grouped.
+- `hono/logger` is replaced by one pino line per request (method, route, status, duration), written from inside the request span.
+- Loki is set up with a derived field on `trace_id` → Tempo, and Tempo's "logs for this span" → Loki `{service_name="smposting-backend"} | trace_id="…"`.
+
+### 14.5 Async boundaries (the traces that matter most)
+
+- **BullMQ:** one shared `BullMQOtel` from `bullmq-otel` (`{ tracerName: "smposting", enableMetrics: true }`) is passed as `telemetry` to all three `Queue`s and all three `Worker`s. The span that enqueues a job carries its context in the job, so the worker's `process` span is part of the same trace as the create request.
+  - A scheduled post's job may run hours after the request that queued it, so the trace can span hours. Tempo handles this, but the waterfall view is stretched. If it's annoying, the worker can start a new trace with a span **link** to the producer instead of a parent. Decide after seeing real traces.
+- **Reconcilers and cleaner:** each `setInterval` tick starts its own root span (`reconcile schedules`, `reconcile renders`, `clean media`) so their Prisma queries aren't orphans.
+- **n8n (native OTel, preview since n8n 2.19):**
+  - `traced-fetch` sends `traceparent` on the dispatch webhook. n8n makes its `workflow.execute` span a child of it, with a `node.execute` span per node.
+  - n8n injects `traceparent` into outbound HTTP Request node calls (`N8N_OTEL_TRACES_INJECT_OUTBOUND`, default on). So the callback node's `POST /api/webhooks/n8n-callback` joins the **same trace**, and `@hono/otel` picks up the incoming header.
+  - Compose env for the `n8n` service: `N8N_OTEL_ENABLED=true`, `N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4318`, `N8N_OTEL_EXPORTER_SERVICE_NAME=smposting-n8n`, `N8N_OTEL_TRACES_PRODUCTION_ONLY=true`. The `n8n` image is currently unpinned (`docker.n8n.io/n8nio/n8n`); step 3 pins a version of 2.19 or later.
+  - When n8n moves to queue mode (V2), workers need a build with the traceparent persistence fix (n8n PR #36757). Otherwise worker spans land on a separate trace.
+- **Video-status poller:** the poll job is enqueued from inside the callback span, so the poll attempts join the same trace too.
+
+The result is one trace per target that reads: `POST post-groups` → `publish` job → `POST n8n/webhook/facebook-poster` → `workflow.execute facebook-poster` → Graph API node → `POST n8n-callback` → `video-status` polls.
+
+### 14.6 Metrics
+
+**Label rule:** labels only from small fixed sets: `platform`, `media_type`, `outcome`, `reason`, `queue`, `route`, `status_class`. **Never** `workspace_id`, `user_id`, `post_id` or `account_id`. Those go in spans and logs. This keeps us well under 10k series.
+
+- **HTTP:** request count and duration per route come from `@hono/otel` metrics.
+- **BullMQ:** completed/failed/duration per queue come from `bullmq-otel` `enableMetrics`. Queue depth is an observable gauge that calls `getJobCounts()` on each queue every 30 s (waiting, delayed, active, failed).
+- **Business metrics** (`lib/metrics.ts`):
+  - `smposting.posts.dispatched` {platform, media_type}
+  - `smposting.posts.completed` {platform, media_type, outcome=published|failed|cancelled}
+  - `smposting.posts.publish_duration` histogram, from send to final status {platform, media_type}
+  - `smposting.n8n.dispatch.duration` {platform, status_class}
+  - `smposting.n8n.callback_deadline_hits` {platform}. A post where n8n never called back.
+  - `smposting.limits.pauses` {platform, reason} from `limit-pauses.ts`
+  - `smposting.limits.slot_refusals` {platform}. A target refused because no posting slot was free.
+  - `smposting.render.duration` {kind=image|video, outcome}
+  - `smposting.media.uploads` {kind, outcome}
+- **Runtime:** process memory and event-loop lag from `@opentelemetry/host-metrics` if it works under Bun; otherwise skip it.
+
+### 14.7 Frontend (Grafana Faro)
+
+- `@grafana/faro-web-sdk` + `@grafana/faro-web-tracing`, initialized in `main.tsx` **only when `VITE_FARO_URL` is set**. Captures errors, console errors, Web Vitals, sessions and fetch spans.
+- **Trace propagation:** the API is same-origin, so `traceparent` goes on `/api` calls by default and the backend `@hono/otel` span becomes a child of the browser's fetch span. If `VITE_API_URL` ever points at another origin, add it to `propagateTraceHeaderCorsUrls` **and** allow `traceparent`/`tracestate` in `middleware/cors.ts`.
+- **Routes:** Faro's React Router integration targets v6-style routers, and we're on `react-router` 8, so skip `@grafana/faro-react`'s router option. A small `useLocation` effect in `layout.tsx` calls `faro.api.setView({ name: <route pattern> })`.
+- **User:** after `/api/me` succeeds, `faro.api.setUser({ id })`. Id only; no email or name (PII).
+- **Business events:** `faro.api.pushEvent` for composer submit, upload failure and crop-dialog save. These show the path the user took before a failure.
+- **Local:** `otel-lgtm` has no Faro receiver. Frontend telemetry is off locally by default. To test it, run the optional `alloy` compose service with `faro.receiver` forwarding to `otel-lgtm` (§14.10 Q3).
+
+### 14.8 Dashboards and alerts
+
+- **Dashboards** live as JSON in `observability/dashboards/`, imported into Grafana Cloud (and into local Grafana by hand).
+  1. **Publishing health:** published/failed per platform, failure rate, p50/p95 send-to-published, callback-deadline hits, limit pauses by reason, slot refusals.
+  2. **API:** RED per route, 5xx list, slowest Prisma operations (from span metrics).
+  3. **Queues:** depth per queue and state, job duration, failed jobs, reconciler re-queues.
+  4. **Frontend:** Web Vitals, JS errors, sessions (Faro's built-in Frontend Observability app in Grafana Cloud covers most of this).
+- **Alerts** (Grafana Cloud alerting → email to start):
+  - failure rate for one platform > 20 % over 30 min (min 5 posts)
+  - any callback-deadline hit
+  - `post-publish` failed-job count rising
+  - API 5xx rate > 2 % over 10 min
+  - a limit pause with reason `SPAM` (Meta 368)
+
+### 14.9 Production wiring
+
+- Grafana Cloud stack → OTLP endpoint + instance id + API token (`MetricsPublisher`/`LogsPublisher`/`TracesPublisher` scopes). The backend and n8n get `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic …`.
+- The token is a secret. Store it in AWS Secrets Manager and resolve it at deploy time (see the `CLAUDE.md` secret rules). It never goes in `.env` in git or `docker-compose.yml`. For n8n use `N8N_OTEL_EXPORTER_OTLP_HEADERS_FILE`.
+- The Faro collector URL is public by design (it's shipped in the browser bundle), so it's a plain `VITE_FARO_URL` build var.
+- Sampling: `parentbased_always_on` (100 %) while volume is low. Revisit if traces near 50 GB/month, e.g. drop to 20 % and keep 100 % of errors with tail sampling in Alloy.
+
+### 14.10 Open questions (defaults marked, confirm or change)
+
+1. **Frontend Faro in the first build?** Default: yes, as step 5. It's cheap, and it's how we'd see composer errors users never report.
+2. **n8n node spans:** default on (`N8N_OTEL_TRACES_INCLUDE_NODE_SPANS=true`). It shows exactly which Graph API node failed. Turn it off if trace volume grows.
+3. **Local Faro testing:** default: Faro off locally, with an optional `alloy` compose profile (`docker compose --profile faro up`).
+4. **Scheduled-post traces:** parent (one long trace) vs. link (separate trace). Default: parent, then revisit after step 3 (§14.5).
+
+### 14.11 Build order
+
+1. **Spike + bootstrap.** Add `otel-lgtm` to `backend/docker-compose.yml`. Write `otel.ts` with the NodeSDK, `@hono/otel` and Prisma instrumentation, plus the query-string redaction. **Exit check:** in local Grafana, a `GET /api/workspaces/:workspaceId/post-groups` trace shows `prisma:client:operation` spans nested under the Hono span. If context propagation breaks under Bun (AsyncLocalStorage), stop and rethink before going further.
+2. **Logs.** `lib/logger.ts` (pino + trace mixin + OTLP bridge). Replace the 28 `console.*` calls, `hono/logger` and the error handler's `console.error`. Set up the Loki ↔ Tempo links. **Exit check:** clicking a log line's trace id opens its trace.
+3. **Async boundaries.** `bullmq-otel` on all queues and workers, root spans for the three interval loops, `lib/traced-fetch.ts` for the n8n dispatch and platform calls, n8n `N8N_OTEL_*` env + pinned image. **Exit check:** one real Facebook post shows create → job → n8n workflow → callback in one trace.
+4. **Metrics.** `lib/metrics.ts` business metrics, BullMQ metrics, queue-depth gauges, host metrics if they work.
+5. **Frontend.** Faro init, `setView` on route change, `setUser`, business events. **Exit check:** a composer submit's trace starts in the browser.
+6. **Dashboards, alerts and Grafana Cloud.** Commit the dashboard JSON, create the alerts, add the Secrets Manager wiring and production env.
+
+New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@opentelemetry/exporter-{trace,metrics,logs}-otlp-http`, `@opentelemetry/sdk-logs`, `@hono/otel`, `@prisma/instrumentation@6.19.3`, `bullmq-otel`, `pino`. Frontend `@grafana/faro-web-sdk`, `@grafana/faro-web-tracing`.
+
+### 14.12 Risks
+
+- **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
+- **n8n OTel is preview.** Env names or behaviour may change between n8n versions, so pin the image.
+- **Prisma SQL text** may be missing from engine spans on 6.19 (prisma#27666).
+- **Secrets in telemetry.** The biggest real risk is leaking an OAuth `code`, an access token or `x-callback-secret` into Grafana. The rules in §14.3 (no bodies, no headers, stripped query strings) and a review of the first exported spans in step 1 guard against it.
+- **Free-tier limits.** A wrong label (e.g. `post_id`) can blow the 10k series cap in a day. §14.6's label rule is enforced in review.
+
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
@@ -1422,3 +1550,4 @@ Users can now see the limits.
 *Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*
 *Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
 *Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*
+*Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11, open questions in §14.10.*
