@@ -1244,6 +1244,29 @@ While an account is cooling down:
 - **Tests:** `bun test` (new `test` script), 22 cases in `lib/posting-limits.test.ts`: gap on both sides, hourly and rolling-24 h windows including scheduled sends, calendar-day resets, both Pacific DST days, and a brute-force check that `nextFreeTime` returns the earliest time that fits.
 - **Not wired yet:** nothing reads or writes the new tables until steps 2-3.
 
+### 13.10.2 Step 2 as built (Sep 30, 2026)
+
+`backend/src/service/posting-limits.ts`:
+
+- **`reserveSlot(tx, request)`** must run inside a transaction: the post-creating one, or its own. It:
+  1. takes `pg_advisory_xact_lock(hashtext('<PLATFORM>:<accountId>'))` for each budget, in sorted order so the YouTube channel + `"*"` pair can't deadlock
+  2. returns the existing slot if this post and attempt is already booked
+  3. runs the duplicate check. Earlier attempts of the same post are ignored, so a retry isn't a duplicate of itself.
+  4. starts the search after any active pause
+  5. finds the earliest time every budget accepts (`nextFreeTimeForAll` in the lib)
+  6. inserts one row per budget, or books nothing and returns `NO_SLOT` with `nextFreeAt` when that time is after `latest`
+
+  Result: `{ ok: true, slotAt }` | `DUPLICATE { duplicateAt }` | `NO_SLOT { nextFreeAt, cooldown }`. Step 3 passes `latest = earliest + 1 h` (§13.9 decision 1).
+- **`bookedSlotAt`** and **`releaseSlot`** are for the publish worker, cancel and failures before hand-off.
+- **`setCooldown`** takes the same per-account lock and never shortens a pause that ends later. **`activeCooldown`** checks the account's own row and the app-wide `"*"` one.
+- **`accountUsage`** returns `{ used, upcoming, cap, window, resetsAt, nextFreeAt, cooldown }` for the step 5 endpoint.
+- `NODE_ENV` accepts `test` (set by `bun test`).
+- **Tests:** 11 in `service/posting-limits.test.ts`, run against the dev database. Each run makes its own user, workspace, account and posts and deletes them afterwards. They cover:
+  - the gap, idempotent re-booking, the duplicate rules and `latest`
+  - release, LinkedIn's call-based daily cap, and YouTube's two rows
+  - pauses (never shortened, the app-wide YouTube pause) and usage
+  - 8 posts booking one account at the same moment. With the lock switched off this test fails: all 8 got the same time.
+
 ### 13.11 Risks
 
 - Meta publishes no Facebook post limit or spam threshold, so the Facebook numbers are guesses. Start strict and loosen them based on what we see.
@@ -1277,3 +1300,4 @@ While an account is cooling down:
 *Updated: 2026-09-30 | Planning only: new §13 "Per-Platform Posting Limits". Official limits checked per platform (Instagram 50-100 and Threads 250 posts per rolling 24 h, LinkedIn 150 calls per member per UTC day, YouTube project-wide units, Facebook none published). The Sep 2026 block was Meta's code 368 spam check, not a quota, so the plan adds pacing (minimum gap, per-hour cap), daily caps at about half the published limits, a 24 h duplicate guard and a cooldown circuit breaker. Limits are keyed on the platform account, not the app user or `ConnectedAccount`. Reservations live in a Postgres `dispatch_slots` table behind an advisory lock. Open questions in §13.9.*
 *Updated: 2026-09-30 | §13.9 decisions recorded: 1 h auto-delay allowance, fixed caps (not adjustable per workspace), duplicates blocked outright, targets waiting on a cooled-down account fail (for every cooldown reason) instead of being held, and no early clearing. First build covers Facebook, Instagram, Threads, LinkedIn and YouTube.*
 *Updated: 2026-09-30 | §13 step 1 built (§13.10.1): migration `20260930170000_add_posting_limits` (`dispatch_slots`, `account_cooldowns`, `CooldownReason`), `lib/posting-limits.ts` with the fixed policy table, LinkedIn call costs, UTC/Pacific calendar days, the `fitsAt`/`nextFreeTime` slot search and the duplicate-guard hash, `POSTING_LIMITS_PROFILE` (`standard`|`dev`), and 22 `bun test` cases. Nothing wired into posting yet.*
+*Updated: 2026-09-30 | §13 step 2 built (§13.10.2): `service/posting-limits.ts` — `reserveSlot` under per-account Postgres advisory locks (duplicate check, pause-aware, multi-budget for YouTube, `NO_SLOT` with the next free time past `latest`), `releaseSlot`/`bookedSlotAt`, `setCooldown` (never shortens)/`activeCooldown`, and `accountUsage`. 11 database tests, including a concurrency test shown to fail without the lock. Still not wired into posting.*

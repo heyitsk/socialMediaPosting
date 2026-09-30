@@ -266,6 +266,32 @@ export function nextFreeTime(
   return ordered.find((at) => fitsAt(policy, slots, at, cost)) ?? null;
 }
 
+// The earliest time every budget has room, or null within the horizon — a
+// YouTube upload has to fit its channel's budget and the app-wide one at once.
+// Each round moves `at` to the first time one more budget accepts, and it
+// settles when none moves it. Bounded in case two budgets keep leapfrogging.
+export function nextFreeTimeForAll(
+  budgets: { policy: PostingPolicy; slots: Slot[]; cost: number }[],
+  earliest: number,
+  horizonMs = 7 * DAY_MS,
+): number | null {
+  const latest = earliest + horizonMs;
+  let at = earliest;
+  for (let round = 0; round < 100; round++) {
+    let moved = false;
+    for (const budget of budgets) {
+      const next = nextFreeTime(budget.policy, budget.slots, at, budget.cost, latest - at);
+      if (next === null) return null;
+      if (next > at) {
+        at = next;
+        moved = true;
+      }
+    }
+    if (!moved) return at;
+  }
+  return null;
+}
+
 // --- Duplicate guard ---
 
 // What identifies a media file across uploads: the same file uploaded twice
