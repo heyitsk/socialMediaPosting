@@ -13,7 +13,7 @@
       "parameters": {
         "width": 700,
         "height": 480,
-        "content": "## youtube-poster\nWebhook-triggered posting workflow for YouTube, dispatched by the backend (`service/n8n.ts` → `buildYouTubePayload`). Unlike Graph API/Threads, YouTube Data API v3 can't just be handed a URL — it needs the actual video bytes uploaded via a **resumable upload session** (init call → PUT the bytes to the returned Location URL).\n\n**OAuth is entirely the backend's job.** n8n only ever receives an already-fresh `access_token` (the backend swaps the stored refresh token for one right before dispatch — `RefreshStrategy.ON_DEMAND`). refresh_token/client_id/secret never touch n8n.\n\n**SUCCESS ≠ published.** The callback fires as soon as the PUT finishes, while YouTube is still processing (`uploadStatus: uploaded`). The backend's video-status poller (`queue/video-status-worker.ts`) polls `videos.list?part=status` and only then marks the post PUBLISHED or FAILED (rejected/duplicate/etc.).\n\nBecause the video bytes (Download Video) and the upload session URL (Initiate Resumable Upload) come from two independent HTTP calls, they run in parallel and a **Merge** node combines them before the final binary PUT.\n\n⚠️ Known gap (websitePlan.md §3): the whole video is downloaded into n8n before the upload starts — streaming-relay fix planned once S3 exists.\n\n**Callbacks** send `x-callback-secret: $env.CALLBACK_SECRET` — must match backend `N8N_CALLBACK_SECRET`.\n\nManual test payload:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/youtube-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test004\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"youtube\",\n    \"media_type\": \"VIDEO\",\n    \"media_urls\": [\"https://.../video.mp4\"],\n    \"youtube_metadata\": {\n      \"title\": \"Test upload\",\n      \"description\": \"Testing youtube-poster\",\n      \"privacy\": \"private\",\n      \"made_for_kids\": false,\n      \"tags\": [\"smposting\"],\n      \"category_id\": \"22\"\n    },\n    \"token\": { \"access_token\": \"YOUR_VALID_OAUTH_ACCESS_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`privacy` defaults to `private` if omitted. `media_type: SHORTS` is informational here — the backend already appended `#Shorts` to the description; YouTube itself decides Shorts from aspect ratio/duration (vertical or square, ≤3 min).\n\n**Verify after import:** 'Upload Video Binary' Body Content Type = 'n8n Binary File', field `data`."
+        "content": "## youtube-poster\nWebhook-triggered posting workflow for YouTube, dispatched by the backend (`service/n8n.ts` → `buildYouTubePayload`). Unlike Graph API/Threads, YouTube Data API v3 can't just be handed a URL — it needs the actual video bytes uploaded via a **resumable upload session** (init call → PUT the bytes to the returned Location URL).\n\n**OAuth is entirely the backend's job.** n8n only ever receives an already-fresh `access_token` (the backend swaps the stored refresh token for one right before dispatch — `RefreshStrategy.ON_DEMAND`). refresh_token/client_id/secret never touch n8n.\n\n**SUCCESS ≠ published.** The callback fires as soon as the PUT finishes, while YouTube is still processing (`uploadStatus: uploaded`). The backend's video-status poller (`queue/video-status-worker.ts`) polls `videos.list?part=status` and only then marks the post PUBLISHED or FAILED (rejected/duplicate/etc.).\n\nThe upload session is opened first (it needs the file size), then `YT Relay Video` streams the bytes into it — see **Video upload** below.\n\n**Callbacks** send `x-callback-secret: $env.CALLBACK_SECRET` — must match backend `N8N_CALLBACK_SECRET`.\n\nManual test payload:\n\n```bash\ncurl -X POST http://localhost:5678/webhook/youtube-poster \\\n  -H 'Content-Type: application/json' \\\n  -d '{\n    \"post_id\": \"pst_test004\",\n    \"user_id\": \"usr_test\",\n    \"platform\": \"youtube\",\n    \"media_type\": \"VIDEO\",\n    \"media_urls\": [\"https://.../video.mp4\"],\n    \"youtube_metadata\": {\n      \"title\": \"Test upload\",\n      \"description\": \"Testing youtube-poster\",\n      \"privacy\": \"private\",\n      \"made_for_kids\": false,\n      \"tags\": [\"smposting\"],\n      \"category_id\": \"22\"\n    },\n    \"token\": { \"access_token\": \"YOUR_VALID_OAUTH_ACCESS_TOKEN\" },\n    \"callback_url\": \"https://webhook.site/your-id\"\n  }'\n```\n\n`privacy` defaults to `private` if omitted. `media_type: SHORTS` is informational here — the backend already appended `#Shorts` to the description; YouTube itself decides Shorts from aspect ratio/duration (vertical or square, ≤3 min).\n\n**Video upload — chunked resumable (websitePlan.md §15):** `YT Relay Video` (Code node) reads the video from S3 in 16 MiB ranged GETs and PUTs each chunk to the resumable session with `Content-Range`, reading the next chunk while the current one uploads. If the connection drops or YouTube returns a 5xx, it asks the session how much it has and resumes from there instead of starting over. Nothing lands in n8n's binary storage. `YT Probe Video Size` uses the backend's `media_size_bytes`, or a `bytes=0-0` ranged GET for older posts. **Requires `NODE_FUNCTION_ALLOW_BUILTIN=https` on the n8n container.**"
       }
     },
     {
@@ -43,7 +43,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst meta = body.youtube_metadata || {};\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'youtube',\n    media_type: String(body.media_type || 'VIDEO').toUpperCase(),\n    media_urls: body.media_urls || [],\n    title: meta.title || '',\n    description: meta.description || '',\n    privacy: meta.privacy || 'private',\n    made_for_kids: meta.made_for_kids === true,\n    tags: Array.isArray(meta.tags) ? meta.tags : [],\n    category_id: String(meta.category_id || '22'),\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst meta = body.youtube_metadata || {};\nreturn [{\n  json: {\n    post_id: body.post_id,\n    user_id: body.user_id,\n    platform: body.platform || 'youtube',\n    media_type: String(body.media_type || 'VIDEO').toUpperCase(),\n    media_urls: body.media_urls || [],\n    media_size_bytes: body.media_size_bytes || null,\n    title: meta.title || '',\n    description: meta.description || '',\n    privacy: meta.privacy || 'private',\n    made_for_kids: meta.made_for_kids === true,\n    tags: Array.isArray(meta.tags) ? meta.tags : [],\n    category_id: String(meta.category_id || '22'),\n    access_token: body.token && body.token.access_token,\n    callback_url: body.callback_url\n  }\n}];"
       }
     },
     {
@@ -80,36 +80,13 @@
       }
     },
     {
-      "id": "download-video",
-      "name": "Download Video",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        420,
-        -160
-      ],
-      "parameters": {
-        "method": "GET",
-        "url": "={{ $json.media_urls[0] }}",
-        "authentication": "none",
-        "options": {
-          "response": {
-            "response": {
-              "responseFormat": "file"
-            }
-          }
-        }
-      },
-      "onError": "continueErrorOutput"
-    },
-    {
       "id": "initiate-upload",
       "name": "Initiate Resumable Upload",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        420,
-        160
+        660,
+        0
       ],
       "parameters": {
         "method": "POST",
@@ -138,6 +115,10 @@
             {
               "name": "X-Upload-Content-Type",
               "value": "video/*"
+            },
+            {
+              "name": "X-Upload-Content-Length",
+              "value": "={{ $json.size_bytes }}"
             }
           ]
         },
@@ -166,51 +147,6 @@
       "parameters": {
         "jsCode": "const req = $('Parse Request').first().json;\nreturn [{\n  json: {\n    post_id: req.post_id,\n    platform: 'youtube',\n    status: 'FAILED',\n    platform_post_id: null,\n    error: 'Invalid payload: media_urls, youtube_metadata.title and token.access_token are required',\n    callback_url: req.callback_url\n  }\n}];"
       }
-    },
-    {
-      "id": "merge-video-and-session",
-      "name": "Merge",
-      "type": "n8n-nodes-base.merge",
-      "typeVersion": 3,
-      "position": [
-        660,
-        0
-      ],
-      "parameters": {
-        "mode": "combine",
-        "combineBy": "combineByPosition",
-        "options": {}
-      }
-    },
-    {
-      "id": "upload-binary",
-      "name": "Upload Video Binary",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        900,
-        0
-      ],
-      "notes": "Verify Body Content Type = 'n8n Binary File', field name 'data' after import.",
-      "parameters": {
-        "method": "PUT",
-        "url": "={{ $json.headers.location || $json.headers.Location }}",
-        "authentication": "none",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "={{ $binary.data.mimeType || 'video/*' }}"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "binaryData",
-        "inputDataFieldName": "data",
-        "options": {}
-      },
-      "onError": "continueErrorOutput"
     },
     {
       "id": "build-success-result",
@@ -296,6 +232,34 @@
         -260,
         700
       ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- Relay helpers (same copy in every relay Code node) ----\n// Raw http(s), not this.helpers.httpRequest: the helper corrupts binary\n// bodies inside n8n 2.x's task runner, and there's no fetch there. Needs\n// NODE_FUNCTION_ALLOW_BUILTIN=https on the n8n container (websitePlan.md §15).\nconst REQUEST_TIMEOUT_MS = 120000;\nconst MAX_ATTEMPTS = 3;\n\nfunction send(method, url, headers, body, redirectsLeft = 5) {\n  return new Promise((resolve, reject) => {\n    const lib = url.startsWith('http:') ? require('http') : require('https');\n    const req = lib.request(url, { method, headers }, (res) => {\n      // 308 is YouTube's \"resume incomplete\", not a redirect.\n      if (res.statusCode >= 300 && res.statusCode < 400 && res.statusCode !== 308 && res.headers.location && redirectsLeft > 0) {\n        res.resume();\n        resolve(send(method, new URL(res.headers.location, url).toString(), headers, body, redirectsLeft - 1));\n        return;\n      }\n      const chunks = [];\n      res.on('data', (chunk) => chunks.push(chunk));\n      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));\n      res.on('error', reject);\n    });\n    req.setTimeout(REQUEST_TIMEOUT_MS, () => {\n      const err = new Error('Request timed out (ETIMEDOUT)');\n      err.code = 'ETIMEDOUT';\n      req.destroy(err);\n    });\n    req.on('error', reject);\n    req.end(body);\n  });\n}\n\n// \"<status> - <body>\", the shape lib/platform-error.ts parses.\nfunction httpError(res, prefix = '') {\n  const err = new Error(prefix + res.status + ' - ' + res.body.toString('utf8').slice(0, 1000));\n  err.status = res.status;\n  return err;\n}\n\nconst isRetryable = (err) => err.code !== undefined || err.status === 429 || err.status >= 500;\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n\nasync function withRetry(fn) {\n  for (let attempt = 1; ; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) throw err;\n      await sleep(1000 * 3 ** (attempt - 1));\n    }\n  }\n}\n\n// One byte range of the S3 object (inclusive).\nasync function readRange(url, first, last) {\n  const res = await send('GET', url, { Range: 'bytes=' + first + '-' + last });\n  const expected = last - first + 1;\n  if (res.status !== 206 || res.body.length !== expected) {\n    if (res.status === 206 || res.status === 200) {\n      throw new Error('Reading the media file failed: got ' + res.body.length + ' bytes for a ' + expected + '-byte range');\n    }\n    throw httpError(res, 'Reading the media file failed: ');\n  }\n  return { body: res.body, contentType: res.headers['content-type'] || 'video/mp4' };\n}\n\n// The object's total size, from a one-byte ranged GET (HEAD is refused on a\n// GET-presigned URL).\nasync function probeSize(url) {\n  const res = await send('GET', url, { Range: 'bytes=0-0' });\n  const total = Number(String(res.headers['content-range'] || '').split('/')[1]);\n  if (res.status !== 206 || !total) throw httpError(res, 'Reading the media file failed: ');\n  return total;\n}\n\n// ---- This node ----\n// The resumable session is opened with the total size (X-Upload-Content-Length)\n// and every chunk's Content-Range needs it. The backend sends it for uploaded\n// media; older posts with a plain URL are probed.\nconst req = $input.first().json;\nconst known = Number(req.media_size_bytes);\nconst size = known > 0 ? known : await withRetry(() => probeSize(req.media_urls[0]));\nreturn [{ json: { ...req, size_bytes: size } }];\n"
+      },
+      "id": "yt-probe-video-size",
+      "name": "YT Probe Video Size",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- Relay helpers (same copy in every relay Code node) ----\n// Raw http(s), not this.helpers.httpRequest: the helper corrupts binary\n// bodies inside n8n 2.x's task runner, and there's no fetch there. Needs\n// NODE_FUNCTION_ALLOW_BUILTIN=https on the n8n container (websitePlan.md §15).\nconst REQUEST_TIMEOUT_MS = 120000;\nconst MAX_ATTEMPTS = 3;\n\nfunction send(method, url, headers, body, redirectsLeft = 5) {\n  return new Promise((resolve, reject) => {\n    const lib = url.startsWith('http:') ? require('http') : require('https');\n    const req = lib.request(url, { method, headers }, (res) => {\n      // 308 is YouTube's \"resume incomplete\", not a redirect.\n      if (res.statusCode >= 300 && res.statusCode < 400 && res.statusCode !== 308 && res.headers.location && redirectsLeft > 0) {\n        res.resume();\n        resolve(send(method, new URL(res.headers.location, url).toString(), headers, body, redirectsLeft - 1));\n        return;\n      }\n      const chunks = [];\n      res.on('data', (chunk) => chunks.push(chunk));\n      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));\n      res.on('error', reject);\n    });\n    req.setTimeout(REQUEST_TIMEOUT_MS, () => {\n      const err = new Error('Request timed out (ETIMEDOUT)');\n      err.code = 'ETIMEDOUT';\n      req.destroy(err);\n    });\n    req.on('error', reject);\n    req.end(body);\n  });\n}\n\n// \"<status> - <body>\", the shape lib/platform-error.ts parses.\nfunction httpError(res, prefix = '') {\n  const err = new Error(prefix + res.status + ' - ' + res.body.toString('utf8').slice(0, 1000));\n  err.status = res.status;\n  return err;\n}\n\nconst isRetryable = (err) => err.code !== undefined || err.status === 429 || err.status >= 500;\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n\nasync function withRetry(fn) {\n  for (let attempt = 1; ; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) throw err;\n      await sleep(1000 * 3 ** (attempt - 1));\n    }\n  }\n}\n\n// One byte range of the S3 object (inclusive).\nasync function readRange(url, first, last) {\n  const res = await send('GET', url, { Range: 'bytes=' + first + '-' + last });\n  const expected = last - first + 1;\n  if (res.status !== 206 || res.body.length !== expected) {\n    if (res.status === 206 || res.status === 200) {\n      throw new Error('Reading the media file failed: got ' + res.body.length + ' bytes for a ' + expected + '-byte range');\n    }\n    throw httpError(res, 'Reading the media file failed: ');\n  }\n  return { body: res.body, contentType: res.headers['content-type'] || 'video/mp4' };\n}\n\n// The object's total size, from a one-byte ranged GET (HEAD is refused on a\n// GET-presigned URL).\nasync function probeSize(url) {\n  const res = await send('GET', url, { Range: 'bytes=0-0' });\n  const total = Number(String(res.headers['content-range'] || '').split('/')[1]);\n  if (res.status !== 206 || !total) throw httpError(res, 'Reading the media file failed: ');\n  return total;\n}\n\n// ---- This node ----\n// websitePlan.md §15.5. Chunked resumable upload: each chunk is a ranged GET\n// from S3 PUT to the session with Content-Range, the next chunk is read\n// while the current one uploads (at most 2 chunks in memory). YouTube answers\n// 308 with how much it has, and that offset (not ours) decides the next\n// chunk. After a dropped connection or a 5xx, ask the session how much it\n// committed and carry on from there instead of starting over.\nconst CHUNK_BYTES = 16 * 1024 * 1024; // must be a multiple of 256 KiB\nconst MAX_RESUMES = 5;\n\nconst req = $('Parse Request').first().json;\nconst total = $('YT Probe Video Size').first().json.size_bytes;\nconst session = $json.headers.location || $json.headers.Location;\nconst sourceUrl = req.media_urls[0];\n\n// \"bytes=0-1048575\" → 1048576; no Range header means nothing stored yet.\nconst committedFrom = (res) => {\n  const match = /bytes=\\d+-(\\d+)/.exec(String(res.headers.range || ''));\n  return match ? Number(match[1]) + 1 : 0;\n};\nconst finished = (res) => res.status === 200 || res.status === 201;\n\nasync function sessionStatus() {\n  const res = await send('PUT', session, { 'Content-Length': 0, 'Content-Range': 'bytes */' + total });\n  if (finished(res)) return { video: JSON.parse(res.body.toString('utf8')) };\n  if (res.status === 308) return { offset: committedFrom(res) };\n  throw httpError(res);\n}\n\nconst readChunk = (first) => {\n  const last = Math.min(first + CHUNK_BYTES, total) - 1;\n  const promise = withRetry(() => readRange(sourceUrl, first, last));\n  promise.catch(() => {}); // awaited later; don't count as unhandled meanwhile\n  return { first, promise };\n};\n\nlet offset = 0;\nlet resumes = 0;\nlet pending = readChunk(0);\nlet video = null;\nwhile (!video) {\n  const chunk = pending.first === offset ? await pending.promise : await readChunk(offset).promise;\n  const last = offset + chunk.body.length - 1;\n  pending = last + 1 < total ? readChunk(last + 1) : { first: -1 };\n\n  let res = null;\n  let failure = null;\n  try {\n    res = await send('PUT', session, {\n      'Content-Length': chunk.body.length,\n      'Content-Range': 'bytes ' + offset + '-' + last + '/' + total,\n    }, chunk.body);\n    if (finished(res)) {\n      video = JSON.parse(res.body.toString('utf8'));\n      break;\n    }\n    if (res.status === 308) {\n      offset = committedFrom(res);\n      continue;\n    }\n    failure = httpError(res);\n  } catch (err) {\n    failure = err;\n  }\n  if (!isRetryable(failure) || ++resumes > MAX_RESUMES) throw failure;\n  await sleep(1000 * 2 ** resumes);\n  const status = await withRetry(sessionStatus);\n  if (status.video) video = status.video;\n  else offset = status.offset;\n}\n\nreturn [{ json: video }];\n"
+      },
+      "id": "yt-relay-video",
+      "name": "YT Relay Video",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        0
+      ],
+      "onError": "continueErrorOutput"
     }
   ],
   "connections": {
@@ -325,12 +289,7 @@
       "main": [
         [
           {
-            "node": "Download Video",
-            "type": "main",
-            "index": 0
-          },
-          {
-            "node": "Initiate Resumable Upload",
+            "node": "YT Probe Video Size",
             "type": "main",
             "index": 0
           }
@@ -344,58 +303,11 @@
         ]
       ]
     },
-    "Download Video": {
-      "main": [
-        [
-          {
-            "node": "Merge",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Build Error Result (Node Failure)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
     "Initiate Resumable Upload": {
       "main": [
         [
           {
-            "node": "Merge",
-            "type": "main",
-            "index": 1
-          }
-        ],
-        [
-          {
-            "node": "Build Error Result (Node Failure)",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Merge": {
-      "main": [
-        [
-          {
-            "node": "Upload Video Binary",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Upload Video Binary": {
-      "main": [
-        [
-          {
-            "node": "Build Success Result",
+            "node": "YT Relay Video",
             "type": "main",
             "index": 0
           }
@@ -443,6 +355,42 @@
         [
           {
             "node": "Send Error Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YT Probe Video Size": {
+      "main": [
+        [
+          {
+            "node": "Initiate Resumable Upload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "YT Relay Video": {
+      "main": [
+        [
+          {
+            "node": "Build Success Result",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Result (Node Failure)",
             "type": "main",
             "index": 0
           }

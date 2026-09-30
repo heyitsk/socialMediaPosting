@@ -39,24 +39,37 @@ export function mediaExpiry(scheduledFor: Date | null): Date {
 // target if it has one (cropped, padded or converted — websitePlan.md §12),
 // else the master. Signing is local, so every target signing its own is
 // free. Groups created before S3 uploads have no media rows and keep the
-// public URLs they were created with.
-export async function mediaUrlsForDispatch(
-  media: Pick<MediaAsset, "id" | "key" | "status">[],
-  renditions: { mediaAssetId: string; rendition: Pick<MediaRendition, "key" | "status"> }[],
+// public URLs they were created with. Sizes go along so the LinkedIn/YouTube
+// relays (websitePlan.md §15) needn't probe; null where unknown (legacy URLs).
+export async function mediaForDispatch(
+  media: Pick<MediaAsset, "id" | "key" | "status" | "sizeBytes">[],
+  renditions: {
+    mediaAssetId: string;
+    rendition: Pick<MediaRendition, "key" | "status" | "sizeBytes">;
+  }[],
   legacyUrls: unknown,
-): Promise<string[]> {
-  if (media.length === 0) return legacyUrls as string[];
+): Promise<{ mediaUrls: string[]; mediaSizes: (number | null)[] }> {
+  if (media.length === 0) {
+    const mediaUrls = legacyUrls as string[];
+    return { mediaUrls, mediaSizes: mediaUrls.map(() => null) };
+  }
   const deleted = () =>
     new Error("This post's media was deleted (uploads are kept 15 days) — create the post again");
   if (media.some((asset) => asset.status !== "READY")) throw deleted();
   const renditionFor = new Map(renditions.map((link) => [link.mediaAssetId, link.rendition]));
-  return Promise.all(
-    media.map((asset) => {
-      const rendition = renditionFor.get(asset.id);
-      if (rendition && rendition.status !== "READY") throw deleted();
-      return presignDownload(rendition?.key ?? asset.key, PUBLISH_URL_TTL_SECONDS);
-    }),
-  );
+  const files = media.map((asset) => {
+    const rendition = renditionFor.get(asset.id);
+    if (rendition && rendition.status !== "READY") throw deleted();
+    return rendition
+      ? { key: rendition.key, sizeBytes: rendition.sizeBytes }
+      : { key: asset.key, sizeBytes: asset.sizeBytes };
+  });
+  return {
+    mediaUrls: await Promise.all(
+      files.map((file) => presignDownload(file.key, PUBLISH_URL_TTL_SECONDS)),
+    ),
+    mediaSizes: files.map((file) => file.sizeBytes),
+  };
 }
 
 // Removes the object (and any unfinished multipart upload) and marks the row

@@ -45,6 +45,9 @@ services:
       # n8n blocks {{ $env.* }} access in node expressions by default (security
       # hardening) — required here since our callback nodes read $env.CALLBACK_SECRET.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # The LinkedIn/YouTube video relay Code nodes stream from S3 with Node's
+      # https module (websitePlan.md §15); n8n blocks builtins by default.
+      NODE_FUNCTION_ALLOW_BUILTIN: https
     volumes:
       - n8n_data:/home/node/.n8n
 

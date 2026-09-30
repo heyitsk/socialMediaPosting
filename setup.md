@@ -438,7 +438,14 @@ services:
       
       # Optional: set a specific binary data base path
       - N8N_BINARY_DATA_TTL=60
+
+      # Lets the LinkedIn/YouTube video relay Code nodes use Node's https
+      # module to stream video from S3 (websitePlan.md §15)
+      - NODE_FUNCTION_ALLOW_BUILTIN=https
 ```
+
+> **Why `NODE_FUNCTION_ALLOW_BUILTIN=https`?**  
+> `linkedin-poster` and `youtube-poster` relay video from S3 to the platform in chunks inside a Code node, so the file never lands in n8n. n8n's own request helper corrupts binary bodies in 2.x and `fetch` isn't available, so the nodes use `require('https')`, which n8n blocks unless it's allowed here. Without it, video posts to LinkedIn and YouTube fail with "Module 'https' is disallowed".
 
 > **Why `N8N_DEFAULT_BINARY_DATA_MODE=filesystem`?**  
 > When uploading YouTube videos or large images, n8n needs to store them on disk rather than in memory to prevent crashes. This is critical for any video posting workflow.
@@ -504,6 +511,7 @@ Use this checklist to track what you've set up:
 
 ### n8n Docker
 - [ ] `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` set
+- [ ] `NODE_FUNCTION_ALLOW_BUILTIN=https` set (LinkedIn/YouTube video relay)
 - [ ] `WEBHOOK_URL` set to correct n8n URL
 - [ ] `GENERIC_TIMEZONE=Asia/Kolkata` set
 - [ ] n8n restarted after env changes
