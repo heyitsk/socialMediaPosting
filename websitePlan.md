@@ -246,7 +246,7 @@ Gotcha: Instagram crops **every carousel item to the first item's aspect ratio**
 
 ### Streaming-Relay Decision — planned for LinkedIn video, blocked on S3 (Sep 22, 2026; revised same day after the multi-part upload fix landed)
 
-**Status: planned, not built.** `linkedin-poster.json` currently uses a `Download` → `Merge` → `Split Video Into Parts` → `Upload Binary` pattern (see §5's `linkedin-poster` notes / `history.md` Session 24) for its video branch, and the plain `Download` → `Merge` → `Upload Binary` pattern (no splitting needed) for images. Once an S3 bucket exists (Phase 2 roadmap item, currently blocking — no AWS account provisioned yet), the streaming-relay fix will be applied **video only**, one platform at a time, LinkedIn then YouTube (or vice versa — whichever's S3 wiring lands first). Decisions locked in:
+**Status: planned, not built. S3 now exists (§11); build steps are in §15 (Sep 30), which proposes a chunked relay instead of the raw pipe described below.** `linkedin-poster.json` currently uses a `Download` → `Merge` → `Split Video Into Parts` → `Upload Binary` pattern (see §5's `linkedin-poster` notes / `history.md` Session 24) for its video branch, and the plain `Download` → `Merge` → `Upload Binary` pattern (no splitting needed) for images. Once an S3 bucket exists (Phase 2 roadmap item, currently blocking — no AWS account provisioned yet), the streaming-relay fix will be applied **video only**, one platform at a time, LinkedIn then YouTube (or vice versa — whichever's S3 wiring lands first). Decisions locked in:
 
 * **Video only, not image.** Images are small enough that the download-then-upload pattern's extra latency/memory pass is negligible; the complexity and error-handling cost of a hand-rolled streaming Code node isn't worth it there. Video is where large files make the double I/O pass actually expensive, so that's the only branch getting rebuilt. Image branches (`LI Download Image` → `Merge Image Upload` → `LI Upload Image Binary`, and YouTube's equivalent) stay on the plain `HTTP Request` pattern.
 * **Revised shape of the change (Sep 22 update):** the real, tested `linkedin-poster.json` now confirms LinkedIn caps every upload part at exactly 4,194,304 bytes (4 MiB) — `initializeUpload` always returns one `uploadInstructions` entry per part, each with its own `firstByte`/`lastByte` range, even for a single-part upload. That reshapes the relay from "one whole-file stream" into **one stream per part**, matched 1:1 to those ranges, which is a better fit for S3 anyway:
@@ -1390,6 +1390,81 @@ Users can now see the limits.
 
 **What it doesn't do.** It would **not** have prevented the Sep 2026 block. That was Meta's code 368 spam check, which has no counter and no warning header. What guards against 368 is the pacing, caps, duplicate guard and cooldown from steps 1-4. This work only helps with API throttling, which grows with user count and posting volume.
 
+## 15. Video Streaming Relay (S3 → LinkedIn / YouTube) — Implementation Plan (Sep 30, 2026, planning only)
+
+Turns §3's "Streaming-Relay Decision" into build steps now that S3 exists (§11). Scope: the **video** branches of `linkedin-poster.json` and `youtube-poster.json`. Images and the Meta platforms (which fetch the presigned URL themselves) are unchanged.
+
+### 15.1 What happens today (checked Sep 30)
+
+- The backend signs a 6 h presigned GET per target at dispatch (`mediaUrlsForDispatch`, `service/media.ts`) and sends it in `media_urls`, same field as the old public URLs. No workflow changed for S3.
+- **S3 multipart ≠ LinkedIn multipart.** The browser uploads videos to S3 in 16 MiB parts (`partSizeFor`, `lib/media-files.ts`), but after `CompleteMultipartUpload` S3 stores **one object**. n8n sees one file. The two part schemes are unrelated.
+- `linkedin-poster`: `LI Probe Video Size` (ranged GET `bytes=0-0`, reads the total from `Content-Range`) → `LI Init Video Upload` returns `uploadInstructions[]` (4,194,304-byte ranges) ∥ `LI Download Video` pulls the **whole** file into n8n binary storage → `Split Video Into Parts` loads the **whole** buffer into memory (`getBinaryDataBuffer`) and slices it → one PUT per part → `Collect Video Part ETags` → finalize. Works, but a 1 GB video (`MAX_VIDEO_BYTES`) means 1 GB on n8n disk **and** in the Code node's heap.
+- `youtube-poster`: `Download Video` (whole file) ∥ `Initiate Resumable Upload` → one PUT of the whole binary. Total time ≈ download + upload, and any failure restarts from byte 0.
+
+### 15.2 Design: chunked relay instead of a pipe
+
+§3 planned a true pipe (`sourceRes.pipe(putReq)` over raw `http`/`https`). **Proposed change:** relay in bounded chunks instead. Per chunk, one ranged S3 GET into a Buffer, then one PUT of that Buffer.
+
+- Memory is bounded by chunk size (4 MiB LinkedIn, 8-32 MiB YouTube). That's the goal of the pipe version, with much less code.
+- Every chunk is a separate request, so **retry per chunk** comes for free. A pipe can't retry mid-stream.
+- Content-Length is always known, so there's no chunked-transfer-encoding problem.
+- If `this.helpers.httpRequest` works for binary bodies inside the Code node (step 0), there's no `NODE_FUNCTION_ALLOW_BUILTIN` and no hand-written redirect loop (the helper follows redirects).
+- Cost vs a pipe: within one chunk, download and upload don't overlap. Fix by **prefetching chunk N+1 while chunk N uploads** (≤ 2 chunks in memory). For LinkedIn, parallel part uploads matter more (see 15.4).
+
+The node outputs **JSON only** (part ETags / video id). No binary goes into the execution record, so `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` stops mattering for these branches.
+
+### 15.3 Backend changes (small)
+
+- Add `media_size_bytes` (and `media_content_type`) to the LinkedIn and YouTube dispatch payloads (`service/n8n.ts`). The value comes from `MediaAsset.sizeBytes`, or `MediaRendition.sizeBytes` when a rendition is used. The workflow then skips the size probe. Keep the probe as a fallback for legacy URL posts and null rendition sizes.
+- Nothing else: presigned GET URLs already accept `Range` (proven by the `bytes=0-0` probe), and the 6 h TTL covers a 1 GB upload.
+
+### 15.4 LinkedIn (`linkedin-poster.json`)
+
+New video branch: `Route by Media Type` → `LI Init Video Upload` (size from payload, probe fallback) → **`LI Relay Video Parts`** (Code) → `LI Finalize Video Upload` → wait → publish.
+
+`LI Relay Video Parts`:
+- For each `uploadInstructions[i]`: GET `media_urls[0]` with `Range: bytes=firstByte-lastByte`. Require `206` and a body length of exactly `lastByte-firstByte+1`. Then PUT to `uploadUrl` with `Authorization`, `Content-Type`, and full-response mode to read the `ETag`.
+- Run parts with a small concurrency pool (proposed 4, ≈16 MiB in memory), then emit `uploadedPartIds` **in part order**.
+- Per-part retry: 3 attempts with backoff on network errors / 5xx / 429. On a 4xx, fail straight away.
+- Errors are thrown with the node name + part index + status + body snippet, so `lib/platform-error.ts` rules keep matching (update the rules that key on `LI Download Video` / `Split Video Into Parts`).
+- Remove `LI Download Video`, `Merge Video Upload`, `Split Video Into Parts`, `LI Upload Video Binary`, `Collect Video Part ETags`.
+
+### 15.5 YouTube (`youtube-poster.json`)
+
+New flow: `Validate Payload` → `Initiate Resumable Upload` (add `X-Upload-Content-Length` from the payload) → **`YT Relay Video`** (Code) → success callback.
+
+`YT Relay Video` uses YouTube's **chunked** resumable upload rather than one big PUT:
+- Chunk size is a multiple of 256 KiB (proposed 16 MiB). Each chunk: ranged S3 GET, then PUT to the session URL with `Content-Range: bytes a-b/total`.
+- Response `308` = continue from the `Range` header it returns (trust YouTube's offset, not ours). `200`/`201` on the last chunk = done, and its body has the video id the callback needs.
+- On a network error or 5xx: query the session (`PUT` with `Content-Range: bytes */total`) to get the committed offset, then resume from there. This retries up to N times, so a failure at 900 MB no longer restarts from 0.
+- Chunks must be sequential (YouTube requirement). Prefetch the next S3 chunk during the current PUT.
+- Remove `Download Video`, `Merge`, `Upload Video Binary`.
+
+### 15.6 Build order
+
+0. **Spike (half a day):** in the dev n8n (untagged `latest` image, so n8n 2.x with task runners), confirm inside a Code node: `this.helpers.httpRequest` with `encoding: 'arraybuffer'` + `returnFullResponse` for a ranged GET, and a PUT with a Buffer body that returns response headers. **If it fails**, fall back to Node 18+ global `fetch`, or `require('https')` with `NODE_FUNCTION_ALLOW_BUILTIN=https` set on the **runner** (not just the main container). Record the result here before step 1.
+1. Backend: `media_size_bytes` / `media_content_type` in the payloads + tests.
+2. LinkedIn relay node; standalone test with a 27 MB video (the Sep 22 file) and a ~500 MB video; watch n8n memory (`docker stats`).
+3. YouTube chunked relay; the same two sizes, plus kill the network mid-upload to check resume.
+4. Update `platform-error.ts` rules for the new node names; update `setup.md` §9 if any env var is needed.
+5. Tick the Phase 3 items and update §3's decision note.
+
+### 15.7 Risks
+
+- **Task-runner sandbox (n8n 2.x):** helper availability and Buffer passing across the runner boundary are not verified. That's what step 0 is for.
+- **Execution timeout:** a 1 GB YouTube upload can run tens of minutes; check `EXECUTIONS_TIMEOUT` and set a per-request timeout per chunk instead of a whole-file one.
+- **LinkedIn upload URL expiry:** part URLs from `initializeUpload` expire; parallel parts shorten total time, which helps.
+- **No binary preview** in the n8n UI for these branches. Log part index/offset/status in the node's JSON output for debugging.
+- **Queue mode later (§5):** the relay keeps nothing on local disk, so it already fits multiple workers.
+
+### 15.8 Open questions (for Kushagra)
+
+1. Chunked relay (15.2) instead of §3's raw-stream pipe? (Recommended.)
+2. YouTube: chunked resumable with resume-on-failure (recommended) vs a single streamed PUT?
+3. LinkedIn part concurrency: 4 in parallel, or sequential to be conservative with LinkedIn's rate limits?
+4. Which first: LinkedIn (most code exists, tested multi-part) or YouTube (bigger files, bigger win)? Recommended: LinkedIn.
+5. Should the relay also cover the Instagram/Threads/Facebook video path? Not needed today (Meta pulls the URL itself); listed so it's a conscious no.
+
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
@@ -1421,4 +1496,5 @@ Users can now see the limits.
 *Updated: 2026-09-30 | §13 step 3 built (§13.10.3): the posting limiter now drives real posting. Create books every target inside its transaction (1 h auto-delay, duplicates refused, all-or-nothing 400 with `nextFreeAt`), pushed-back "post now" targets become `SCHEDULED` and are queued at their slot, the publish worker fails paused accounts and releases slots on every failure before hand-off, retry books first (409 when paused or full), cancel releases slots, the reconciler covers pushed-back targets, targets expose `sendAt`, and create is limited to 30 per user per hour. Composer results panel keeps polling mixed groups. 7 route/worker tests (queues and n8n stubbed); 40/40 pass.*
 *Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*
 *Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
-*Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*
+*Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*  
+*Updated: 2026-09-30 | Planning only: new §15 "Video Streaming Relay". S3 multipart and LinkedIn multipart are unrelated (S3 stores one object); today's LinkedIn/YouTube video branches still download the whole file into n8n. Proposed: a Code node relaying bounded ranged-GET chunks (LinkedIn per 4 MiB part, in parallel; YouTube chunked resumable with resume on failure), file size sent in the payload, spike on n8n 2.x task runners first. Open questions in §15.8.*
