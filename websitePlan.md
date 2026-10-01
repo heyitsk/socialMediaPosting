@@ -348,6 +348,8 @@ Each workflow ends with a single **Callback HTTP Request node** POSTing its own 
 - Workers share **S3** for any binary data a workflow touches (e.g. the YouTube video download) since local worker disk isn't shared across replicas.
 - Scaling n8n/K8s raises *throughput headroom*, not the actual ceiling — platform API rate limits are the real constraint, which is why limiting happens in the backend before a job ever reaches Redis.
 
+> **Note (Sep 30, 2026):** K8s + KEDA remains the end state but is deferred at launch. See `deploymentPlan.md`: single EC2 box + docker compose first, n8n regular → queue mode on the same box, and explicit triggers (§6 there) for moving to Kubernetes.
+
 ---
 
 ## 6. Notification & Reporting System
@@ -519,7 +521,7 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 - [ ] Log a `FAILED` `PostLog` when a video-status poll job exhausts its attempts by *throwing* (network error/revoked token) — currently leaves the post stuck in `PROCESSING` (§6).
 - [x] Apply the streaming-relay fix (§3, video-only) to `linkedin-poster.json` and `youtube-poster.json` — built Oct 1 as a chunked relay (§15.10), tested live through the app on LinkedIn and YouTube Oct 1; `linkedin-poster.json` itself (text/image/video, standalone-tested Sep 22) is wired to the backend dispatcher and posts through the app (text, image, carousel and video confirmed Oct 1).
 - [ ] Stand up n8n in **queue mode**: Postgres for shared workflow storage, Redis for the job queue, `n8n-main` + `n8n-worker` roles. (Current dev setup, Sep 16, is a single non-queue-mode n8n container in `backend/docker-compose.yml` — fine for one platform/low volume, not yet the queue-mode architecture this section describes.)
-- [ ] Deploy n8n main/worker on Kubernetes; configure **KEDA** autoscaling of worker replicas on Redis queue depth.
+- [ ] Deploy n8n main/worker on Kubernetes; configure **KEDA** autoscaling of worker replicas on Redis queue depth. *(Deferred until the triggers in `deploymentPlan.md` §6; launch runs compose on one EC2 instance.)*
 - [ ] Build the backend **fan-out dispatcher** (`Promise.allSettled` over selected platforms) and **per-`(user, platform)` rate limiter** (token bucket sized to each platform's quota) — current dispatch (Sep 16) is a single synchronous call to one platform (Facebook), not the multi-platform fan-out this describes. **Planned in detail in §10 (Sep 29)** — fan-out is now per-target BullMQ `publish` jobs rather than an in-request `Promise.allSettled`, so scheduling shares the same path. The rate limiter itself is **planned in §13 (Sep 30)**: per platform account slots in Postgres, pacing, duplicate guard and a circuit breaker.
 - [x] Build Return Webhook Callback handler on backend (Sep 16) — implements per-callback `PostLogs` insert + direct `Posts.status` update for the single-platform case; cross-callback aggregation across multiple platforms (Section 6) still pending, since nothing dispatches to more than one platform yet.
 - [x] Add `CAROUSEL` support to `threads-poster.json` (Sep 23) — same split/aggregate pattern as `instagram-poster`'s carousel, image-only.
