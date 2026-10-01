@@ -1606,7 +1606,7 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - `post_group_created` {kind, targets, scheduled} and `post_group_create_failed` {reason=targets_refused|error} in the composer;
   - `media_upload_failed` {kind} in the media picker;
   - `media_fit_applied` {mode} in the crop dialog.
-- **Local receiver (§14.10 decision 3):** `alloy` compose service under the `faro` profile (`grafana/alloy:v1.20.1`, port 12347, config `backend/alloy/faro.alloy`). `faro.receiver` → logs through `otelcol.receiver.loki` and a transform setting `service.name=smposting-frontend` → OTLP to otel-lgtm; traces straight to OTLP. CORS allows `http://localhost:5173`.
+- **Local receiver (§14.10 decision 3):** `alloy` compose service under the `faro` profile (`grafana/alloy:v1.20.1`, port 12347, config `backend/alloy/faro.alloy`). Vite proxies `/faro/*` to it, so locally `VITE_FARO_URL=/faro/collect`. The app is opened on the ngrok domain, and an HTTPS public page calling `http://localhost` directly would hit CORS and Chrome's local-network blocking. `telemetry.ts` resolves a relative URL against the page so Faro still recognizes (and doesn't trace) its own collector calls. `faro.receiver` → logs through `otelcol.receiver.loki` and a transform setting `service.name=smposting-frontend` → OTLP to otel-lgtm; traces straight to OTLP. CORS allows `http://localhost:5173`.
 - **`frontend/.env.example`:** `VITE_FARO_URL`, `VITE_APP_VERSION`.
 - **Checked:**
   - `tsc -b` and `vite build` pass, with and without `VITE_FARO_URL`.

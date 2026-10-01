@@ -1,7 +1,8 @@
 // Local-only Faro receiver (websitePlan.md §14.7): otel-lgtm has no endpoint
 // for the browser SDK, so this takes Faro's payloads and forwards them to
 // otel-lgtm over OTLP. Run with `docker compose --profile faro up -d alloy`
-// and build/serve the frontend with VITE_FARO_URL=http://localhost:12347/collect.
+// and start the frontend with VITE_FARO_URL=/faro/collect — Vite proxies
+// /faro here, so the browser (on the ngrok domain) never calls localhost.
 // Production sends Faro straight to Grafana Cloud's collector instead.
 
 faro.receiver "browser" {

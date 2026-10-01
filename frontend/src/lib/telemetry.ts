@@ -17,7 +17,10 @@ export async function initTelemetry() {
   const [{ getWebInstrumentations, initializeFaro }, { TracingInstrumentation }] =
     await Promise.all([import("@grafana/faro-web-sdk"), import("@grafana/faro-web-tracing")]);
   faro = initializeFaro({
-    url: FARO_URL,
+    // Absolute, so Faro recognises its own collector calls and doesn't trace
+    // them. A relative value (/faro/collect, the local Vite proxy) resolves
+    // against the page.
+    url: new URL(FARO_URL, window.location.origin).href,
     app: {
       name: "smposting-frontend",
       version: import.meta.env.VITE_APP_VERSION ?? "dev",
