@@ -1494,15 +1494,15 @@ So the relay uses raw `https` (plus `http` only when a URL is `http:`, which is 
 **`youtube-poster.json`:** `Validate Payload` → **`YT Probe Video Size`** (same as LinkedIn's, passes the request fields through) → `Initiate Resumable Upload` (adds `X-Upload-Content-Length`) → **`YT Relay Video`** → `Build Success Result`. Removed: `Download Video`, `Merge`, `Upload Video Binary`.
 
 **Relay behaviour (same helper block copied into each relay Code node):**
-- Per request: 120 s timeout; redirects followed (up to 5, same `Range` re-sent; 308 is never treated as a redirect because it's YouTube's "resume incomplete").
-- Retries: each ranged GET and each PUT separately, 3 attempts with 1 s / 3 s backoff, on network errors, 429 and 5xx. Any other 4xx fails straight away.
-- A ranged GET must return 206 with exactly the requested length, else it fails as `Reading the media file failed: ...`.
-- LinkedIn: `PART_CONCURRENCY = 1` (§15.8). ETags are kept in `uploadInstructions` order; a missing ETag fails the node.
-- YouTube: 16 MiB chunks, the next one read while the current one uploads. The offset always comes from YouTube's `Range` header on a 308. On a network error or 5xx/429 the node waits (2 s, 4 s, ...), asks the session for its committed offset (`Content-Range: bytes */total`) and resumes from there, up to 5 times.
+- Per request: 60 s idle timeout (a stalled connection fails after a minute of no data, not a minute in total); redirects followed (up to 5, same `Range` re-sent; 308 is never treated as a redirect because it's YouTube's "resume incomplete").
+- Retries: each ranged GET and each PUT separately, 5 attempts with 2 / 4 / 8 / 16 s waits (~30 s, enough for a short network outage), on network errors, 429 and 5xx. Any other 4xx fails straight away.
+- A ranged GET must return 206 with exactly the requested length. A cut-off body is retried; anything else fails as `Reading the media file failed: ...`.
+- LinkedIn: `PART_CONCURRENCY = 1` (§15.8). ETags are kept in `uploadInstructions` order; a missing ETag fails the node. The output's `retries` counts retried requests.
+- YouTube: 16 MiB chunks, the next one read while the current one uploads. The offset always comes from YouTube's `Range` header on a 308. On a network error, a 5xx/429, or an S3 read that ran out of retries, the node waits (2 s, 4 s, ...), asks the session for its committed offset (`Content-Range: bytes */total`) and resumes from there, up to 5 times. The output's `relay: { resumes, retries, seconds }` shows whether that happened (first version, Oct 1 morning: retries gave up after ~4 s and a failed S3 read wasn't resumed, so a Wi-Fi blip failed the post).
 - Errors are thrown as `<status> - <body>`. n8n appends ` [line N]`; `lib/platform-error.ts` now strips that and has rules for `Reading the media file failed` (403/404 → "may have been removed", else "try again"). Tests: `lib/platform-error.test.ts`.
 
 **Testing done:**
-- Outside n8n (Node, mock S3/LinkedIn/YouTube servers, 40 MiB random file, 11 LinkedIn parts): bytes identical after an S3 503, a LinkedIn 500 on one part, a 307 redirect, a YouTube connection dropped halfway through a chunk (resumed from the committed offset), and a 308 that took only 256 KiB. A 401 fails without retry and with a parseable message.
+- Outside n8n (Node, mock S3/LinkedIn/YouTube servers, 40 MiB random file, 11 LinkedIn parts): bytes identical after an S3 503, a LinkedIn 500 on one part, a 307 redirect, a YouTube connection dropped halfway through a chunk (resumed from the committed offset), and a 308 that took only 256 KiB. A 401 fails without retry and with a parseable message. A 12 s outage of every S3 and YouTube connection mid-upload finished with `resumes: 1` and identical bytes.
 - Inside the real n8n task runner (`n8n execute`, the node code copied from the workflow files, mock servers in the container): LinkedIn relay 2 parts, YouTube relay with a dropped connection. Both succeeded with MD5 identical to the source, and a thrown error reached the error output as `{ error: "404 - ... [line 35]" }`.
 
 **Not yet done:** a live post to LinkedIn and YouTube (outward-facing, needs a connected account and a go-ahead), the 27 MB / ~500 MB size runs with `docker stats`, and the §15.9 LinkedIn call-cost check in the Developer Portal.
