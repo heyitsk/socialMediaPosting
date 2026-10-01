@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { tracedFetch } from "./tracing";
 
 const GRAPH_URL = `https://graph.facebook.com/${env.META_GRAPH_VERSION}`;
 const REDIRECT_URI = `${env.PUBLIC_BACKEND_URL}/api/auth/facebook/callback`;
@@ -30,7 +31,7 @@ async function graphGet<T>(path: string, params: Record<string, string>): Promis
     url.searchParams.set(key, value);
   }
 
-  const response = await fetch(url);
+  const response = await tracedFetch(url);
   if (!response.ok) {
     throw new Error(`Facebook Graph API error (${response.status}): ${await response.text()}`);
   }

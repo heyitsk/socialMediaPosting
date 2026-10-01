@@ -1,5 +1,8 @@
+// Must stay first: starts OpenTelemetry before @prisma/client loads.
+import "./otel";
 import { app } from "./app";
 import { env } from "./lib/env";
+import { logger } from "./lib/logger";
 import { startPublishWorker, startScheduleReconciler } from "./queue/publish-worker";
 import { startRenderReconciler, startRenderWorker } from "./queue/render-worker";
 import { startVideoStatusWorker } from "./queue/video-status-worker";
@@ -19,7 +22,7 @@ startRenderWorker();
 startRenderReconciler();
 startMediaCleaner();
 
-console.log(`smPosting backend listening on ${server.url}`);
+logger.info({ url: server.url.href }, "smPosting backend listening");
 if (env.NODE_ENV !== "production") {
-  console.log(`API docs available at ${server.url}docs`);
+  logger.info({ url: `${server.url}docs` }, "API docs available");
 }

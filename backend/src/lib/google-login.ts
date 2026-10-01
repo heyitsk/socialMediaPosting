@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { env } from "./env";
+import { tracedFetch } from "./tracing";
 
 // "Sign in with Google" — OpenID Connect, Authorization Code + PKCE + nonce
 // (OWASP OAuth 2.0 Cheat Sheet). This is app login, not a platform connect:
@@ -53,7 +54,7 @@ export async function exchangeLoginCode(code: string, codeVerifier: string): Pro
     grant_type: "authorization_code",
   });
 
-  const response = await fetch("https://oauth2.googleapis.com/token", {
+  const response = await tracedFetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,

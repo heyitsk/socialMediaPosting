@@ -14,6 +14,7 @@ import {
 import { type FitMode, itemRatio, type Rect, rectFor, type TileFit } from "@/lib/media-fit";
 import { isVideoFile } from "@/lib/media-upload";
 import { formatRatio, MEDIA_TYPE_LABELS, PLATFORM_LABELS } from "@/lib/posting";
+import { trackEvent } from "@/lib/telemetry";
 import { cn } from "@/lib/utils";
 
 // Adjusts one preview tile (websitePlan.md §12.6): send as is, crop, or pad
@@ -212,7 +213,13 @@ export function MediaFitDialog({
           <Button type="button" variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="button" onClick={() => onSave(draft)}>
+          <Button
+            type="button"
+            onClick={() => {
+              trackEvent("media_fit_applied", { mode: draft.mode });
+              onSave(draft);
+            }}
+          >
             Apply
           </Button>
         </DialogFooter>

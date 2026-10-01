@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { tracedFetch } from "./tracing";
 
 // Sign In with LinkedIn using OpenID Connect + "Share on LinkedIn" — unlike
 // Facebook/Instagram/Threads, there's no separate Page/Business resolution
@@ -38,7 +39,7 @@ export async function exchangeCodeForToken(code: string): Promise<LinkedInToken>
     redirect_uri: REDIRECT_URI,
   });
 
-  const response = await fetch("https://www.linkedin.com/oauth/v2/accessToken", {
+  const response = await tracedFetch("https://www.linkedin.com/oauth/v2/accessToken", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
@@ -55,7 +56,7 @@ export interface LinkedInProfile {
 }
 
 export async function fetchProfile(accessToken: string): Promise<LinkedInProfile> {
-  const response = await fetch("https://api.linkedin.com/v2/userinfo", {
+  const response = await tracedFetch("https://api.linkedin.com/v2/userinfo", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!response.ok) {
@@ -74,7 +75,7 @@ const LINKEDIN_VERSION = "202609";
 // lib/facebook.ts's getVideoStatus returns, so
 // queue/video-status-worker.ts can branch on either platform uniformly.
 export async function getVideoStatus(accessToken: string, videoUrn: string): Promise<string> {
-  const response = await fetch(`https://api.linkedin.com/rest/videos/${encodeURIComponent(videoUrn)}`, {
+  const response = await tracedFetch(`https://api.linkedin.com/rest/videos/${encodeURIComponent(videoUrn)}`, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "LinkedIn-Version": LINKEDIN_VERSION,

@@ -1390,6 +1390,297 @@ Users can now see the limits.
 
 **What it doesn't do.** It would **not** have prevented the Sep 2026 block. That was Meta's code 368 spam check, which has no counter and no warning header. What guards against 368 is the pacing, caps, duplicate guard and cooldown from steps 1-4. This work only helps with API throttling, which grows with user count and posting volume.
 
+## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
+
+> **Status (Oct 1, 2026):** steps 1-5 built and checked end to end (§14.11.1-§14.11.5), including the n8n leg. Step 6: dashboards and alert rules built and checked locally (§14.11.6-§14.11.7); Grafana Cloud deferred by Kushagra (Oct 1), so production telemetry stays off until it's set up. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+
+**Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
+
+### 14.1 Why Grafana Cloud + OpenTelemetry
+
+- **The backend runs on Bun.** Vendor APM agents (New Relic, Datadog) and OTel's `auto-instrumentations-node` rely on patching `require`/`node:http`. `Bun.serve` doesn't go through `node:http`, so auto HTTP spans never appear. What does work under Bun: the OTel `NodeSDK`, OTLP exporters, and instrumentations the library itself calls (Prisma, BullMQ, `@hono/otel`). Grafana speaks plain OTLP end to end, so it needs no agent.
+- **Correlation comes built in.** Loki log → Tempo trace (derived field on `trace_id`), Tempo span → Loki logs, and RED metrics (rate, errors, duration) computed from spans.
+- **The same setup works from laptop to production.** Local dev uses the `grafana/otel-lgtm` Docker image (Grafana :3000, OTLP gRPC :4317, OTLP HTTP :4318; dev-only, not for production). Production points the same OTLP env vars at Grafana Cloud. When the V2 K8s move happens, Grafana Alloy / k8s-monitoring Helm drops in with no app change.
+- **No lock-in.** The app only emits OTLP. Switching vendor means changing an endpoint and a header.
+- **Free tier (third-party figures, check grafana.com/pricing):** 10k active metric series, 50 GB logs, 50 GB traces per month, 14-day retention, 3 users. Enough for V1. The 10k series cap is why §14.6 bans high-cardinality labels.
+
+### 14.2 What already exists
+
+- Logs: 28 `console.log/warn/error` calls across routes, workers and services, plus `hono/logger` text lines (`app.ts`). None carry a request, post or job id in a structured way.
+- `middleware/error-handler.ts` prints unhandled errors with `console.error`.
+- One process runs the API and all workers (`index.ts`): `post-publish`, `media-render` and `video-status` queues and workers, plus three `setInterval` loops (schedule reconciler, render reconciler, media cleaner).
+- n8n dispatch is one `fetch` in `service/n8n.ts`, and the result comes back later on `POST /api/webhooks/n8n-callback`. Nothing ties the two together except `post_id`.
+- The frontend calls the API from the same origin (`lib/api.ts`, Vite proxy in dev, reverse proxy in prod).
+
+### 14.3 Backend tracing (`backend/src/otel.ts`)
+
+- **Bootstrap:** `otel.ts` starts `NodeSDK` with OTLP HTTP exporters for traces, metrics and logs, and a resource of `service.name=smposting-backend`, `service.version` (git sha), `deployment.environment`, `telemetry.sdk.runtime=bun`. It's the **first import in `index.ts`**, so it's loaded before `@prisma/client`. `app.ts` doesn't import it, so `bun run openapi` and `bun test` stay silent. Configuration uses only the standard `OTEL_*` env vars (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SDK_DISABLED`, `OTEL_TRACES_SAMPLER`), so there's no new `env.ts` schema beyond an optional `OTEL_SERVICE_VERSION`.
+- **HTTP:** `httpInstrumentationMiddleware` from `@hono/otel` is registered as the **first** `app.use` in `app.ts`, before CORS, CSRF and the logger, so every later middleware and log line runs inside the request span. Spans are renamed to the route template (`POST /api/workspaces/:workspaceId/post-groups`), never the raw path.
+- **Redaction (must have):** `@hono/otel` records `url.full` including the query string. OAuth callbacks (`/api/auth/*/callback`, `/api/login/*`) carry `code` and `state` there, so a span processor strips query strings from `url.full` before export. Request/response headers are **not** captured (`cookie`, `x-callback-secret`). No request or response bodies ever go into spans or logs, because dispatch payloads contain decrypted platform tokens.
+- **Prisma:** `PrismaInstrumentation` from `@prisma/instrumentation` (pin to 6.19.3, same as `@prisma/client`). Tracing is GA since 6.1, so no preview flag is needed. There's a known issue where `prisma:engine:db_query` spans lose their SQL text on some 6.x versions (prisma#27666). Acceptable: the `prisma:client:operation` span still names the model and action.
+- **Outbound HTTP:** Bun's global `fetch` isn't auto-instrumented. A small `lib/traced-fetch.ts` wraps it in a CLIENT span and injects `traceparent` with `propagation.inject`. It's used by `service/n8n.ts` (dispatch) and the platform clients in `lib/*.ts` (OAuth token exchanges, video-status polls). S3 calls go through the AWS SDK and are left untraced in V1.
+- **User context:** `requireAuth`/`requireWorkspace` set `enduser.id` and `smposting.workspace_id` on the active span. They're span attributes only, never metric labels (§14.6).
+- **Errors:** `error-handler.ts` calls `span.recordException(err)` + `setStatus(ERROR)` and logs through the logger (§14.4).
+
+### 14.4 Logs (`backend/src/lib/logger.ts`)
+
+- **pino**, JSON. A `mixin` adds `trace_id`/`span_id` from `trace.getActiveSpan()` to every line.
+- **Shipping:** logs go out through the OTel Logs SDK (OTLP → Loki), so no file tailing or agent is needed locally. Transports that run in a worker thread (`pino-opentelemetry-transport`) are avoided because the log context must stay in-process under Bun. Instead, a small in-process pino destination emits each record to the SDK `LoggerProvider` with its severity and the active context. Logs also stay on stdout, which K8s/Alloy will scrape later.
+- **Replace all 28 `console.*` calls** with `logger.info/warn/error({ postId, jobId, platform, err }, "message")`. Fields become structured attributes, and messages stay short and fixed so they can be grouped.
+- `hono/logger` is replaced by one pino line per request (method, route, status, duration), written from inside the request span.
+- Loki is set up with a derived field on `trace_id` → Tempo, and Tempo's "logs for this span" → Loki `{service_name="smposting-backend"} | trace_id="…"`.
+
+### 14.5 Async boundaries (the traces that matter most)
+
+- **BullMQ:** one shared `BullMQOtel` from `bullmq-otel` (`{ tracerName: "smposting", enableMetrics: true }`) is passed as `telemetry` to all three `Queue`s and all three `Worker`s. The span that enqueues a job carries its context in the job, so the worker's `process` span is part of the same trace as the create request.
+  - **Delayed jobs start a new trace with a link, not a parent (§14.10 decision 4).** A scheduled post, or a "post now" target the limiter pushed back, runs minutes to days after the request that queued it. As one trace, its duration would be the wait, not the work, and it would bury the traces that are really slow. So any job added with `delay > 0` is enqueued under `ROOT_CONTEXT` (so `bullmq-otel` starts a new trace in the worker), and the producer's `traceparent` goes in the job data (`traceLink`). The worker adds it as a span link (`span.addLink`), which Tempo shows as a clickable jump back to the create request. Jobs with no delay keep the normal parent. The jobs are `enqueuePublish` with `runAt`, the render re-checks, and the deadline and video-status jobs (they're delayed too).
+- **Reconcilers and cleaner:** each `setInterval` tick starts its own root span (`reconcile schedules`, `reconcile renders`, `clean media`) so their Prisma queries aren't orphans.
+- **n8n (native OTel, preview since n8n 2.19):**
+  - `traced-fetch` sends `traceparent` on the dispatch webhook. n8n makes its `workflow.execute` span a child of it, with a `node.execute` span per node.
+  - n8n injects `traceparent` into outbound HTTP Request node calls (`N8N_OTEL_TRACES_INJECT_OUTBOUND`, default on). So the callback node's `POST /api/webhooks/n8n-callback` joins the **same trace**, and `@hono/otel` picks up the incoming header.
+  - Compose env for the `n8n` service: `N8N_OTEL_ENABLED=true`, `N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4318`, `N8N_OTEL_EXPORTER_SERVICE_NAME=smposting-n8n`, `N8N_OTEL_TRACES_PRODUCTION_ONLY=true`. The `n8n` image is currently unpinned (`docker.n8n.io/n8nio/n8n`); step 3 pins a version of 2.19 or later.
+  - When n8n moves to queue mode (V2), workers need a build with the traceparent persistence fix (n8n PR #36757). Otherwise worker spans land on a separate trace.
+- **Video-status poller:** the poll job is enqueued from inside the callback span, so the poll attempts join the same trace too.
+
+For a "post now" target the result is one trace that reads: `POST post-groups` → `publish` job → `POST n8n/webhook/facebook-poster` → `workflow.execute facebook-poster` → Graph API node → `POST n8n-callback`. Video-status polls (delayed) and scheduled sends are separate traces linked back to it.
+
+### 14.6 Metrics
+
+**Label rule:** labels only from small fixed sets: `platform`, `media_type`, `outcome`, `reason`, `queue`, `route`, `status_class`. **Never** `workspace_id`, `user_id`, `post_id` or `account_id`. Those go in spans and logs. This keeps us well under 10k series.
+
+- **HTTP:** request count and duration per route come from `@hono/otel` metrics.
+- **BullMQ:** completed/failed/duration per queue come from `bullmq-otel` `enableMetrics`. Queue depth is an observable gauge that calls `getJobCounts()` on each queue every 30 s (waiting, delayed, active, failed).
+- **Business metrics** (`lib/metrics.ts`):
+  - `smposting.posts.dispatched` {platform, media_type}
+  - `smposting.posts.completed` {platform, media_type, outcome=published|failed|cancelled}
+  - `smposting.posts.publish_duration` histogram, from send to final status {platform, media_type}
+  - `smposting.n8n.dispatch.duration` {platform, status_class}
+  - `smposting.n8n.callback_deadline_hits` {platform}. A post where n8n never called back.
+  - `smposting.limits.pauses` {platform, reason} from `limit-pauses.ts`
+  - `smposting.limits.slot_refusals` {platform}. A target refused because no posting slot was free.
+  - `smposting.render.duration` {kind=image|video, outcome}
+  - `smposting.media.uploads` {kind, outcome}
+- **Runtime:** process memory and event-loop lag from `@opentelemetry/host-metrics` if it works under Bun; otherwise skip it.
+
+### 14.7 Frontend (Grafana Faro)
+
+- `@grafana/faro-web-sdk` + `@grafana/faro-web-tracing`, initialized in `main.tsx` **only when `VITE_FARO_URL` is set**. Captures errors, console errors, Web Vitals, sessions and fetch spans.
+- **Trace propagation:** the API is same-origin, so `traceparent` goes on `/api` calls by default and the backend `@hono/otel` span becomes a child of the browser's fetch span. If `VITE_API_URL` ever points at another origin, add it to `propagateTraceHeaderCorsUrls` **and** allow `traceparent`/`tracestate` in `middleware/cors.ts`.
+- **Routes:** Faro's React Router integration targets v6-style routers, and we're on `react-router` 8, so skip `@grafana/faro-react`'s router option. A small `useLocation` effect in `layout.tsx` calls `faro.api.setView({ name: <route pattern> })`.
+- **User:** after `/api/me` succeeds, `faro.api.setUser({ id })`. Id only; no email or name (PII).
+- **Business events:** `faro.api.pushEvent` for composer submit, upload failure and crop-dialog save. These show the path the user took before a failure.
+- **Local:** `otel-lgtm` has no Faro receiver. Frontend telemetry is off locally by default. To test it, run the optional `alloy` compose service with `faro.receiver` forwarding to `otel-lgtm` (§14.10 Q3).
+
+### 14.8 Dashboards and alerts
+
+- **Dashboards** live as JSON in `observability/dashboards/`, imported into Grafana Cloud (and into local Grafana by hand).
+  1. **Publishing health:** published/failed per platform, failure rate, p50/p95 send-to-published, callback-deadline hits, limit pauses by reason, slot refusals.
+  2. **API:** RED per route, 5xx list, slowest Prisma operations (from span metrics).
+  3. **Queues:** depth per queue and state, job duration, failed jobs, reconciler re-queues.
+  4. **Frontend:** Web Vitals, JS errors, sessions (Faro's built-in Frontend Observability app in Grafana Cloud covers most of this).
+- **Alerts** (Grafana Cloud alerting → email to start):
+  - failure rate for one platform > 20 % over 30 min (min 5 posts)
+  - any callback-deadline hit
+  - `post-publish` failed-job count rising
+  - API 5xx rate > 2 % over 10 min
+  - a limit pause with reason `SPAM` (Meta 368)
+
+### 14.9 Production wiring
+
+- Grafana Cloud stack → OTLP endpoint + instance id + API token (`MetricsPublisher`/`LogsPublisher`/`TracesPublisher` scopes). The backend and n8n get `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic …`.
+- The token is a secret. Store it in AWS Secrets Manager and resolve it at deploy time (see the `CLAUDE.md` secret rules). It never goes in `.env` in git or `docker-compose.yml`. For n8n use `N8N_OTEL_EXPORTER_OTLP_HEADERS_FILE`.
+- The Faro collector URL is public by design (it's shipped in the browser bundle), so it's a plain `VITE_FARO_URL` build var.
+- Sampling: `parentbased_always_on` (100 %) while volume is low. Revisit if traces near 50 GB/month, e.g. drop to 20 % and keep 100 % of errors with tail sampling in Alloy.
+
+### 14.10 Decisions (Kushagra, Sep 30)
+
+1. **Frontend Faro in the first build:** yes, as step 5. It's cheap, and it's how we'd see composer errors users never report.
+2. **n8n node spans:** on (`N8N_OTEL_TRACES_INCLUDE_NODE_SPANS=true`). It shows exactly which Graph API node failed. Turn it off if trace volume grows.
+3. **Local Faro testing:** Faro off locally, with an optional `alloy` compose profile (`docker compose --profile faro up`).
+4. **Scheduled-post traces:** link, not parent. Each delayed send starts its own short trace that links back to the create request (§14.5). A parent trace would last as long as the wait, so its duration would be wrong and it would crowd out the traces that are really slow. Seeing the full journey costs one click on the link. (Changed from "parent" on Sep 30.)
+
+### 14.11 Build order
+
+1. **Spike + bootstrap.** Add `otel-lgtm` to `backend/docker-compose.yml`. Write `otel.ts` with the NodeSDK, `@hono/otel` and Prisma instrumentation, plus the query-string redaction. **Exit check:** in local Grafana, a `GET /api/workspaces/:workspaceId/post-groups` trace shows `prisma:client:operation` spans nested under the Hono span. If context propagation breaks under Bun (AsyncLocalStorage), stop and rethink before going further.
+2. **Logs.** `lib/logger.ts` (pino + trace mixin + OTLP bridge). Replace the 28 `console.*` calls, `hono/logger` and the error handler's `console.error`. Set up the Loki ↔ Tempo links. **Exit check:** clicking a log line's trace id opens its trace.
+3. **Async boundaries.** `bullmq-otel` on all queues and workers, root spans for the three interval loops, `lib/traced-fetch.ts` for the n8n dispatch and platform calls, n8n `N8N_OTEL_*` env + pinned image. **Exit check:** one real "post now" Facebook post shows create → job → n8n workflow → callback in one trace, and a post scheduled a few minutes ahead gets its own trace whose link opens the create request.
+4. **Metrics.** `lib/metrics.ts` business metrics, BullMQ metrics, queue-depth gauges, host metrics if they work.
+5. **Frontend.** Faro init, `setView` on route change, `setUser`, business events. **Exit check:** a composer submit's trace starts in the browser.
+6. **Dashboards, alerts and Grafana Cloud.** Commit the dashboard JSON, create the alerts, add the Secrets Manager wiring and production env.
+
+New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@opentelemetry/exporter-{trace,metrics,logs}-otlp-http`, `@opentelemetry/sdk-logs`, `@hono/otel`, `@prisma/instrumentation@6.19.3`, `bullmq-otel`, `pino`. Frontend `@grafana/faro-web-sdk`, `@grafana/faro-web-tracing`.
+
+### 14.11.1 Step 1 as built (Oct 1, 2026)
+
+- **`backend/src/otel.ts`:** `NodeSDK` (0.222) with OTLP HTTP trace and metric exporters (metrics every 30 s), `PrismaInstrumentation`, and a resource of `service.name=smposting-backend`, `deployment.environment.name`, `process.runtime.name=bun`. It only starts when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and `OTEL_SDK_DISABLED` isn't `true`, and it flushes on SIGTERM/SIGINT. Imported first in `index.ts`; `app.ts` doesn't import it, so `bun test` and `bun run openapi` export nothing.
+- **Two span processors:**
+  - `RedactUrlProcessor` strips the query string from `url.full` when the span starts.
+  - `ClientErrorStatusProcessor`: `@hono/otel` marks a span ERROR whenever the handler threw, which includes every `HTTPException`. So a 401 from `/api/me` would count as a failure. This processor hands the exporter a copy of SERVER spans with a 4xx status and the status cleared. 5xx stays ERROR.
+- **`app.ts`:** `httpInstrumentationMiddleware()` (`@hono/otel` 1.2) is the first `app.use`. No headers are captured. Span names and the `http.route` label use the Hono route pattern.
+- **`middleware/auth.ts`:** `enduser.id` and `smposting.workspace_id` are set on the request span.
+- **`docker-compose.yml`:** `otel-lgtm` pinned to `grafana/otel-lgtm:0.11.10` (Grafana 12.1, Tempo 2.8, Loki 3.5, Prometheus 3.5). Grafana is on host port **3001** (3000 is often taken), login admin/admin. No volume, so local telemetry resets with the container. The image is 1.84 GB.
+- **`.env.example`:** `OTEL_EXPORTER_OTLP_ENDPOINT` (empty = off) and `OTEL_RESOURCE_ATTRIBUTES`.
+- **Spike result under Bun 1.3.13 (exit check passed):** a `POST /api/webhooks/n8n-callback?code=…&state=…` sent with a fixed `traceparent` produced:
+  - a Hono SERVER span whose parent is the incoming span id, so an incoming trace is continued. This is what n8n's callback will rely on.
+  - a `url.full` with the query string removed.
+  - Prisma spans (`prisma:client:operation` → `prisma:engine:db_query` → `prisma:engine:js:query:sql`) nested under the Hono span. The SQL text is present (prisma#27666 doesn't hit us).
+  - on a `GET /api/me` 401 span, the status UNSET.
+  - `http_server_request_duration_seconds` in Prometheus labelled by `http_route` and `http_response_status_code`.
+  - `bun test`: 51/51.
+- **Not yet:** the reconcilers and media cleaner run Prisma outside any request, so their queries show up as root `prisma:client:operation` traces every tick. Step 3 wraps each tick in its own span.
+
+### 14.11.2 Step 2 as built (Oct 1, 2026)
+
+- **`backend/src/lib/logger.ts`:** pino 10, `base: undefined`, `LOG_LEVEL` (default `info`).
+  - A `mixin` adds `trace_id`/`span_id` from the active span to every line.
+  - Output goes through a custom in-process destination, not a pino transport, because transports run in a worker thread and lose the caller's trace context. Each line goes:
+    - to stdout: pino-pretty in dev (trace ids hidden), raw JSON in production.
+    - to the OTel Logs SDK, using `context.active()` so Loki gets the trace id natively. Fields become attributes (objects JSON-encoded). `err` maps to `exception.type` / `exception.message` / `exception.stacktrace`.
+  - The OTel logger is looked up per line, so a logger created before `otel.ts` starts isn't stuck as a no-op.
+- **`otel.ts`:** adds a `BatchLogRecordProcessor` with the OTLP HTTP log exporter.
+- **`middleware/request-log.ts`:** replaces `hono/logger`. One `request` line per request with `method`, `route` (Hono pattern, not the raw path), `status` and `durationMs`. It logs at `error` for 5xx. It's registered right after `@hono/otel`, so it's inside the request span.
+- **`error-handler.ts`:** `logger.error({ err }, "unhandled error")`.
+- **Every `console.*` call replaced** (all but `lib/env.ts`, which runs before anything else and exits):
+  - `index.ts`, the five OAuth callback routes (`{ platform, err }`), `login.ts` (message only, never the code/state/id_token, as before), `media.ts`, `post-groups.ts` and `webhooks.ts` routes;
+  - the publish, render and video-status workers;
+  - `service/media.ts` and `service/limit-pauses.ts`, whose pause line now carries `platform`, `platformAccountId`, `until`, `reason` and `failedWaiting` as fields.
+  - Messages are fixed strings; ids moved into fields.
+- **Checked against local otel-lgtm:**
+  - The `request` line for a `POST /api/webhooks/n8n-callback` sent with a fixed `traceparent` reached Loki with that trace id and span id, and `route`/`status`/`method` as structured metadata.
+  - A logged `Error` arrived with `exception.*` attributes.
+  - The bundled Grafana already provisions Loki `trace_id` → Tempo and Tempo → Loki links. In Grafana Cloud these must be set up by hand (step 6).
+  - `bun test`: 51/51. `tsc` clean.
+- **Known gap:** OAuth helper errors (`lib/facebook.ts` etc.) include the platform's error response body in `err.message`. It was already printed that way. They're error bodies, not tokens, but it's worth a look before production.
+
+### 14.11.3 Step 3 as built (Oct 1, 2026)
+
+- **`queue/telemetry.ts`:**
+  - One `BullMQOtel` (`bullmq-otel` 2.0, `enableMetrics: true`) passed as `telemetry` to all three `Queue`s and `Worker`s.
+  - `laterJob()` for jobs that run later: it sets BullMQ's job option `telemetry.omitContext` (so the worker's `process` span starts a new trace) and puts the caller's `traceparent` in `job.data.traceLink`.
+  - `linkToProducer(job.data)`, called first in the publish and video-status processors, adds it as a span link.
+  - Where each job lands:
+    - **Delayed `publish` jobs** (schedules and limiter push-backs): new trace + link.
+    - **Deadline jobs:** always new trace + link.
+    - **Video-status polls:** new trace + link, since their retries run up to ~33 min.
+    - **Immediate publishes and renders:** keep the parent.
+  - A job that starts immediately and is later re-delayed (render wait, pacing) keeps its parent, because BullMQ reuses the job's stored context. Acceptable for now.
+- **`lib/tracing.ts`:**
+  - `withRootSpan(name, fn)` gives the schedule reconciler, render reconciler and media cleaner one root span per tick (`reconcile schedules`, `reconcile renders`, `clean media`).
+  - `tracedFetch(url, init, { propagate })` is a CLIENT span per call. `url.full` never includes the query string (Graph API URLs carry `access_token`).
+  - `traceparent` is only sent with `propagate: true`, which is set only for the n8n dispatch in `service/n8n.ts`. Platform APIs get no trace headers. All 17 `fetch` calls (`service/n8n.ts`, `lib/{facebook,instagram,threads,linkedin,youtube,google-login}.ts`) go through it.
+- **`docker-compose.yml` n8n:** image pinned to `docker.n8n.io/n8nio/n8n:2.41.4` (the `stable` tag on Oct 1). Added `N8N_OTEL_ENABLED=true`, `N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4318`, `N8N_OTEL_EXPORTER_SERVICE_NAME=smposting-n8n`.
+  - **The running container is still 2.13.4.** Upgrading means recreating it on the external `n8n_data` volume, and n8n runs its DB migrations on first start. Back up the volume first.
+- **Checked** with a throwaway `otel-spike` queue, using the same helpers against local Redis and otel-lgtm:
+  - An immediate job's `add` → `process` → `complete` spans sat in the request's trace.
+  - A delayed job's `process` span had no parent and a link to the request's trace.
+  - `tracedFetch` sent `traceparent` only with `propagate`.
+  - `url.full` came through with the query string stripped.
+  - `bun test` 51/51, `tsc` clean.
+- **n8n leg checked (Oct 1, exit check passed):**
+  - The running n8n was upgraded 2.13.4 → 2.41.4 after backing up `n8n_data` (187 MB tarball incl. `database.sqlite` and `config`). All posters stayed published.
+  - A real Facebook "post now" produced one trace (`d1b81c33…`, 341 spans) running from the browser through n8n and back:
+    - `smposting-frontend` `POST …/post-groups`
+    - → backend `POST /api/workspaces/:workspaceId/post-groups` with Prisma spans
+    - → BullMQ `post-publish` add → process
+    - → `POST localhost:5678` (`/webhook/facebook-poster`)
+    - → `smposting-n8n` `workflow.execute facebook-poster` (3.8 s) with one `node.execute` per node. The Graph API HTTP node took 3.5 s.
+    - → n8n's callback HTTP node → backend `POST /api/webhooks/n8n-callback` (204).
+  - The deadline job was added in the same trace. Its run will be a separate linked trace, as designed.
+  - Both backend `request` log lines (201 create, 204 callback) carry the trace id in Loki.
+
+### 14.11.4 Step 4 as built (Oct 1, 2026)
+
+- **`lib/metrics.ts`** (all labels from fixed sets; Prometheus names shown):
+  - `smposting_posts_dispatched_total` {platform, media_type}: after a successful n8n hand-off (publish worker).
+  - `smposting_posts_completed_total` {platform, media_type, outcome=published|failed|cancelled}: in `transitionTarget` (`service/post-groups.ts`), which now also selects `mediaType` and the account's platform. A late SUCCESS after a deadline FAILED counts once as each.
+  - `smposting_posts_deadline_hits_total` {platform}: only when the deadline job actually failed the target.
+  - `smposting_n8n_dispatch_duration_seconds` {workflow}: around the dispatch call in `service/n8n.ts`. `workflow` is the webhook path, e.g. `facebook-poster`.
+  - `smposting_limits_pauses_total` {platform, reason}: in `pauseForLimitError`. `reason` is the `CooldownReason`.
+  - `smposting_limits_refusals_total` {platform, reason=duplicate|no_slot|paused}: in `refusalError` (create and retry refusals).
+  - `smposting_render_duration_seconds` {kind=image|video, outcome=ready|failed}: the render worker's work moved into `renderRendition`, timed from after the no-op checks.
+  - `smposting_media_uploads_total` {kind, outcome=ready|rejected}: at upload complete and in `reject`.
+- **`queue/telemetry.ts`:** observable gauge `smposting_queue_jobs` {queue, state=waiting|delayed|active|failed}, read with `getJobCounts` at each 30 s export, for the three queues. BullMQ's own `bullmq_jobs_completed_total`, `bullmq_job_duration_milliseconds` and friends come from `enableMetrics`.
+- **Dropped for now:**
+  - Send → published duration (§14.6): `posts` has no dispatch timestamp, so it needs a migration. Traces already show it per post.
+  - Host/runtime metrics: not tried under Bun.
+- **Checked:** a 45 s run of the backend exported all 12 `smposting_queue_jobs` series and the BullMQ and HTTP metrics to local Prometheus. The business counters only appear once their event happens; with no real posts in the test they're covered by `tsc` only. `bun test` 51/51.
+
+### 14.11.5 Step 5 as built (Oct 1, 2026)
+
+- **`frontend/src/lib/telemetry.ts`:** `@grafana/faro-web-sdk` + `@grafana/faro-web-tracing` 2.12, started from `main.tsx` **only when `VITE_FARO_URL` is set**.
+  - The SDK is loaded with a dynamic `import()`. Unset, Vite drops it entirely (one 589 kB bundle, as before). Set, it's two lazy chunks of 84 kB and 116 kB.
+  - `getWebInstrumentations()` + `TracingInstrumentation`. The API is same-origin, so fetches carry `traceparent` with no CORS changes.
+  - `trackView`, `setTelemetryUser` and `trackEvent` are no-ops when off. A view or user set before the SDK finishes loading is applied once it has.
+- **`App.tsx`:** `useTelemetryContext()` sets the Faro view on every route change, with UUID path segments replaced by `:id` (e.g. `/w/:id/compose`), and sets the user id (id only) from `/api/me`.
+- **Events** (string attributes only):
+  - `post_group_created` {kind, targets, scheduled} and `post_group_create_failed` {reason=targets_refused|error} in the composer;
+  - `media_upload_failed` {kind} in the media picker;
+  - `media_fit_applied` {mode} in the crop dialog.
+- **Local receiver (§14.10 decision 3):** `alloy` compose service under the `faro` profile (`grafana/alloy:v1.20.1`, port 12347, config `backend/alloy/faro.alloy`). Vite proxies `/faro/*` to it, so locally `VITE_FARO_URL=/faro/collect`. The app is opened on the ngrok domain, and an HTTPS public page calling `http://localhost` directly would hit CORS and Chrome's local-network blocking. `telemetry.ts` resolves a relative URL against the page so Faro still recognizes (and doesn't trace) its own collector calls. `faro.receiver` → logs through `otelcol.receiver.loki` and a transform setting `service.name=smposting-frontend` → OTLP to otel-lgtm; traces straight to OTLP. CORS allows `http://localhost:5173`.
+- **`frontend/.env.example`:** `VITE_FARO_URL`, `VITE_APP_VERSION`.
+- **Checked:**
+  - `tsc -b` and `vite build` pass, with and without `VITE_FARO_URL`.
+  - Alloy started cleanly.
+  - A Faro-format event posted to `/collect` reached Loki as `service_name="smposting-frontend"` with `event_name` and `view_name`.
+- **Browser check (Oct 1, Firefox):** sessions, view changes, resource timings, Web Vitals and the user id reached Loki. But no browser traces, and backend request spans had no browser parent.
+  - **Cause:** `openapi-fetch`'s `createClient` keeps the `globalThis.fetch` that existed when `lib/api.ts` loaded. Faro's fetch instrumentation replaces `fetch` later, so every API call bypassed it.
+  - **Fix:** `lib/api.ts` passes `fetch: (request) => globalThis.fetch(request)`. A script that patches `fetch` after creating the client confirmed the default client ignored the patch and the fixed one used it.
+  - Confirmed after the fix (Oct 1): API requests carry `traceparent`, and Tempo shows `smposting-frontend` traces. **Step 5 exit check passed.**
+  - S3 uploads use XHR to another origin, so Faro traces them without adding `traceparent`, which would break the presigned upload.
+
+### 14.11.6 Step 6, part 1: dashboards (Oct 1, 2026)
+
+- **`observability/dashboards/*.json`**, four dashboards with uids `smposting-publishing`, `-api`, `-queues`, `-frontend`, cross-linked by the `smposting` tag:
+  - **Publishing:** stat tiles (published, failed, failure rate, no-callback deadline hits, accounts paused, limiter refusals over the range), published and failed per platform (stacked bars), n8n accept time p95 per workflow, refusals by platform and reason, and backend WARN/ERROR logs linked to traces.
+  - **API:** req/s, 5xx share, p95, in-flight; requests by status class; p50/p95/p99; a per-route table (req/s, p95, 5xx share); a Tempo table of requests over 500 ms.
+  - **Queues and media:** publish waiting/scheduled, renders waiting, failed jobs kept; waiting and delayed by queue; BullMQ job duration p95; jobs finished; render p95 by kind; uploads by outcome.
+  - **Frontend** (Loki/Faro): sessions, JS errors, Web Vitals p75 (LCP, INP, CLS, TTFB, with Google's good/poor thresholds), errors over time, composer outcomes, page views, browser error logs, a Tempo table of browser calls over 1 s.
+- **Portable:**
+  - Data sources are dashboard variables (`prometheus`, `loki`, `tempo`) plus an `env` variable on `deployment_environment_name`, so the same files import into Grafana Cloud.
+  - Backend HTTP panels filter on `job="smposting-backend"`, because `@hono/otel`'s metrics carry no `service_name` label.
+- **Colours:** each platform keeps a fixed colour in every panel (blue Facebook, orange Instagram, aqua Threads, yellow LinkedIn, magenta YouTube; dark-surface reference palette, validator passed). Red is used only for failures and errors. One y-axis per panel.
+- **`observability/import-dashboards.sh`:** creates an "smPosting" folder and overwrites the dashboards in it. Local by default (`admin:admin` on :3001); Grafana Cloud with `GRAFANA_URL` and `GRAFANA_TOKEN` (service account).
+- **`lib/metrics.ts` seeds counters at 0** for every valid label set (the 18 platform/media pairs from `MEDIA_TYPES`, refusal reasons, upload kinds), about 85 series. Without it, a series' first event is invisible to `increase()`, so a platform that rarely posts would read 0.
+- **Checked:** all four imported into local Grafana. Every panel query was run against the real data sources: none errored. The empty ones only need events that haven't happened yet (no 5xx, renders, refusals, browser errors; Firefox reports no LCP/INP/CLS). The seeded series show up (12 per platform, 6 for YouTube).
+- **Next (part 2):** alert rules, then Grafana Cloud.
+
+### 14.11.7 Step 6, part 2: alert rules (Oct 1, 2026)
+
+- **`observability/alerts/rules.json`:** Grafana-managed rule group `smposting` (1-minute evaluation), five rules. No data counts as OK (no posts or traffic isn't a problem). Each rule links to the dashboard panel that shows it and sends straight to the `smposting-email` contact point (`notification_settings`), so the notification policy tree is untouched.
+
+  | Rule | Fires when | Severity |
+  |---|---|---|
+  | Platform failure rate above 20% | per platform, failed ÷ (published + failed) > 0.2 over 30 min, with at least 5 finished | warning |
+  | Post got no result back from n8n | any callback-deadline hit in 15 min, per platform | critical |
+  | Publish job crashed | any `"publish job crashed"` log line in 15 min (Loki) | critical |
+  | API server errors above 2% | 5xx share > 2% over 10 min, with at least 20 requests | warning |
+  | Meta spam block (code 368) | any `ABUSE_BLOCK` pause in 15 min, per platform | critical |
+
+  - The crash rule is log-based on purpose: BullMQ's failed-job counter only appears at the first failure, which `increase()` can't see.
+  - `lib/metrics.ts` now also seeds `smposting_limits_pauses_total` at 0 for every platform × `CooldownReason`, so the first spam block is seen.
+- **`observability/import-alerts.sh`:**
+  - Creates the folder.
+  - Creates the email contact point from `ALERT_EMAIL` (first run only; no address in git).
+  - Fills in the `${PROMETHEUS_UID}`/`${LOKI_UID}` placeholders (local defaults `prometheus`/`loki`; Grafana Cloud's are set by env).
+  - Replaces the rule group in one `PUT` with `X-Disable-Provenance`, so the rules stay editable in the UI.
+- **Checked locally:** all five loaded and evaluated with health `ok`, state inactive. `/api/v1/eval` on the deadline rule returned one series per platform at 0, so each platform alerts separately.
+  - **Local otel-lgtm has no SMTP**, so firing rules there show in Alerting but send no email. Grafana Cloud sends email out of the box.
+- **Grafana Cloud: deferred (Kushagra, Oct 1).** Everything runs against local otel-lgtm for now. Nothing in the app needs to change when it's picked up:
+  1. Create a stack and an access policy token (metrics/logs/traces write).
+  2. Store the token in AWS Secrets Manager and resolve it at runtime into `OTEL_EXPORTER_OTLP_HEADERS` (and n8n's `N8N_OTEL_EXPORTER_OTLP_HEADERS_FILE`).
+  3. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to the stack's OTLP endpoint, and `VITE_FARO_URL` to a Frontend Observability app's collector URL.
+  4. Run `import-dashboards.sh` and `import-alerts.sh` with `GRAFANA_URL`/`GRAFANA_TOKEN` and Cloud's data-source uids.
+  5. Set up the Loki ↔ Tempo trace links by hand.
+  6. Fire a test alert to confirm email delivery.
+
+### 14.12 Risks
+
+- **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
+- **n8n OTel is preview.** Env names or behaviour may change between n8n versions, so pin the image.
+- **Prisma SQL text** may be missing from engine spans on 6.19 (prisma#27666).
+- **Secrets in telemetry.** The biggest real risk is leaking an OAuth `code`, an access token or `x-callback-secret` into Grafana. The rules in §14.3 (no bodies, no headers, stripped query strings) and a review of the first exported spans in step 1 guard against it.
+- **Free-tier limits.** A wrong label (e.g. `post_id`) can blow the 10k series cap in a day. §14.6's label rule is enforced in review.
+
 ## 15. Video Streaming Relay (S3 → LinkedIn / YouTube) — Implementation Plan (Sep 30, 2026, planning only)
 
 Turns §3's "Streaming-Relay Decision" into build steps now that S3 exists (§11). Scope: the **video** branches of `linkedin-poster.json` and `youtube-poster.json`. Images and the Meta platforms (which fetch the presigned URL themselves) are unchanged.
@@ -1539,5 +1830,15 @@ So the relay uses raw `https` (plus `http` only when a URL is `http:`, which is 
 *Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
 *Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*  
 *Updated: 2026-09-30 | Planning only: new §15 "Video Streaming Relay". S3 multipart and LinkedIn multipart are unrelated (S3 stores one object); today's LinkedIn/YouTube video branches still download the whole file into n8n. Proposed: a Code node relaying bounded ranged-GET chunks (LinkedIn per 4 MiB part, in parallel; YouTube chunked resumable with resume on failure), file size sent in the payload, spike on n8n 2.x task runners first. Decisions in §15.8 (chunked relay, YouTube chunked resumable with resume, LinkedIn first, Meta unchanged); LinkedIn part concurrency still open.*  
+*Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11. §14.10 decisions: Faro in the first build, n8n node spans on, Faro off locally, scheduled (delayed) sends get their own trace with a span link back to the create request.*
+*Updated: 2026-10-01 | §14 step 1 built (§14.11.1): `backend/src/otel.ts` (NodeSDK, OTLP traces + metrics, Prisma instrumentation, query-string redaction, 4xx not marked as errors), `@hono/otel` as the first middleware, user/workspace span attributes, `otel-lgtm` in compose (Grafana on :3001). Spike under Bun passed: incoming `traceparent` continued, Prisma spans nested under the request span with SQL text, HTTP metrics in Prometheus. 51/51 tests pass.*
+*Updated: 2026-10-01 | §14 step 2 built (§14.11.2): `lib/logger.ts` (pino with trace ids, in-process bridge to the OTel Logs SDK → Loki, `err` as `exception.*`), `middleware/request-log.ts` replacing `hono/logger`, and every `console.*` call except `lib/env.ts` moved to structured fields with fixed messages. Log → trace link checked in local Grafana. 51/51 tests pass.*
+*Updated: 2026-10-01 | §14 step 3 built (§14.11.3): `bullmq-otel` on every queue and worker; delayed publishes, deadlines and video-status polls start their own trace with a span link back (`queue/telemetry.ts`); root spans for the reconcilers and media cleaner; `tracedFetch` for all 17 outbound calls, sending `traceparent` only to n8n; n8n pinned to 2.41.4 with `N8N_OTEL_*` in compose. Parent/link/propagation/redaction checked in Tempo with a throwaway queue. The n8n leg needs the running n8n container upgraded from 2.13.4.*
+*Updated: 2026-10-01 | §14 step 4 built (§14.11.4): `lib/metrics.ts` business metrics (dispatched, completed by outcome, deadline hits, n8n dispatch time, limit pauses and refusals, render time, uploads) with fixed-set labels only, and a `smposting_queue_jobs` gauge per queue and state. Send-to-published duration deferred (needs a dispatch timestamp column). Queue gauge, BullMQ and HTTP metrics checked in local Prometheus.*
+*Updated: 2026-10-01 | §14 step 5 built (§14.11.5): Grafana Faro in the frontend (`lib/telemetry.ts`), lazy-loaded and only when `VITE_FARO_URL` is set, with route views (ids as `:id`), user id, and composer/upload/crop events. Optional local receiver: `alloy` compose service under the `faro` profile forwarding to otel-lgtm. Build and the receiver → Loki path checked; not yet checked in a browser.*
+*Updated: 2026-10-01 | §14 step 3 exit check passed: n8n upgraded to 2.41.4 (backup first), and a real Facebook post produced one trace from the browser through the backend, BullMQ, the `facebook-poster` workflow and its nodes, and back via the n8n callback, with the backend log lines linked to it.*
+*Updated: 2026-10-01 | §14 step 6 part 1 (§14.11.6): four Grafana dashboards (publishing, API, queues and media, frontend) as portable JSON in `observability/dashboards/` with an import script; publishing counters seeded at 0 so a first post is counted. Every panel query checked against local Grafana.*
+*Updated: 2026-10-01 | §14 step 6 part 2 (§14.11.7): five Grafana-managed alert rules (platform failure rate, n8n no-callback, publish job crash, API 5xx, Meta spam block) in `observability/alerts/rules.json` with an import script that also creates the email contact point; pause counters seeded at 0. All rules healthy in local Grafana.*
+*Updated: 2026-10-01 | §14 Grafana Cloud wiring deferred by Kushagra; the remaining setup steps are listed in §14.11.7. Steps 1-5 and the local dashboards and alerts go to review as one PR.*
 *Updated: 2026-10-01 | §15.8: LinkedIn part concurrency decided (start at 1). §15.9: LinkedIn videos over 500 MB are now refused at post creation (backend validation + composer, `VIDEO_MAX_BYTES` in `lib/capabilities.ts`, exposed as `videoMaxBytes` in `/capabilities`).*  
 *Updated: 2026-10-01 | §15 steps 0-4 built (§15.10): in n8n 2.x only raw `https` works for binary in a Code node (`NODE_FUNCTION_ALLOW_BUILTIN=https`); LinkedIn video now relays 4 MiB parts from S3 (`LI Relay Video Parts`), YouTube uses a chunked resumable relay with resume-on-failure (`YT Relay Video`); payloads carry `media_size_bytes`; `platform-error.ts` handles the relay's errors. Mock-tested inside n8n; live platform test pending.*

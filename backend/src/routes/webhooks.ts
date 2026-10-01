@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
 import { isPostablePlatform } from "../lib/capabilities";
 import { env } from "../lib/env";
+import { logger } from "../lib/logger";
 import { enqueueVideoStatusPoll } from "../queue/video-status-queue";
 import { pauseForLimitError } from "../service/limit-pauses";
 import { markTargetFailed, markTargetPublished } from "../service/post-groups";
@@ -108,7 +109,9 @@ export const webhooksRoute = new OpenAPIHono().openapi(n8nCallback, async (c) =>
         platformAccountId: post.connectedAccount.platformAccountId,
         raw: body.error,
         sourcePostId: body.post_id,
-      }).catch((err: unknown) => console.error(`couldn't pause after ${body.post_id}:`, err));
+      }).catch((err: unknown) =>
+        logger.error({ postId: body.post_id, err }, "couldn't pause after callback"),
+      );
     }
   }
 

@@ -8,6 +8,7 @@ import {
   exchangeForLongLivedToken,
   fetchProfile,
 } from "../../lib/instagram";
+import { logger } from "../../lib/logger";
 
 export const instagramAuthRoute = new Hono();
 
@@ -73,7 +74,7 @@ instagramAuthRoute.get("/callback", async (c) => {
     const redirectQuery = duplicate ? "connected=instagram&duplicate=1" : "connected=instagram";
     return c.redirect(connectRedirect(redirectQuery, ctx.workspaceId));
   } catch (err) {
-    console.error("Instagram OAuth callback failed:", err);
+    logger.error({ platform: "instagram", err }, "OAuth callback failed");
     return c.redirect(connectRedirect("error=instagram_connect_failed", ctx.workspaceId));
   }
 });

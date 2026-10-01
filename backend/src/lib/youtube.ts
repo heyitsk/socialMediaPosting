@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { tracedFetch } from "./tracing";
 
 // Google OAuth 2.0 + YouTube Data API v3. Unlike every other platform so far,
 // Google issues a short-lived (~1h) access token PLUS a long-lived refresh
@@ -55,7 +56,7 @@ export async function exchangeCodeForToken(
     grant_type: "authorization_code",
   });
 
-  const response = await fetch("https://oauth2.googleapis.com/token", {
+  const response = await tracedFetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
@@ -83,7 +84,7 @@ export async function refreshAccessToken(
     grant_type: "refresh_token",
   });
 
-  const response = await fetch("https://oauth2.googleapis.com/token", {
+  const response = await tracedFetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
@@ -113,7 +114,7 @@ export async function fetchChannel(accessToken: string): Promise<YouTubeChannel 
   url.searchParams.set("part", "snippet");
   url.searchParams.set("mine", "true");
 
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const response = await tracedFetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!response.ok) {
     throw new Error(`YouTube channel fetch failed (${response.status}): ${await response.text()}`);
   }
@@ -141,7 +142,7 @@ export async function getVideoStatus(
   url.searchParams.set("part", "status");
   url.searchParams.set("id", videoId);
 
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const response = await tracedFetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
   if (!response.ok) {
     throw new Error(
       `YouTube video status fetch failed (${response.status}): ${await response.text()}`,

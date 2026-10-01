@@ -4,11 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Job, Worker } from "bullmq";
 import { prisma } from "../db/client";
+import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
 import { type Rect, type RenditionSpec, renderImage, renderVideo } from "../lib/render";
 import { presignDownload, putObject, readObject } from "../lib/s3";
+import { withRootSpan } from "../lib/tracing";
 import { redisConnection } from "./connection";
 import { enqueueRender, RENDER_QUEUE, type RenderJobData } from "./render-queue";
+import { telemetry } from "./telemetry";
+import { renderDuration, secondsSince } from "../lib/metrics";
 
 // ffmpeg uses every core it gets; two at once keeps the API responsive.
 const CONCURRENCY = 2;
@@ -43,6 +47,33 @@ async function render(job: Job<RenderJobData>): Promise<void> {
     specHash: rendition.specHash,
   };
 
+  const kind = isVideoType(master.contentType) ? "video" : "image";
+  const start = performance.now();
+  try {
+    // width/height are checked non-null above.
+    await renderRendition(
+      rendition,
+      { ...master, width: master.width, height: master.height },
+      spec,
+    );
+    renderDuration.record(secondsSince(start), { kind, outcome: "ready" });
+  } catch (err) {
+    renderDuration.record(secondsSince(start), { kind, outcome: "failed" });
+    throw err;
+  }
+}
+
+async function renderRendition(
+  rendition: { id: string; key: string },
+  master: {
+    key: string;
+    contentType: string;
+    width: number;
+    height: number;
+    durationSeconds: number | null;
+  },
+  spec: RenditionSpec,
+): Promise<void> {
   let sizeBytes: number;
   if (isVideoType(master.contentType)) {
     const dir = await mkdtemp(join(tmpdir(), "render-"));
@@ -82,10 +113,14 @@ export function startRenderWorker(): Worker<RenderJobData> {
   const worker = new Worker<RenderJobData>(RENDER_QUEUE, render, {
     connection: redisConnection(),
     concurrency: CONCURRENCY,
+    telemetry,
   });
   worker.on("failed", (job, err) => {
     if (!job) return;
-    console.error(`render ${job.data.renditionId} failed (attempt ${job.attemptsMade}):`, err);
+    logger.error(
+      { renditionId: job.data.renditionId, attempt: job.attemptsMade, err },
+      "render failed",
+    );
     // Out of retries: the publish worker sees FAILED and fails the targets.
     if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
       void markFailed(job.data.renditionId, err.message.slice(0, 1000));
@@ -109,7 +144,9 @@ async function reconcilePendingRenders(): Promise<void> {
 
 export function startRenderReconciler(): void {
   const run = () =>
-    reconcilePendingRenders().catch((err) => console.error("render reconciler failed:", err));
+    withRootSpan("reconcile renders", reconcilePendingRenders).catch((err) =>
+      logger.error({ err }, "render reconciler failed"),
+    );
   run();
   setInterval(run, RECONCILE_INTERVAL_MS);
 }

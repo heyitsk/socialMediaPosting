@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { tracedFetch } from "./tracing";
 
 // Instagram API with Instagram Login — a separate OAuth product from the
 // Facebook Login flow in facebook.ts. Lets a user connect an Instagram
@@ -33,7 +34,7 @@ export async function exchangeCodeForToken(code: string): Promise<ShortLivedToke
     code,
   });
 
-  const response = await fetch("https://api.instagram.com/oauth/access_token", {
+  const response = await tracedFetch("https://api.instagram.com/oauth/access_token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
@@ -55,7 +56,7 @@ export async function exchangeForLongLivedToken(shortLivedToken: string): Promis
   url.searchParams.set("client_secret", env.INSTAGRAM_APP_SECRET);
   url.searchParams.set("access_token", shortLivedToken);
 
-  const response = await fetch(url);
+  const response = await tracedFetch(url);
   if (!response.ok) {
     throw new Error(`Instagram long-lived token exchange failed (${response.status}): ${await response.text()}`);
   }
@@ -72,7 +73,7 @@ export async function fetchProfile(longLivedToken: string): Promise<InstagramPro
   url.searchParams.set("fields", "user_id,username");
   url.searchParams.set("access_token", longLivedToken);
 
-  const response = await fetch(url);
+  const response = await tracedFetch(url);
   if (!response.ok) {
     throw new Error(`Instagram profile fetch failed (${response.status}): ${await response.text()}`);
   }

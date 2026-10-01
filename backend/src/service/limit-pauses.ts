@@ -1,10 +1,12 @@
 import { prisma } from "../db/client";
 import type { PostablePlatform } from "../lib/capabilities";
 import { classifyLimitError, type LimitError } from "../lib/limit-errors";
+import { logger } from "../lib/logger";
 import { APP_WIDE_ACCOUNT_ID, nextDayStart, pausedFailureMessage } from "../lib/posting-limits";
 import { removePublishJob } from "../queue/publish-queue";
 import { markTargetFailed } from "./post-groups";
 import { type Cooldown, releaseSlot, setCooldown } from "./posting-limits";
+import { limitPauses } from "../lib/metrics";
 
 // When a platform says "too many" or "spam", pause the account and fail what
 // was waiting to go to it (websitePlan.md §13.7, §13.9 decision 4). Called by
@@ -103,8 +105,16 @@ export async function pauseForLimitError(input: {
     sourcePostId,
   });
   const failed = await failWaitingTargets(platform, platformAccountId, cooldown, now);
-  console.warn(
-    `paused ${platform} ${platformAccountId} until ${cooldown.until.toISOString()} (${limit.reason}); failed ${failed} waiting post(s)`,
+  limitPauses.add(1, { platform, reason: limit.reason });
+  logger.warn(
+    {
+      platform,
+      platformAccountId,
+      until: cooldown.until.toISOString(),
+      reason: limit.reason,
+      failedWaiting: failed,
+    },
+    "account paused for a posting limit",
   );
   return cooldown;
 }

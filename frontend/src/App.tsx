@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "react-router";
 import { rememberWorkspace, useMe, useWorkspaceId } from "@/lib/session";
+import { setTelemetryUser, trackView } from "@/lib/telemetry";
 import { ComposerPage } from "@/routes/composer";
 import { DashboardPage } from "@/routes/dashboard";
 import { HistoryPage } from "@/routes/history";
@@ -50,7 +51,16 @@ function RequireWorkspace() {
   return <Outlet />;
 }
 
+// Tells Faro which page and user its telemetry belongs to (lib/telemetry.ts).
+function useTelemetryContext() {
+  const { pathname } = useLocation();
+  const { data: me } = useMe();
+  useEffect(() => trackView(pathname), [pathname]);
+  useEffect(() => setTelemetryUser(me?.id ?? null), [me?.id]);
+}
+
 export function App() {
+  useTelemetryContext();
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
