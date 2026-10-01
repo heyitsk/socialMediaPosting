@@ -1796,7 +1796,9 @@ So the relay uses raw `https` (plus `http` only when a URL is `http:`, which is 
 - Outside n8n (Node, mock S3/LinkedIn/YouTube servers, 40 MiB random file, 11 LinkedIn parts): bytes identical after an S3 503, a LinkedIn 500 on one part, a 307 redirect, a YouTube connection dropped halfway through a chunk (resumed from the committed offset), and a 308 that took only 256 KiB. A 401 fails without retry and with a parseable message. A 12 s outage of every S3 and YouTube connection mid-upload finished with `resumes: 1` and identical bytes.
 - Inside the real n8n task runner (`n8n execute`, the node code copied from the workflow files, mock servers in the container): LinkedIn relay 2 parts, YouTube relay with a dropped connection. Both succeeded with MD5 identical to the source, and a thrown error reached the error output as `{ error: "404 - ... [line 35]" }`.
 
-**Not yet done:** a live post to LinkedIn and YouTube (outward-facing, needs a connected account and a go-ahead), the 27 MB / ~500 MB size runs with `docker stats`, and the §15.9 LinkedIn call-cost check in the Developer Portal.
+- Live, through the app on n8n 2.41.4 (Kushagra, Oct 1): a normal-size and a large video posted to LinkedIn and YouTube, the YouTube upload survived Wi-Fi turned off mid-upload, LinkedIn text/image/carousel still post, and a LinkedIn video over 500 MB is refused at creation. All passed.
+
+**Not yet done:** the §15.9 LinkedIn call-cost check in the Developer Portal.
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
