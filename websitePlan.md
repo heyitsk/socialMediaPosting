@@ -1628,6 +1628,22 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - Confirmed after the fix (Oct 1): API requests carry `traceparent`, and Tempo shows `smposting-frontend` traces. **Step 5 exit check passed.**
   - S3 uploads use XHR to another origin, so Faro traces them without adding `traceparent`, which would break the presigned upload.
 
+### 14.11.6 Step 6, part 1: dashboards (Oct 1, 2026)
+
+- **`observability/dashboards/*.json`**, four dashboards with uids `smposting-publishing`, `-api`, `-queues`, `-frontend`, cross-linked by the `smposting` tag:
+  - **Publishing:** stat tiles (published, failed, failure rate, no-callback deadline hits, accounts paused, limiter refusals over the range), published and failed per platform (stacked bars), n8n accept time p95 per workflow, refusals by platform and reason, and backend WARN/ERROR logs linked to traces.
+  - **API:** req/s, 5xx share, p95, in-flight; requests by status class; p50/p95/p99; a per-route table (req/s, p95, 5xx share); a Tempo table of requests over 500 ms.
+  - **Queues and media:** publish waiting/scheduled, renders waiting, failed jobs kept; waiting and delayed by queue; BullMQ job duration p95; jobs finished; render p95 by kind; uploads by outcome.
+  - **Frontend** (Loki/Faro): sessions, JS errors, Web Vitals p75 (LCP, INP, CLS, TTFB, with Google's good/poor thresholds), errors over time, composer outcomes, page views, browser error logs, a Tempo table of browser calls over 1 s.
+- **Portable:**
+  - Data sources are dashboard variables (`prometheus`, `loki`, `tempo`) plus an `env` variable on `deployment_environment_name`, so the same files import into Grafana Cloud.
+  - Backend HTTP panels filter on `job="smposting-backend"`, because `@hono/otel`'s metrics carry no `service_name` label.
+- **Colours:** each platform keeps a fixed colour in every panel (blue Facebook, orange Instagram, aqua Threads, yellow LinkedIn, magenta YouTube; dark-surface reference palette, validator passed). Red is used only for failures and errors. One y-axis per panel.
+- **`observability/import-dashboards.sh`:** creates an "smPosting" folder and overwrites the dashboards in it. Local by default (`admin:admin` on :3001); Grafana Cloud with `GRAFANA_URL` and `GRAFANA_TOKEN` (service account).
+- **`lib/metrics.ts` seeds counters at 0** for every valid label set (the 18 platform/media pairs from `MEDIA_TYPES`, refusal reasons, upload kinds), about 85 series. Without it, a series' first event is invisible to `increase()`, so a platform that rarely posts would read 0.
+- **Checked:** all four imported into local Grafana. Every panel query was run against the real data sources: none errored. The empty ones only need events that haven't happened yet (no 5xx, renders, refusals, browser errors; Firefox reports no LCP/INP/CLS). The seeded series show up (12 per platform, 6 for YouTube).
+- **Next (part 2):** alert rules, then Grafana Cloud.
+
 ### 14.12 Risks
 
 - **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
@@ -1675,3 +1691,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-10-01 | §14 step 4 built (§14.11.4): `lib/metrics.ts` business metrics (dispatched, completed by outcome, deadline hits, n8n dispatch time, limit pauses and refusals, render time, uploads) with fixed-set labels only, and a `smposting_queue_jobs` gauge per queue and state. Send-to-published duration deferred (needs a dispatch timestamp column). Queue gauge, BullMQ and HTTP metrics checked in local Prometheus.*
 *Updated: 2026-10-01 | §14 step 5 built (§14.11.5): Grafana Faro in the frontend (`lib/telemetry.ts`), lazy-loaded and only when `VITE_FARO_URL` is set, with route views (ids as `:id`), user id, and composer/upload/crop events. Optional local receiver: `alloy` compose service under the `faro` profile forwarding to otel-lgtm. Build and the receiver → Loki path checked; not yet checked in a browser.*
 *Updated: 2026-10-01 | §14 step 3 exit check passed: n8n upgraded to 2.41.4 (backup first), and a real Facebook post produced one trace from the browser through the backend, BullMQ, the `facebook-poster` workflow and its nodes, and back via the n8n callback, with the backend log lines linked to it.*
+*Updated: 2026-10-01 | §14 step 6 part 1 (§14.11.6): four Grafana dashboards (publishing, API, queues and media, frontend) as portable JSON in `observability/dashboards/` with an import script; publishing counters seeded at 0 so a first post is counted. Every panel query checked against local Grafana.*

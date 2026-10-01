@@ -1,4 +1,5 @@
 import { metrics, ValueType } from "@opentelemetry/api";
+import { MEDIA_TYPES, POSTABLE_PLATFORMS } from "./capabilities";
 
 // Business metrics (websitePlan.md §14.6). Labels come only from small fixed
 // sets — platform, media type, outcome, reason, queue, state. Never a
@@ -57,3 +58,27 @@ export const mediaUploads = meter.createCounter("smposting.media.uploads", {
 export function secondsSince(start: number): number {
   return (performance.now() - start) / 1000;
 }
+
+// A counter series appears at its first event with value 1, and Prometheus's
+// increase() can't see that first step — a platform that posts rarely would
+// read 0 on the dashboards. Exporting every valid label set at 0 from startup
+// fixes that. Bounded: 18 platform/media pairs (MEDIA_TYPES) → ~85 series.
+function seedCounters(): void {
+  for (const platform of POSTABLE_PLATFORMS) {
+    const mediaTypes = new Set(Object.values(MEDIA_TYPES[platform]).flat());
+    for (const media_type of mediaTypes) {
+      postsDispatched.add(0, { platform, media_type });
+      for (const outcome of ["published", "failed", "cancelled"]) {
+        postsCompleted.add(0, { platform, media_type, outcome });
+      }
+    }
+    postsDeadlineHits.add(0, { platform });
+    for (const reason of ["duplicate", "no_slot", "paused"]) {
+      limitRefusals.add(0, { platform, reason });
+    }
+  }
+  for (const kind of ["image", "video"]) {
+    for (const outcome of ["ready", "rejected"]) mediaUploads.add(0, { kind, outcome });
+  }
+}
+seedCounters();
