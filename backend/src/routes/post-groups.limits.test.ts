@@ -176,6 +176,7 @@ afterAll(async () => {
   await prisma.postLog.deleteMany({ where: { postId: { in: postIds } } });
   await prisma.dispatchSlot.deleteMany({ where: { postId: { in: postIds } } });
   await prisma.post.deleteMany({ where: { id: { in: postIds } } });
+  await prisma.mediaAsset.deleteMany({ where: { workspaceId } });
   await prisma.postGroup.deleteMany({ where: { workspaceId } });
   await prisma.accountCooldown.deleteMany({
     where: { platformAccountId: { in: platformAccountIds } },
@@ -453,5 +454,72 @@ describe("GET /posting-limits", () => {
       message: "flagged as spam",
     });
     expect(limit?.nextFreeAt).toBe(until.toISOString());
+  });
+});
+
+describe("video size", () => {
+  const MB = 1024 * 1024;
+
+  async function account(platform: "LINKEDIN" | "FACEBOOK"): Promise<string> {
+    const platformAccountId = `limits-route-${RUN}-${platformAccountIds.length}`;
+    platformAccountIds.push(platformAccountId);
+    const created = await prisma.connectedAccount.create({
+      data: {
+        workspaceId,
+        platform,
+        accountName: "video size test",
+        platformAccountId,
+        encryptedAccessToken: "x",
+        keyVersion: 1,
+        refreshStrategy: platform === "LINKEDIN" ? "REQUIRES_RECONNECT" : "NONE",
+      },
+    });
+    accountIds.push(created.id);
+    return created.id;
+  }
+
+  async function video(sizeBytes: number): Promise<string> {
+    const id = crypto.randomUUID();
+    await prisma.mediaAsset.create({
+      data: {
+        id,
+        workspaceId,
+        uploadedByUserId: userId,
+        key: `${workspaceId}/${id}.mp4`,
+        originalFilename: "clip.mp4",
+        contentType: "video/mp4",
+        sizeBytes,
+        status: "READY",
+      },
+    });
+    return id;
+  }
+
+  const videoPost = async (connectedAccountId: string, mediaAssetId: string) =>
+    post([connectedAccountId], "video", {
+      contentKind: "VIDEO",
+      mediaAssetIds: [mediaAssetId],
+    });
+
+  test("LinkedIn refuses a video over 500 MB", async () => {
+    const linkedIn = await account("LINKEDIN");
+    const { status, body } = await videoPost(linkedIn, await video(600 * MB));
+    expect(status).toBe(400);
+    expect((body as Refused).targets).toEqual([
+      {
+        connectedAccountId: linkedIn,
+        errors: ["LinkedIn doesn't support videos over 500 MB — clip.mp4 is 600.0 MB"],
+      },
+    ]);
+  });
+
+  test("LinkedIn takes a video under 500 MB", async () => {
+    const { status } = await videoPost(await account("LINKEDIN"), await video(400 * MB));
+    expect(status).toBe(201);
+  });
+
+  test("other platforms aren't held to LinkedIn's limit", async () => {
+    const { status } = await videoPost(await account("FACEBOOK"), await video(600 * MB));
+    expect(status).toBe(201);
   });
 });

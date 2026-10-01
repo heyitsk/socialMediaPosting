@@ -10,10 +10,12 @@ import {
   INSTAGRAM_MAX_HASHTAGS,
   isPostablePlatform,
   mediaTypesFor,
+  PLATFORM_NAMES,
   type PostablePlatform,
   ratioWithin,
   reconnectReason,
   SHORTS_MAX_DURATION_SECONDS,
+  VIDEO_MAX_BYTES,
 } from "../lib/capabilities";
 import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
@@ -367,6 +369,19 @@ async function validate(workspaceId: string, body: CreateBody) {
       const { min, max } = CAROUSEL_LIMITS[platform];
       if (mediaAssetIds.length < min || mediaAssetIds.length > max) {
         addTargetError(id, `${platform} carousels take ${min}-${max} images`);
+      }
+    }
+    // Checked on the uploaded file; a crop or pad of it is rendered after
+    // create and is rarely larger.
+    const maxVideoBytes = VIDEO_MAX_BYTES[platform];
+    if (wantVideo && maxVideoBytes) {
+      for (const asset of media) {
+        if (asset.sizeBytes > maxVideoBytes) {
+          addTargetError(
+            id,
+            `${PLATFORM_NAMES[platform]} doesn't support videos over ${maxVideoBytes / 1024 / 1024} MB — ${asset.originalFilename} is ${(asset.sizeBytes / 1024 / 1024).toFixed(1)} MB`,
+          );
+        }
       }
     }
     // Crops, pads, Instagram's JPEG conversion, and shapes the API refuses.

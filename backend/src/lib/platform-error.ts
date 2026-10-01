@@ -6,6 +6,9 @@ import type { Platform } from "@prisma/client";
 //   400 - "{\"error\":{\"message\":\"...\", ...}}" (node: Publish Image)
 // i.e. the status code, then the response body as a JSON-encoded string. The
 // Build Error Result nodes may also append the JS stack (" - AxiosError: ...").
+// The video relay Code nodes (websitePlan.md §15) throw the same
+// "<status> - <body>" shape, which n8n suffixes with " [line N]"; a failed
+// read of our own S3 object is prefixed "Reading the media file failed: ".
 //
 // Order of preference: a matching ERROR_RULES entry, then the platform's own
 // message pulled out of the response body, then a sentence per status code.
@@ -34,6 +37,15 @@ const ERROR_RULES: ErrorRule[] = [
   },
   {
     node: /Download|Probe/,
+    message: "Couldn't read the media file — try again.",
+  },
+  {
+    text: /^Reading the media file failed: 40[34]\b/,
+    message:
+      "Couldn't read the media file — it may have been removed (uploads are kept 15 days). Create the post again.",
+  },
+  {
+    text: /^Reading the media file failed/,
     message: "Couldn't read the media file — try again.",
   },
 
@@ -166,6 +178,8 @@ export function friendlyPlatformError(raw: string, platform?: Platform): string 
     .replace(/\s*\((?:last )?node: [^)]*\)\s*$/, "")
     // A stack appended by Build Error Result: " - AxiosError: ... at ...".
     .replace(/\s+-\s+[A-Za-z]*Error:\s[\s\S]*$/, "")
+    // Where a Code node threw.
+    .replace(/\s*\[line \d+\]$/, "")
     .trim();
   if (!text) return "Posting failed";
 

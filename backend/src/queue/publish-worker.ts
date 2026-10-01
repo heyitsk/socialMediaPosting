@@ -4,7 +4,7 @@ import { isPostablePlatform, reconnectReason } from "../lib/capabilities";
 import { logger } from "../lib/logger";
 import { pausedFailureMessage } from "../lib/posting-limits";
 import { withRootSpan } from "../lib/tracing";
-import { mediaUrlsForDispatch } from "../service/media";
+import { mediaForDispatch } from "../service/media";
 import { dispatchPost } from "../service/n8n";
 import {
   markTargetCancelled,
@@ -49,13 +49,18 @@ export async function publish(job: Job<PublishJobData>, token?: string): Promise
       group: {
         include: {
           workspace: { select: { deletedAt: true } },
-          media: { orderBy: { position: "asc" }, select: { id: true, key: true, status: true } },
+          media: {
+            orderBy: { position: "asc" },
+            select: { id: true, key: true, status: true, sizeBytes: true },
+          },
         },
       },
       renditions: {
         select: {
           mediaAssetId: true,
-          rendition: { select: { key: true, status: true, contentType: true, error: true } },
+          rendition: {
+            select: { key: true, status: true, contentType: true, error: true, sizeBytes: true },
+          },
         },
       },
     },
@@ -160,8 +165,12 @@ export async function publish(job: Job<PublishJobData>, token?: string): Promise
 
   try {
     // Uploaded media gets freshly signed S3 URLs on every attempt.
-    const mediaUrls = await mediaUrlsForDispatch(group.media, post.renditions, post.mediaUrls);
-    await dispatchPost({ ...post, mediaUrls }, account);
+    const { mediaUrls, mediaSizes } = await mediaForDispatch(
+      group.media,
+      post.renditions,
+      post.mediaUrls,
+    );
+    await dispatchPost({ ...post, mediaUrls }, account, mediaSizes);
     postsDispatched.add(1, { platform, media_type: post.mediaType });
   } catch (err) {
     logger.error({ postId, platform, err }, "publish failed");

@@ -187,6 +187,12 @@ export const PLATFORM_NAMES: Record<PostablePlatform, string> = {
   YOUTUBE: "YouTube",
 };
 
+// Largest video a platform's API takes, where that's below our own upload cap
+// (MAX_VIDEO_BYTES). LinkedIn's Videos API documents 75 KB to 500 MB.
+export const VIDEO_MAX_BYTES: Partial<Record<PostablePlatform, number>> = {
+  LINKEDIN: 500 * 1024 * 1024,
+};
+
 // Shorts: YouTube classifies vertical/square videos up to 3 minutes as Shorts.
 export const SHORTS_MAX_DURATION_SECONDS = 180;
 
