@@ -12,6 +12,7 @@ import {
   uploadMedia,
   VIDEO_ACCEPT,
 } from "@/lib/media-upload";
+import { trackEvent } from "@/lib/telemetry";
 import { cn } from "@/lib/utils";
 
 // The backend's per-post cap (routes/post-groups.ts); platforms' own carousel
@@ -112,6 +113,7 @@ export function useMediaUploads(workspaceId: string) {
         )
         .catch((err) => {
           if (item.controller.signal.aborted) return;
+          trackEvent("media_upload_failed", { kind: isVideoFile(item.file) ? "video" : "image" });
           update(item.localId, {
             status: "error",
             error: err instanceof Error ? err.message : "Upload failed",

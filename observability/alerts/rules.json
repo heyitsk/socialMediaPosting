@@ -1,0 +1,342 @@
+{
+  "title": "smposting",
+  "interval": 60,
+  "rules": [
+    {
+      "uid": "smposting-platform-failure-rate",
+      "title": "Platform failure rate above 20%",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${PROMETHEUS_UID}",
+          "relativeTimeRange": {
+            "from": 1800,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "(sum by (platform) (increase(smposting_posts_completed_total{outcome=\"failed\"}[30m])) / sum by (platform) (increase(smposting_posts_completed_total{outcome=~\"published|failed\"}[30m]))) and on (platform) (sum by (platform) (increase(smposting_posts_completed_total{outcome=~\"published|failed\"}[30m])) >= 5)",
+            "instant": true,
+            "range": false,
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "datasourceUid": "__expr__",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            },
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0.2
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0s",
+      "isPaused": false,
+      "labels": {
+        "team": "smposting",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "{{ $labels.platform }}: {{ humanizePercentage $values.A.Value }} of posts failed in the last 30 min",
+        "description": "More than 1 in 5 posts to {{ $labels.platform }} failed (at least 5 finished). Usually an expired token, a platform outage or an API change. Open History for the error messages, then the backend WARN/ERROR logs on the Publishing dashboard.",
+        "__dashboardUid__": "smposting-publishing",
+        "__panelId__": "8"
+      },
+      "notification_settings": {
+        "receiver": "smposting-email"
+      }
+    },
+    {
+      "uid": "smposting-callback-deadline",
+      "title": "Post got no result back from n8n",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${PROMETHEUS_UID}",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "sum by (platform) (increase(smposting_posts_deadline_hits_total[15m]))",
+            "instant": true,
+            "range": false,
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "datasourceUid": "__expr__",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            },
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0s",
+      "isPaused": false,
+      "labels": {
+        "team": "smposting",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "{{ $labels.platform }}: a post got no result from n8n before its deadline",
+        "description": "A target was marked FAILED because the n8n workflow never called back. It may still have gone live: check the account before retrying. Then check n8n's executions for the workflow, and that n8n can reach the backend's callback URL.",
+        "__dashboardUid__": "smposting-publishing",
+        "__panelId__": "4"
+      },
+      "notification_settings": {
+        "receiver": "smposting-email"
+      }
+    },
+    {
+      "uid": "smposting-publish-job-crashed",
+      "title": "Publish job crashed",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${LOKI_UID}",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "sum(count_over_time({service_name=\"smposting-backend\"} |= \"publish job crashed\" [15m]))",
+            "instant": true,
+            "range": false,
+            "intervalMs": 1000,
+            "maxDataPoints": 43200,
+            "queryType": "instant"
+          }
+        },
+        {
+          "refId": "C",
+          "datasourceUid": "__expr__",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            },
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0s",
+      "isPaused": false,
+      "labels": {
+        "team": "smposting",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "{{ $values.A.Value }} publish job(s) crashed in the last 15 min",
+        "description": "The publish worker threw outside its own error handling, so the target may be stuck. Find the \"publish job crashed\" line on the Publishing dashboard and open its trace.",
+        "__dashboardUid__": "smposting-publishing",
+        "__panelId__": "11"
+      },
+      "notification_settings": {
+        "receiver": "smposting-email"
+      }
+    },
+    {
+      "uid": "smposting-api-5xx",
+      "title": "API server errors above 2%",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${PROMETHEUS_UID}",
+          "relativeTimeRange": {
+            "from": 600,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "(sum(rate(http_server_request_duration_seconds_count{job=\"smposting-backend\",http_response_status_code=~\"5..\"}[10m])) / sum(rate(http_server_request_duration_seconds_count{job=\"smposting-backend\"}[10m]))) and on () (sum(increase(http_server_request_duration_seconds_count{job=\"smposting-backend\"}[10m])) >= 20)",
+            "instant": true,
+            "range": false,
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "datasourceUid": "__expr__",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            },
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0.02
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0s",
+      "isPaused": false,
+      "labels": {
+        "team": "smposting",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "{{ humanizePercentage $values.A.Value }} of API requests returned 5xx in the last 10 min",
+        "description": "The backend is answering with server errors. The API dashboard's route table shows which route; its slow-requests table and the WARN/ERROR logs link to traces.",
+        "__dashboardUid__": "smposting-api",
+        "__panelId__": "2"
+      },
+      "notification_settings": {
+        "receiver": "smposting-email"
+      }
+    },
+    {
+      "uid": "smposting-spam-pause",
+      "title": "Meta spam block (code 368)",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "datasourceUid": "${PROMETHEUS_UID}",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "model": {
+            "refId": "A",
+            "expr": "sum by (platform) (increase(smposting_limits_pauses_total{reason=\"ABUSE_BLOCK\"}[15m]))",
+            "instant": true,
+            "range": false,
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "datasourceUid": "__expr__",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "datasource": {
+              "type": "__expr__",
+              "uid": "__expr__"
+            },
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0s",
+      "isPaused": false,
+      "labels": {
+        "team": "smposting",
+        "severity": "critical"
+      },
+      "annotations": {
+        "summary": "{{ $labels.platform }}: account paused for 24 h after Meta's spam check (code 368)",
+        "description": "Meta blocked a post as spam. The account is paused for 24 h and its waiting posts were failed (websitePlan.md \u00a713). Look at what was sent just before: duplicate captions, many posts in a short time, or links Meta flags.",
+        "__dashboardUid__": "smposting-publishing",
+        "__panelId__": "5"
+      },
+      "notification_settings": {
+        "receiver": "smposting-email"
+      }
+    }
+  ]
+}

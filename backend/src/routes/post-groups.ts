@@ -15,6 +15,7 @@ import {
   reconnectReason,
   SHORTS_MAX_DURATION_SECONDS,
 } from "../lib/capabilities";
+import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
 import {
   AUTO_DELAY_MS,
@@ -48,6 +49,7 @@ import {
   youtubeOptionsSchema,
 } from "./post-schemas";
 import { workspaceParamsSchema } from "./workspace-params";
+import { limitRefusals } from "../lib/metrics";
 
 // websitePlan.md §10.6. The composer asks for 2+ minutes; 1 here leaves room
 // for the time spent filling in the form after picking.
@@ -450,6 +452,10 @@ function refusalError(
   platform: PostablePlatform,
   now: number,
 ): TargetError {
+  limitRefusals.add(1, {
+    platform,
+    reason: refusal.reason === "DUPLICATE" ? "duplicate" : refusal.cooldown ? "paused" : "no_slot",
+  });
   return {
     connectedAccountId,
     errors: [limitRefusalMessage(refusal, platform, now)],
@@ -643,7 +649,7 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     // picked up by the render reconciler.
     for (const renditionId of toRender) {
       await enqueueRender(renditionId).catch((err: unknown) =>
-        console.error(`couldn't queue render ${renditionId}:`, err),
+        logger.error({ renditionId, err }, "couldn't queue render"),
       );
     }
 
@@ -652,7 +658,7 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
         try {
           await enqueuePublish(post.id, post.attempt, sendAt.get(post.id) ?? scheduledFor);
         } catch (err) {
-          console.error(`couldn't queue post ${post.id}:`, err);
+          logger.error({ postId: post.id, err }, "couldn't queue post");
           await markTargetFailed(
             post.id,
             post.connectedAccount.platform,
@@ -756,7 +762,7 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
         await enqueueRender(renditionId);
       await enqueuePublish(postId, attempt, slotAt);
     } catch (err) {
-      console.error(`couldn't queue retry of post ${postId}:`, err);
+      logger.error({ postId, err }, "couldn't queue retry");
       await markTargetFailed(postId, platform, "Couldn't queue the retry — try again", {
         attempt,
       });

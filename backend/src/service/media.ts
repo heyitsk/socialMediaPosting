@@ -1,8 +1,10 @@
 import type { MediaAsset, MediaRendition } from "@prisma/client";
 import { prisma } from "../db/client";
+import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
 import { type ImageShape, probeImage, probeVideo, type VideoShape } from "../lib/media-probe";
 import { abortMultipartUpload, deleteObject, presignDownload, readObject } from "../lib/s3";
+import { withRootSpan } from "../lib/tracing";
 
 // websitePlan.md §11. Uploaded media is kept this long after the post's send
 // time (not after upload — posts can be scheduled up to 90 days ahead), long
@@ -80,7 +82,7 @@ export async function deleteMediaAsset(
     });
     for (const rendition of renditions) await deleteObject(rendition.key);
   } catch (err) {
-    console.error(`couldn't delete media ${asset.id} from S3:`, err);
+    logger.error({ mediaId: asset.id, err }, "couldn't delete media from S3");
     return false;
   }
   await prisma.$transaction([
@@ -138,11 +140,14 @@ async function cleanMedia(): Promise<void> {
   for (const asset of due) {
     if (await deleteMediaAsset(asset)) deleted++;
   }
-  if (deleted > 0) console.log(`media cleaner: deleted ${deleted} object(s)`);
+  if (deleted > 0) logger.info({ deleted }, "media cleaner: deleted objects");
 }
 
 export function startMediaCleaner(): void {
-  const run = () => cleanMedia().catch((err) => console.error("media cleaner failed:", err));
+  const run = () =>
+    withRootSpan("clean media", cleanMedia).catch((err) =>
+      logger.error({ err }, "media cleaner failed"),
+    );
   run();
   setInterval(run, CLEAN_INTERVAL_MS);
 }

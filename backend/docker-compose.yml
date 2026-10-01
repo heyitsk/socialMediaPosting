@@ -22,7 +22,9 @@ services:
       - smposting_redis_data:/data
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n
+    # Pinned: built-in OpenTelemetry needs 2.19+, and it's still a preview
+    # feature whose settings may change between versions.
+    image: docker.n8n.io/n8nio/n8n:2.41.4
     container_name: smposting-n8n
     restart: unless-stopped
     ports:
@@ -45,8 +47,44 @@ services:
       # n8n blocks {{ $env.* }} access in node expressions by default (security
       # hardening) — required here since our callback nodes read $env.CALLBACK_SECRET.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # Tracing (websitePlan.md §14.5). n8n continues the traceparent the
+      # backend sends with each dispatch, adds a span per node, and passes it
+      # on in the callback request, so one trace covers the whole post.
+      N8N_OTEL_ENABLED: "true"
+      N8N_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
+      N8N_OTEL_EXPORTER_SERVICE_NAME: smposting-n8n
     volumes:
       - n8n_data:/home/node/.n8n
+
+  # Local observability backend (websitePlan.md §14): an OTLP collector feeding
+  # Tempo (traces), Loki (logs) and Prometheus (metrics), with Grafana on top.
+  # Dev only — production sends the same OTLP to Grafana Cloud. Point the
+  # backend at it with OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318.
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.11.10
+    container_name: smposting-otel-lgtm
+    restart: unless-stopped
+    ports:
+      - "3001:3000" # Grafana (admin/admin); host 3000 is often taken
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    # No volume: local telemetry is throwaway and resets with the container.
+
+  # Optional: receives the frontend's Faro telemetry locally and forwards it to
+  # otel-lgtm. Off by default (§14.10 decision 3) —
+  # `docker compose --profile faro up -d alloy`. See alloy/faro.alloy.
+  alloy:
+    image: grafana/alloy:v1.20.1
+    container_name: smposting-alloy
+    profiles: ["faro"]
+    restart: unless-stopped
+    command: ["run", "/etc/alloy/faro.alloy", "--server.http.listen-addr=0.0.0.0:12345"]
+    ports:
+      - "12347:12347" # Faro receiver
+    volumes:
+      - ./alloy/faro.alloy:/etc/alloy/faro.alloy:ro
+    depends_on:
+      - otel-lgtm
 
 volumes:
   smposting_postgres_data:

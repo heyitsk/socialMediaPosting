@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { prisma } from "../../db/client";
 import { beginConnect, connectRedirect, finishConnect } from "../../lib/connect-state";
 import { encrypt } from "../../lib/crypto";
+import { logger } from "../../lib/logger";
 import {
   buildAuthUrl,
   exchangeCodeForToken,
@@ -62,7 +63,7 @@ threadsAuthRoute.get("/callback", async (c) => {
 
     return c.redirect(connectRedirect("connected=threads", ctx.workspaceId));
   } catch (err) {
-    console.error("Threads OAuth callback failed:", err);
+    logger.error({ platform: "threads", err }, "OAuth callback failed");
     return c.redirect(connectRedirect("error=threads_connect_failed", ctx.workspaceId));
   }
 });
