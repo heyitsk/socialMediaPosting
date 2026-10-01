@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Oct 1, 2026):** steps 1-5 built and checked end to end (§14.11.1-§14.11.5), including the n8n leg. Step 6 (dashboards, alerts, Grafana Cloud) not started. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+> **Status (Oct 1, 2026):** steps 1-5 built and checked end to end (§14.11.1-§14.11.5), including the n8n leg. Step 6: dashboards and alert rules built and checked locally (§14.11.6-§14.11.7); Grafana Cloud deferred by Kushagra (Oct 1), so production telemetry stays off until it's set up. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1665,7 +1665,13 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - Replaces the rule group in one `PUT` with `X-Disable-Provenance`, so the rules stay editable in the UI.
 - **Checked locally:** all five loaded and evaluated with health `ok`, state inactive. `/api/v1/eval` on the deadline rule returned one series per platform at 0, so each platform alerts separately.
   - **Local otel-lgtm has no SMTP**, so firing rules there show in Alerting but send no email. Grafana Cloud sends email out of the box.
-- **Next:** Grafana Cloud (stack, OTLP endpoint + token in Secrets Manager, Faro app, import both scripts with Cloud's data-source uids).
+- **Grafana Cloud: deferred (Kushagra, Oct 1).** Everything runs against local otel-lgtm for now. Nothing in the app needs to change when it's picked up:
+  1. Create a stack and an access policy token (metrics/logs/traces write).
+  2. Store the token in AWS Secrets Manager and resolve it at runtime into `OTEL_EXPORTER_OTLP_HEADERS` (and n8n's `N8N_OTEL_EXPORTER_OTLP_HEADERS_FILE`).
+  3. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to the stack's OTLP endpoint, and `VITE_FARO_URL` to a Frontend Observability app's collector URL.
+  4. Run `import-dashboards.sh` and `import-alerts.sh` with `GRAFANA_URL`/`GRAFANA_TOKEN` and Cloud's data-source uids.
+  5. Set up the Loki ↔ Tempo trace links by hand.
+  6. Fire a test alert to confirm email delivery.
 
 ### 14.12 Risks
 
@@ -1716,3 +1722,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-10-01 | §14 step 3 exit check passed: n8n upgraded to 2.41.4 (backup first), and a real Facebook post produced one trace from the browser through the backend, BullMQ, the `facebook-poster` workflow and its nodes, and back via the n8n callback, with the backend log lines linked to it.*
 *Updated: 2026-10-01 | §14 step 6 part 1 (§14.11.6): four Grafana dashboards (publishing, API, queues and media, frontend) as portable JSON in `observability/dashboards/` with an import script; publishing counters seeded at 0 so a first post is counted. Every panel query checked against local Grafana.*
 *Updated: 2026-10-01 | §14 step 6 part 2 (§14.11.7): five Grafana-managed alert rules (platform failure rate, n8n no-callback, publish job crash, API 5xx, Meta spam block) in `observability/alerts/rules.json` with an import script that also creates the email contact point; pause counters seeded at 0. All rules healthy in local Grafana.*
+*Updated: 2026-10-01 | §14 Grafana Cloud wiring deferred by Kushagra; the remaining setup steps are listed in §14.11.7. Steps 1-5 and the local dashboards and alerts go to review as one PR.*
