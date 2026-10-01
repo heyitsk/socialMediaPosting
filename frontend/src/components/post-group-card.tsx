@@ -16,6 +16,7 @@ import {
   STATUS_LABELS,
   STATUS_VARIANT,
 } from "@/lib/posting";
+import { formatWhen } from "@/lib/posting-limits";
 
 // One post group: the aggregate status up top, then one row per target
 // account with its own status, error and Retry. Used by the composer's
@@ -28,6 +29,8 @@ export function PostGroupCard({ group, workspaceId }: { group: PostGroup; worksp
   const onUpdated = (updated: PostGroup) => {
     queryClient.setQueryData(["post-group", workspaceId, updated.id], updated);
     queryClient.invalidateQueries({ queryKey: ["post-groups", workspaceId] });
+    // Retry books a slot and cancel frees one.
+    queryClient.invalidateQueries({ queryKey: ["posting-limits", workspaceId] });
   };
 
   const cancel = useMutation({
@@ -102,6 +105,7 @@ export function PostGroupCard({ group, workspaceId }: { group: PostGroup; worksp
               key={target.id}
               target={target}
               sharedCaption={group.caption}
+              scheduledFor={group.scheduledFor}
               retrying={retry.isPending && retry.variables === target.id}
               onRetry={() => retry.mutate(target.id)}
             />
@@ -115,15 +119,27 @@ export function PostGroupCard({ group, workspaceId }: { group: PostGroup; worksp
 function TargetRow({
   target,
   sharedCaption,
+  scheduledFor,
   retrying,
   onRetry,
 }: {
   target: PostTarget;
   sharedCaption: string;
+  scheduledFor: string | null;
   retrying: boolean;
   onRetry: () => void;
 }) {
   const error = latestError(target);
+  // Booked later than asked because the account needed a gap after its last
+  // post (websitePlan.md §13) — a "post now", a retry, or a schedule that
+  // got nudged.
+  const waitingFor =
+    (target.status === "SCHEDULED" || target.status === "PROCESSING") &&
+    target.sendAt &&
+    Date.parse(target.sendAt) > Date.now() &&
+    Date.parse(target.sendAt) > (scheduledFor ? Date.parse(scheduledFor) : 0) + 30_000
+      ? target.sendAt
+      : null;
   return (
     <li className="flex flex-col gap-3 px-5 py-4 transition-colors hover:bg-muted/20 sm:px-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -151,10 +167,18 @@ function TargetRow({
               Retry limit reached — create the post again
             </span>
           )}
-          <Badge variant={STATUS_VARIANT[target.status]}>{STATUS_LABELS[target.status]}</Badge>
+          {target.preparingMedia && target.status === "PROCESSING" ? (
+            <Badge variant="secondary">Preparing media…</Badge>
+          ) : (
+            <Badge variant={STATUS_VARIANT[target.status]}>{STATUS_LABELS[target.status]}</Badge>
+          )}
         </div>
       </div>
-      {(target.youtubeTitle || target.caption !== sharedCaption || error || target.attempt > 1) && (
+      {(target.youtubeTitle ||
+        target.caption !== sharedCaption ||
+        error ||
+        waitingFor ||
+        target.attempt > 1) && (
         <div className="space-y-2 sm:pl-12">
           {target.youtubeTitle && (
             <p className="font-medium text-foreground">{target.youtubeTitle}</p>
@@ -173,6 +197,11 @@ function TargetRow({
                 {error}
               </p>
             </div>
+          )}
+          {waitingFor && (
+            <p className="text-xs text-muted-foreground">
+              Waiting for its posting limit — goes out at {formatWhen(waitingFor)}
+            </p>
           )}
           {target.attempt > 1 && (
             <p className="text-xs text-muted-foreground">Attempt {target.attempt}</p>

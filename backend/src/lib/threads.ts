@@ -1,4 +1,5 @@
 import { env } from "./env";
+import { tracedFetch } from "./tracing";
 
 // Threads API with Threads Login — a third distinct OAuth product from
 // Facebook Login (facebook.ts) and Instagram API with Instagram Login
@@ -34,7 +35,7 @@ export async function exchangeCodeForToken(code: string): Promise<ShortLivedToke
     code,
   });
 
-  const response = await fetch("https://graph.threads.net/oauth/access_token", {
+  const response = await tracedFetch("https://graph.threads.net/oauth/access_token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
@@ -56,7 +57,7 @@ export async function exchangeForLongLivedToken(shortLivedToken: string): Promis
   url.searchParams.set("client_secret", env.THREADS_APP_SECRET);
   url.searchParams.set("access_token", shortLivedToken);
 
-  const response = await fetch(url);
+  const response = await tracedFetch(url);
   if (!response.ok) {
     throw new Error(`Threads long-lived token exchange failed (${response.status}): ${await response.text()}`);
   }
@@ -73,7 +74,7 @@ export async function refreshLongLivedToken(currentToken: string): Promise<LongL
   url.searchParams.set("grant_type", "th_refresh_token");
   url.searchParams.set("access_token", currentToken);
 
-  const response = await fetch(url);
+  const response = await tracedFetch(url);
   if (!response.ok) {
     throw new Error(`Threads token refresh failed (${response.status}): ${await response.text()}`);
   }
@@ -90,7 +91,7 @@ export async function fetchProfile(longLivedToken: string): Promise<ThreadsProfi
   url.searchParams.set("fields", "id,username");
   url.searchParams.set("access_token", longLivedToken);
 
-  const response = await fetch(url);
+  const response = await tracedFetch(url);
   if (!response.ok) {
     throw new Error(`Threads profile fetch failed (${response.status}): ${await response.text()}`);
   }

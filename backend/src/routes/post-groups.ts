@@ -10,22 +10,38 @@ import {
   INSTAGRAM_MAX_HASHTAGS,
   isPostablePlatform,
   mediaTypesFor,
+  PLATFORM_NAMES,
   type PostablePlatform,
+  ratioWithin,
   reconnectReason,
   SHORTS_MAX_DURATION_SECONDS,
+  VIDEO_MAX_BYTES,
 } from "../lib/capabilities";
+import { logger } from "../lib/logger";
 import { isVideoType } from "../lib/media-files";
-import { probeVideo } from "../lib/media-probe";
-import { presignDownload } from "../lib/s3";
-import type { WorkspaceEnv } from "../middleware/auth";
-import { enqueuePublish, removePublishJob } from "../queue/publish-queue";
-import { mediaExpiry } from "../service/media";
 import {
+  AUTO_DELAY_MS,
+  type LimitRefusal,
+  limitRefusalMessage,
+  lockOrderKey,
+  targetContentHash,
+} from "../lib/posting-limits";
+import { renditionKey } from "../lib/render";
+import type { WorkspaceEnv } from "../middleware/auth";
+import { rateLimitByUser } from "../middleware/rate-limit";
+import { enqueuePublish, removePublishJob } from "../queue/publish-queue";
+import { enqueueRender } from "../queue/render-queue";
+import { mediaExpiry, probeMediaAsset, resetFailedRenditions } from "../service/media";
+import { resolveTargetMedia, type TargetMedia } from "../service/media-fits";
+import {
+  aggregateStatus,
+  canRetry,
   MAX_ATTEMPTS,
   markTargetCancelled,
   markTargetFailed,
   prepareRetry,
 } from "../service/post-groups";
+import { releaseSlot, reserveSlot } from "../service/posting-limits";
 import {
   contentKindSchema,
   mediaTypeSchema,
@@ -35,6 +51,7 @@ import {
   youtubeOptionsSchema,
 } from "./post-schemas";
 import { workspaceParamsSchema } from "./workspace-params";
+import { limitRefusals } from "../lib/metrics";
 
 // websitePlan.md §10.6. The composer asks for 2+ minutes; 1 here leaves room
 // for the time spent filling in the form after picking.
@@ -42,8 +59,6 @@ const MIN_SCHEDULE_LEAD_MS = 60_000;
 const MAX_SCHEDULE_AHEAD_MS = 90 * 24 * 60 * 60_000;
 const MAX_TARGETS = 25;
 const MAX_MEDIA = 20;
-// Only for ffprobe's Shorts check, which reads the file right away.
-const PROBE_URL_TTL_SECONDS = 15 * 60;
 
 const targetInputSchema = z.object({
   connectedAccountId: z.string(),
@@ -54,6 +69,21 @@ const targetInputSchema = z.object({
   mediaType: mediaTypeSchema.optional(),
   // Required for YouTube targets, ignored otherwise.
   youtubeOptions: youtubeOptionsSchema.optional(),
+  // Crop or pad files for this target (websitePlan.md §12). Files without an
+  // entry are sent as uploaded (Instagram: converted to JPEG if needed).
+  mediaFits: z
+    .array(
+      z.object({
+        mediaAssetId: z.string(),
+        mode: z.enum(["CROP", "PAD"]),
+        // Output width / height — one of the surface's presets.
+        ratio: z.number().positive(),
+        // CROP only: the region kept, as fractions (0-1) of the file as displayed.
+        rect: z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() }).optional(),
+      }),
+    )
+    .max(MAX_MEDIA)
+    .default([]),
 });
 
 const createPostGroupSchema = z
@@ -78,9 +108,27 @@ const validationErrorSchema = z
     // Problems with the post as a whole (media, schedule time).
     errors: z.array(z.string()),
     // Problems with individual targets — the composer offers to deselect these.
-    targets: z.array(z.object({ connectedAccountId: z.string(), errors: z.array(z.string()) })),
+    targets: z.array(
+      z.object({
+        connectedAccountId: z.string(),
+        errors: z.array(z.string()),
+        // Set when the account's posting limit is the problem: the earliest
+        // time it can take this post, for a "Schedule for then" button.
+        nextFreeAt: z.iso.datetime().nullable().optional(),
+      }),
+    ),
   })
   .openapi("PostGroupValidationError");
+
+type TargetError = z.infer<typeof validationErrorSchema>["targets"][number];
+
+// Every post is limited per platform account anyway; this stops one user
+// flooding the queue and n8n with post groups.
+const CREATE_LIMIT_PER_HOUR = 30;
+
+// Booking may wait on other posts to the same accounts, so the create
+// transaction gets longer than Prisma's 5 s default.
+const CREATE_TRANSACTION = { timeout: 15_000 };
 
 const groupParamsSchema = workspaceParamsSchema.extend({ groupId: z.string() });
 
@@ -89,6 +137,7 @@ const createPostGroup = createRoute({
   path: "/",
   tags: ["Posts"],
   summary: "Post to one or more connected accounts, now or scheduled",
+  middleware: [rateLimitByUser("post-groups", CREATE_LIMIT_PER_HOUR, 60 * 60)] as const,
   request: {
     params: workspaceParamsSchema,
     body: { content: { "application/json": { schema: createPostGroupSchema } } },
@@ -103,9 +152,11 @@ const createPostGroup = createRoute({
       content: { "application/json": { schema: postGroupSchema } },
     },
     400: {
-      description: "Validation failed — nothing was created",
+      description:
+        "Validation failed, or an account's posting limit can't fit it within an hour — nothing was created",
       content: { "application/json": { schema: validationErrorSchema } },
     },
+    429: { description: `More than ${CREATE_LIMIT_PER_HOUR} posts created in an hour` },
   },
 });
 
@@ -166,7 +217,10 @@ const retryTarget = createRoute({
       content: { "application/json": { schema: postGroupSchema } },
     },
     404: { description: "Not found" },
-    409: { description: "Target isn't FAILED" },
+    409: {
+      description:
+        "Target isn't FAILED, is out of attempts, or its account's posting limit or pause doesn't allow it within an hour",
+    },
   },
 });
 
@@ -189,6 +243,7 @@ interface ResolvedTarget {
   account: ConnectedAccount & { platform: PostablePlatform };
   mediaType: MediaType;
   caption: string;
+  media: TargetMedia;
 }
 
 // All-or-nothing (websitePlan.md §10.1 decision 3): every problem is collected
@@ -243,7 +298,6 @@ async function validate(workspaceId: string, body: CreateBody) {
       );
     }
   }
-  const nonJpeg = media.filter((asset) => !wantVideo && asset.contentType !== "image/jpeg");
 
   // The same account twice in one request is posted to once.
   const inputs = [
@@ -317,37 +371,60 @@ async function validate(workspaceId: string, body: CreateBody) {
         addTargetError(id, `${platform} carousels take ${min}-${max} images`);
       }
     }
-    // Instagram's content publishing API takes JPEG images only.
-    if (platform === "INSTAGRAM" && nonJpeg.length > 0) {
-      addTargetError(
-        id,
-        `Instagram only accepts JPEG images — ${nonJpeg.map((asset) => asset.originalFilename).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
-      );
+    // Checked on the uploaded file; a crop or pad of it is rendered after
+    // create and is rarely larger.
+    const maxVideoBytes = VIDEO_MAX_BYTES[platform];
+    if (wantVideo && maxVideoBytes) {
+      for (const asset of media) {
+        if (asset.sizeBytes > maxVideoBytes) {
+          addTargetError(
+            id,
+            `${PLATFORM_NAMES[platform]} doesn't support videos over ${maxVideoBytes / 1024 / 1024} MB — ${asset.originalFilename} is ${(asset.sizeBytes / 1024 / 1024).toFixed(1)} MB`,
+          );
+        }
+      }
     }
+    // Crops, pads, Instagram's JPEG conversion, and shapes the API refuses.
+    const targetMedia = resolveTargetMedia(platform, mediaType, media, input.mediaFits);
+    for (const error of targetMedia.errors) addTargetError(id, error);
     if (platform === "YOUTUBE" && !input.youtubeOptions)
       addTargetError(id, "YouTube needs a video title");
 
-    resolved.push({ input, account: account as ResolvedTarget["account"], mediaType, caption });
+    resolved.push({
+      input,
+      account: account as ResolvedTarget["account"],
+      mediaType,
+      caption,
+      media: targetMedia,
+    });
   }
 
-  // Network check last, and only on otherwise-valid input.
+  // Uses the dimensions stored at upload. Only videos uploaded before those
+  // were stored need a network probe — last, and only on otherwise-valid input.
   const shorts = resolved.filter((target) => target.mediaType === "SHORTS");
   const [video] = media;
   if (errors.length === 0 && shorts.length > 0 && video) {
     try {
-      const shape = await probeVideo(await presignDownload(video.key, PROBE_URL_TTL_SECONDS));
-      const problems: string[] = [];
-      if (shape.height < shape.width)
-        problems.push(
-          `it's landscape (${shape.width}x${shape.height}) — Shorts must be vertical or square`,
-        );
-      if (shape.durationSeconds > SHORTS_MAX_DURATION_SECONDS) {
-        problems.push(
-          `it's ${Math.round(shape.durationSeconds)}s long — Shorts can be at most ${SHORTS_MAX_DURATION_SECONDS}s`,
-        );
-      }
-      for (const problem of problems) {
-        for (const target of shorts)
+      const shape =
+        video.width && video.height && video.durationSeconds != null
+          ? { width: video.width, height: video.height, durationSeconds: video.durationSeconds }
+          : await probeMediaAsset(video);
+      if (shape.durationSeconds == null) throw new Error("Couldn't read the video's duration");
+      for (const target of shorts) {
+        const problems: string[] = [];
+        // A landscape video cropped or padded to 9:16 for this target is fine.
+        const ratio = target.media.ratios.get(video.id) ?? shape.width / shape.height;
+        if (!ratioWithin(ratio, { min: 0, max: 1 })) {
+          problems.push(
+            `it's landscape (${shape.width}x${shape.height}) — Shorts must be vertical or square. Crop or pad it for YouTube`,
+          );
+        }
+        if (shape.durationSeconds > SHORTS_MAX_DURATION_SECONDS) {
+          problems.push(
+            `it's ${Math.round(shape.durationSeconds)}s long — Shorts can be at most ${SHORTS_MAX_DURATION_SECONDS}s`,
+          );
+        }
+        for (const problem of problems)
           addTargetError(target.account.id, `Can't post as a Short: ${problem}`);
       }
     } catch (err) {
@@ -375,6 +452,32 @@ async function validate(workspaceId: string, body: CreateBody) {
 // Another post claimed one of the files between validation and create.
 class MediaTakenError extends Error {}
 
+// Some targets can't be booked (duplicate, or no free slot within the
+// allowance). Thrown to roll the whole create back — all-or-nothing, like
+// validation.
+class PostingLimitError extends Error {
+  constructor(readonly targets: TargetError[]) {
+    super("posting limit");
+  }
+}
+
+function refusalError(
+  connectedAccountId: string,
+  refusal: LimitRefusal,
+  platform: PostablePlatform,
+  now: number,
+): TargetError {
+  limitRefusals.add(1, {
+    platform,
+    reason: refusal.reason === "DUPLICATE" ? "duplicate" : refusal.cooldown ? "paused" : "no_slot",
+  });
+  return {
+    connectedAccountId,
+    errors: [limitRefusalMessage(refusal, platform, now)],
+    nextFreeAt: refusal.reason === "NO_SLOT" ? (refusal.nextFreeAt?.toISOString() ?? null) : null,
+  };
+}
+
 export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
   .openapi(createPostGroup, async (c) => {
     const body = c.req.valid("json");
@@ -398,8 +501,16 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     }
 
     let group: Prisma.PostGroupGetPayload<{ include: typeof postGroupInclude }>;
+    // Renditions to render once the transaction has committed.
+    let toRender: string[] = [];
+    // When the limiter booked each post to go out.
+    let sendAt = new Map<string, Date>();
+    const now = Date.now();
+    const earliest = scheduledFor ?? new Date(now);
     try {
       group = await prisma.$transaction(async (tx) => {
+        toRender = [];
+        sendAt = new Map();
         const created = await tx.postGroup.create({
           data: {
             workspaceId,
@@ -435,9 +546,96 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
           });
           if (count !== 1) throw new MediaTakenError();
         }
+
+        // Targets asking for the same crop of a file share one rendition.
+        const postIdByAccount = new Map(
+          created.posts.map((post) => [post.connectedAccountId, post.id]),
+        );
+        for (const target of resolved) {
+          const postId = postIdByAccount.get(target.account.id);
+          if (!postId) continue;
+          for (const { asset, spec } of target.media.renditions) {
+            const rendition = await tx.mediaRendition.upsert({
+              where: {
+                mediaAssetId_specHash: { mediaAssetId: asset.id, specHash: spec.specHash },
+              },
+              create: {
+                mediaAssetId: asset.id,
+                specHash: spec.specHash,
+                mode: spec.mode,
+                cropX: spec.crop?.x,
+                cropY: spec.crop?.y,
+                cropW: spec.crop?.w,
+                cropH: spec.crop?.h,
+                width: spec.width,
+                height: spec.height,
+                contentType: spec.contentType,
+                key: renditionKey(asset.key, spec.specHash, spec.contentType),
+              },
+              update: {},
+              select: { id: true, status: true },
+            });
+            await tx.postMediaRendition.create({
+              data: { postId, mediaAssetId: asset.id, renditionId: rendition.id },
+            });
+            if (rendition.status === "PENDING" && !toRender.includes(rendition.id))
+              toRender.push(rendition.id);
+          }
+        }
+
+        // Book each target with the posting limiter (websitePlan.md §13.6),
+        // in lock order so two posts sharing accounts can't deadlock. A
+        // target pushed back from "now" waits as SCHEDULED, so it shows as
+        // waiting and can be cancelled like a scheduled one.
+        const refused: TargetError[] = [];
+        const byLockOrder = [...resolved].sort((a, b) => {
+          const keyA = lockOrderKey(a.account.platform, a.account.platformAccountId);
+          const keyB = lockOrderKey(b.account.platform, b.account.platformAccountId);
+          return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+        });
+        for (const target of byLockOrder) {
+          const postId = postIdByAccount.get(target.account.id);
+          if (!postId) continue;
+          const booking = await reserveSlot(tx, {
+            platform: target.account.platform,
+            platformAccountId: target.account.platformAccountId,
+            postId,
+            attempt: 1,
+            mediaType: target.mediaType,
+            mediaCount: media.length,
+            contentHash: targetContentHash(target.caption, media, []),
+            earliest,
+            latest: new Date(earliest.getTime() + AUTO_DELAY_MS),
+          });
+          if (!booking.ok) {
+            refused.push(refusalError(target.account.id, booking, target.account.platform, now));
+            continue;
+          }
+          sendAt.set(postId, booking.slotAt);
+          if (!scheduledFor && booking.slotAt > earliest) {
+            await tx.post.update({ where: { id: postId }, data: { status: "SCHEDULED" } });
+          }
+        }
+        if (refused.length > 0) throw new PostingLimitError(refused);
+        if (!scheduledFor && [...sendAt.values()].some((at) => at > earliest)) {
+          const targets = await tx.post.findMany({
+            where: { groupId: created.id },
+            select: { status: true },
+          });
+          await tx.postGroup.update({
+            where: { id: created.id },
+            data: { status: aggregateStatus(targets.map((target) => target.status)) },
+          });
+        }
         return created;
-      });
+      }, CREATE_TRANSACTION);
     } catch (err) {
+      if (err instanceof PostingLimitError) {
+        return c.json(
+          { message: "Some of this post can't be sent", errors: [], targets: err.targets },
+          400,
+        );
+      }
       if (err instanceof MediaTakenError) {
         return c.json(
           {
@@ -461,12 +659,21 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
       throw err;
     }
 
+    // Rendered now, not at send time, so scheduled posts are ready early and
+    // a failure shows up while the user is still here. A lost enqueue is
+    // picked up by the render reconciler.
+    for (const renditionId of toRender) {
+      await enqueueRender(renditionId).catch((err: unknown) =>
+        logger.error({ renditionId, err }, "couldn't queue render"),
+      );
+    }
+
     await Promise.all(
       group.posts.map(async (post) => {
         try {
-          await enqueuePublish(post.id, post.attempt, scheduledFor);
+          await enqueuePublish(post.id, post.attempt, sendAt.get(post.id) ?? scheduledFor);
         } catch (err) {
-          console.error(`couldn't queue post ${post.id}:`, err);
+          logger.error({ postId: post.id, err }, "couldn't queue post");
           await markTargetFailed(
             post.id,
             post.connectedAccount.platform,
@@ -475,6 +682,7 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
               attempt: post.attempt,
             },
           );
+          await releaseSlot(prisma, post.id, post.attempt);
         }
       }),
     );
@@ -510,7 +718,8 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
     await prisma.postGroup.update({ where: { id: groupId }, data: { cancelledAt: new Date() } });
     for (const post of pending) {
       await removePublishJob(post.id, post.attempt);
-      await markTargetCancelled(post.id);
+      // Never sent, so it stops counting against the account's limit.
+      if (await markTargetCancelled(post.id)) await releaseSlot(prisma, post.id, post.attempt);
     }
     return c.json(serializePostGroup(await findGroup(c.var.workspaceId, groupId)), 200);
   })
@@ -522,25 +731,57 @@ export const postGroupsRoute = new OpenAPIHono<WorkspaceEnv>()
       throw new HTTPException(404, { message: "Post not found" });
     }
 
-    const attempt = await prepareRetry(postId);
-    if (attempt === "NOT_FAILED") {
-      throw new HTTPException(409, { message: "Only failed posts can be retried" });
-    }
-    if (attempt === "LIMIT_REACHED") {
-      throw new HTTPException(409, {
+    const notFailed = () => new HTTPException(409, { message: "Only failed posts can be retried" });
+    const outOfAttempts = () =>
+      new HTTPException(409, {
         message: `This post was already tried ${MAX_ATTEMPTS} times — create it again instead`,
       });
+    if (post.status !== "FAILED") throw notFailed();
+    if (!canRetry(post)) throw outOfAttempts();
+
+    // A retry is paced like any other send: booked first, refused if the
+    // account is paused or has no slot within the hour (websitePlan.md §13.6).
+    const { platform, platformAccountId } = post.connectedAccount;
+    const nextAttempt = post.attempt + 1;
+    let slotAt: Date | null = null;
+    if (isPostablePlatform(platform)) {
+      const now = Date.now();
+      const booking = await prisma.$transaction((tx) =>
+        reserveSlot(tx, {
+          platform,
+          platformAccountId,
+          postId,
+          attempt: nextAttempt,
+          mediaType: post.mediaType,
+          mediaCount: group.media.length,
+          contentHash: targetContentHash(post.caption, group.media, post.mediaUrls),
+          earliest: new Date(now),
+          latest: new Date(now + AUTO_DELAY_MS),
+        }),
+      );
+      if (!booking.ok) {
+        throw new HTTPException(409, { message: limitRefusalMessage(booking, platform, now) });
+      }
+      slotAt = booking.slotAt;
+    }
+
+    const attempt = await prepareRetry(postId);
+    if (typeof attempt !== "number") {
+      // Another request got there first, or the post changed meanwhile.
+      await releaseSlot(prisma, postId, nextAttempt);
+      throw attempt === "NOT_FAILED" ? notFailed() : outOfAttempts();
     }
     try {
-      await enqueuePublish(postId, attempt);
+      // A render that failed gets another go along with the post.
+      for (const renditionId of await resetFailedRenditions(postId))
+        await enqueueRender(renditionId);
+      await enqueuePublish(postId, attempt, slotAt);
     } catch (err) {
-      console.error(`couldn't queue retry of post ${postId}:`, err);
-      await markTargetFailed(
-        postId,
-        post.connectedAccount.platform,
-        "Couldn't queue the retry — try again",
-        { attempt },
-      );
+      logger.error({ postId, err }, "couldn't queue retry");
+      await markTargetFailed(postId, platform, "Couldn't queue the retry — try again", {
+        attempt,
+      });
+      await releaseSlot(prisma, postId, attempt);
     }
     return c.json(serializePostGroup(await findGroup(c.var.workspaceId, groupId)), 200);
   });

@@ -4,6 +4,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { upsertUserFromGoogle } from "../db/users";
 import { env } from "../lib/env";
 import { buildLoginUrl, exchangeLoginCode, randomToken, verifyIdToken } from "../lib/google-login";
+import { logger } from "../lib/logger";
 import { redis } from "../lib/redis";
 import { createSession, destroySession } from "../lib/session";
 
@@ -106,7 +107,10 @@ loginRoute.get("/google/callback", async (c) => {
     return c.redirect(`${env.FRONTEND_URL}${record.next}`);
   } catch (err) {
     // Message only — never log the code, state or id_token.
-    console.error("Google login callback failed:", err instanceof Error ? err.message : err);
+    logger.error(
+      { reason: err instanceof Error ? err.message : String(err) },
+      "Google login callback failed",
+    );
     return c.redirect(loginError("login_failed"));
   }
 });

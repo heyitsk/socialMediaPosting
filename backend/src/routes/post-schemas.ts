@@ -6,6 +6,7 @@ import type {
   Platform,
   PostStatus,
   Prisma,
+  RenditionStatus,
 } from "@prisma/client";
 import { friendlyPlatformError } from "../lib/platform-error";
 import { canRetry } from "../service/post-groups";
@@ -111,6 +112,12 @@ const postTargetSchema = z
     attempt: z.number(),
     // FAILED and under the attempt limit.
     canRetry: z.boolean(),
+    // Its cropped/padded media is still rendering (websitePlan.md §12.5).
+    preparingMedia: z.boolean(),
+    // When the posting limiter booked this attempt to go out — later than
+    // asked when the account needed a gap (websitePlan.md §13). Null for
+    // posts from before the limiter.
+    sendAt: z.iso.datetime().nullable(),
     // YouTube targets only — the caption is the video's description, so the
     // title is what History leads with instead.
     youtubeTitle: z.string().nullable(),
@@ -156,13 +163,21 @@ export const postGroupInclude = {
       contentType: true,
       sizeBytes: true,
       status: true,
+      // For the duplicate check on retry (lib/posting-limits.ts).
+      width: true,
+      height: true,
+      durationSeconds: true,
     },
   },
   posts: {
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     include: {
-      connectedAccount: { select: { platform: true, accountName: true } },
+      connectedAccount: {
+        select: { platform: true, accountName: true, platformAccountId: true },
+      },
       logs: { orderBy: { executedAt: "asc" } },
+      renditions: { select: { rendition: { select: { status: true } } } },
+      dispatchSlots: { where: { releasedAt: null }, select: { attempt: true, slotAt: true } },
     },
   },
 } satisfies Prisma.PostGroupInclude;
@@ -193,6 +208,8 @@ interface PostGroupRow {
     attempt: number;
     platformOptions: unknown;
     connectedAccount: { platform: Platform; accountName: string };
+    renditions: { rendition: { status: RenditionStatus } }[];
+    dispatchSlots: { attempt: number; slotAt: Date }[];
     logs: {
       status: "SUCCESS" | "FAILED";
       platformPostId: string | null;
@@ -230,6 +247,12 @@ export function serializePostGroup(group: PostGroupRow): z.infer<typeof postGrou
       status: post.status,
       attempt: post.attempt,
       canRetry: canRetry(post),
+      preparingMedia:
+        (post.status === "PROCESSING" || post.status === "SCHEDULED") &&
+        post.renditions.some((link) => link.rendition.status === "PENDING"),
+      sendAt:
+        post.dispatchSlots.find((slot) => slot.attempt === post.attempt)?.slotAt.toISOString() ??
+        null,
       youtubeTitle: (post.platformOptions as { title?: string } | null)?.title ?? null,
       logs: post.logs.map((log) => ({
         status: log.status,

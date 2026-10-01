@@ -8,6 +8,10 @@ export const API_URL = import.meta.env.VITE_API_URL ?? "";
 export const api = createClient<paths>({
   baseUrl: API_URL,
   credentials: "include",
+  // Looked up per call: openapi-fetch otherwise keeps the fetch that existed
+  // when this module loaded, and Faro's tracing (lib/telemetry.ts) patches
+  // fetch later — API calls would get no span and no traceparent.
+  fetch: (request) => globalThis.fetch(request),
 });
 
 // The backend's error body is `{ error: string }` (error-handler.ts) — its

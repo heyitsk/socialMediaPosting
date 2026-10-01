@@ -828,7 +828,7 @@ export interface paths {
                         "application/json": components["schemas"]["PostGroup"];
                     };
                 };
-                /** @description Validation failed — nothing was created */
+                /** @description Validation failed, or an account's posting limit can't fit it within an hour — nothing was created */
                 400: {
                     headers: {
                         [name: string]: unknown;
@@ -836,6 +836,13 @@ export interface paths {
                     content: {
                         "application/json": components["schemas"]["PostGroupValidationError"];
                     };
+                };
+                /** @description More than 30 posts created in an hour */
+                429: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
                 };
             };
         };
@@ -983,7 +990,7 @@ export interface paths {
                     };
                     content?: never;
                 };
-                /** @description Target isn't FAILED */
+                /** @description Target isn't FAILED, is out of attempts, or its account's posting limit or pause doesn't allow it within an hour */
                 409: {
                     headers: {
                         [name: string]: unknown;
@@ -992,6 +999,44 @@ export interface paths {
                 };
             };
         };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspaceId}/posting-limits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Each connected account's posting limit usage and pause (websitePlan.md §13.8) */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    workspaceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description One entry per connected account on a platform we post to */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["PostingLimit"][];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1248,14 +1293,38 @@ export interface components {
                     min: number;
                     max: number;
                 };
+                videoMaxBytes?: number;
                 mediaTypes: {
                     /** @enum {string} */
                     kind: "TEXT" | "IMAGE" | "CAROUSEL" | "VIDEO" | "STORY";
                     mediaTypes: ("TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS")[];
                 }[];
             }[];
+            surfaces: components["schemas"]["SurfaceFit"][];
             instagramMaxHashtags: number;
             shortsMaxDurationSeconds: number;
+        };
+        SurfaceFit: {
+            /** @enum {string} */
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+            /** @enum {string} */
+            mediaType: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
+            display: {
+                min: number;
+                max: number;
+            };
+            /** @enum {string} */
+            beyond: "CROP" | "LETTERBOX";
+            accepted?: {
+                min: number;
+                max: number;
+            };
+            safeZone?: {
+                top: number;
+                bottom: number;
+            };
+            carouselUsesFirstRatio?: boolean;
+            presets: number[];
         };
         WorkspaceBody: {
             name: string;
@@ -1340,6 +1409,9 @@ export interface components {
             status: "DRAFT" | "SCHEDULED" | "PROCESSING" | "PUBLISHED" | "PARTIAL_FAILURE" | "FAILED" | "CANCELLED";
             attempt: number;
             canRetry: boolean;
+            preparingMedia: boolean;
+            /** Format: date-time */
+            sendAt: string | null;
             youtubeTitle: string | null;
             logs: components["schemas"]["PostLog"][];
         };
@@ -1357,6 +1429,8 @@ export interface components {
             targets: {
                 connectedAccountId: string;
                 errors: string[];
+                /** Format: date-time */
+                nextFreeAt?: string | null;
             }[];
         };
         CreatePostGroupRequest: {
@@ -1374,6 +1448,19 @@ export interface components {
                 /** @enum {string} */
                 mediaType?: "TEXT" | "IMAGE" | "VIDEO" | "CAROUSEL" | "REELS" | "STORIES" | "SHORTS";
                 youtubeOptions?: components["schemas"]["YouTubeOptions"];
+                /** @default [] */
+                mediaFits: {
+                    mediaAssetId: string;
+                    /** @enum {string} */
+                    mode: "CROP" | "PAD";
+                    ratio: number;
+                    rect?: {
+                        x: number;
+                        y: number;
+                        w: number;
+                        h: number;
+                    };
+                }[];
             }[];
         };
         YouTubeOptions: {
@@ -1393,6 +1480,29 @@ export interface components {
             /** @default [] */
             tags: string[];
         };
+        PostingLimit: {
+            connectedAccountId: string;
+            /** @enum {string} */
+            platform: "FACEBOOK" | "INSTAGRAM" | "THREADS" | "YOUTUBE" | "PINTEREST" | "LINKEDIN";
+            /** @enum {string} */
+            unit: "posts" | "calls";
+            used: number;
+            upcoming: number;
+            cap: number;
+            /** @enum {string} */
+            window: "ROLLING_24H" | "UTC_DAY" | "PACIFIC_DAY";
+            /** Format: date-time */
+            resetsAt: string | null;
+            /** Format: date-time */
+            nextFreeAt: string | null;
+            cooldown: {
+                /** Format: date-time */
+                until: string;
+                /** @enum {string} */
+                reason: "ABUSE_BLOCK" | "RATE_LIMIT" | "QUOTA";
+                message: string;
+            } | null;
+        };
         MediaAsset: {
             id: string;
             filename: string;
@@ -1400,6 +1510,9 @@ export interface components {
             sizeBytes: number;
             /** @enum {string} */
             status: "PENDING" | "READY" | "DELETED";
+            width: number | null;
+            height: number | null;
+            durationSeconds: number | null;
         };
         MediaUploadInstructions: {
             /** @enum {string} */

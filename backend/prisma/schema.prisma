@@ -88,6 +88,26 @@ enum PostLogStatus {
   FAILED
 }
 
+// How a rendition is made from its master. websitePlan.md §12.
+enum CooldownReason {
+  ABUSE_BLOCK // Meta code 368 "spam prevention"
+  RATE_LIMIT // Throttled (429, Meta 4/17/32/613), usually short
+  QUOTA // A daily or rolling posting quota is used up
+}
+
+enum RenditionMode {
+  CROP // Keep a region of the master, scaled to the output size
+  PAD // Whole master centred on a blurred, zoomed copy of itself
+  CONVERT // Same picture re-encoded as JPEG (Instagram takes JPEG only)
+}
+
+enum RenditionStatus {
+  PENDING // Queued for the render worker
+  READY
+  FAILED
+  DELETED // Object removed from S3 along with its master
+}
+
 model User {
   id          String    @id @default(uuid())
   email       String    @unique
@@ -270,7 +290,11 @@ model Post {
   attempt            Int              @default(1)
   createdAt          DateTime         @default(now()) @map("created_at")
 
-  logs PostLog[]
+  logs          PostLog[]
+  // Files this target sends as a rendition instead of the master.
+  renditions    PostMediaRendition[]
+  // Posting-limit reservations, one per attempt (websitePlan.md §13).
+  dispatchSlots DispatchSlot[]
 
   @@index([groupId])
   @@map("posts")
@@ -312,6 +336,12 @@ model MediaAsset {
   status            MediaAssetStatus @default(PENDING)
   // Videos upload in parts; null for images (single presigned POST).
   multipartUploadId String?          @map("multipart_upload_id")
+  // As displayed (EXIF orientation / rotation flag applied), read when the
+  // upload completes. Null for uploads from before the probe existed.
+  width             Int?
+  height            Int?
+  // Videos only.
+  durationSeconds   Float?           @map("duration_seconds")
   // Set when attached to a post: 15 days after it's sent. The media cleaner
   // deletes the object after this.
   expiresAt         DateTime?        @map("expires_at")
@@ -319,7 +349,108 @@ model MediaAsset {
   completedAt       DateTime?        @map("completed_at")
   deletedAt         DateTime?        @map("deleted_at")
 
+  renditions     MediaRendition[]
+  postRenditions PostMediaRendition[]
+
   @@index([groupId])
   @@index([status, createdAt])
   @@map("media_assets")
+}
+
+// A version of a master upload fitted to one platform shape — cropped,
+// padded or converted to JPEG (websitePlan.md §12). Rendered by
+// queue/render-worker.ts right after the post is created. Targets asking for
+// the same thing share one rendition (unique specHash per master).
+model MediaRendition {
+  id           String          @id @default(uuid())
+  mediaAssetId String          @map("media_asset_id")
+  mediaAsset   MediaAsset      @relation(fields: [mediaAssetId], references: [id])
+  // Hash of everything below that shapes the output.
+  specHash     String          @map("spec_hash")
+  mode         RenditionMode
+  // CROP only: the region kept, as fractions (0-1) of the master as displayed.
+  cropX        Float?          @map("crop_x")
+  cropY        Float?          @map("crop_y")
+  cropW        Float?          @map("crop_w")
+  cropH        Float?          @map("crop_h")
+  // Output pixels (even, never upscaled). CONVERT keeps the master's size.
+  width        Int
+  height       Int
+  contentType  String          @map("content_type")
+  // `<workspaceId>/<mediaAssetId>/r/<specHash>.<jpg|mp4>`
+  key          String          @unique
+  status       RenditionStatus @default(PENDING)
+  sizeBytes    Int?            @map("size_bytes")
+  error        String?
+  createdAt    DateTime        @default(now()) @map("created_at")
+  completedAt  DateTime?       @map("completed_at")
+
+  posts PostMediaRendition[]
+
+  @@unique([mediaAssetId, specHash])
+  @@index([status])
+  @@map("media_renditions")
+}
+
+// Which rendition a target sends for one of the group's files. No row means
+// the master goes out as uploaded.
+model PostMediaRendition {
+  postId       String         @map("post_id")
+  post         Post           @relation(fields: [postId], references: [id])
+  mediaAssetId String         @map("media_asset_id")
+  mediaAsset   MediaAsset     @relation(fields: [mediaAssetId], references: [id])
+  renditionId  String         @map("rendition_id")
+  rendition    MediaRendition @relation(fields: [renditionId], references: [id])
+
+  @@id([postId, mediaAssetId])
+  @@index([renditionId])
+  @@map("post_media_renditions")
+}
+
+// One per target attempt that the posting limiter let through, at the time it
+// may go out (websitePlan.md §13.5). Usage in a window is the sum of `cost`
+// over unreleased slots, so scheduled posts count against the day they're sent.
+// Keyed on the platform's own account id, not the ConnectedAccount row: the
+// same Page connected in two workspaces shares one budget.
+model DispatchSlot {
+  id                String    @id @default(uuid())
+  platform          Platform
+  // "*" is the app-wide budget (YouTube's project quota), taken as well as
+  // the channel's own slot.
+  platformAccountId String    @map("platform_account_id")
+  postId            String    @map("post_id")
+  post              Post      @relation(fields: [postId], references: [id])
+  attempt           Int
+  // 1 per post, except LinkedIn (API calls). See lib/posting-limits.ts.
+  cost              Int
+  slotAt            DateTime  @map("slot_at")
+  // Normalized caption + media fingerprints, for the 24 h duplicate guard.
+  contentHash       String    @map("content_hash")
+  // Set when the target failed or was cancelled before reaching n8n — the
+  // platform never saw it, so it stops counting.
+  releasedAt        DateTime? @map("released_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  @@unique([postId, attempt, platformAccountId])
+  @@index([platform, platformAccountId, slotAt])
+  @@map("dispatch_slots")
+}
+
+// A platform account the limiter won't send to until `until` (websitePlan.md
+// §13.7). One row per account; a newer block overwrites it.
+model AccountCooldown {
+  platform          Platform
+  platformAccountId String         @map("platform_account_id")
+  until             DateTime
+  reason            CooldownReason
+  // Shown to the user as is.
+  message           String
+  // The target whose failure started it. Plain id, not a relation — only
+  // kept for debugging.
+  sourcePostId      String?        @map("source_post_id")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+
+  @@id([platform, platformAccountId])
+  @@map("account_cooldowns")
 }

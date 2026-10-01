@@ -1,8 +1,10 @@
 import type { ConnectedAccount, ConnectionMethod, MediaType, Post } from "@prisma/client";
-import { decrypt } from "../lib/crypto";
 import { TOKEN_EXPIRY_BUFFER_MS } from "../lib/capabilities";
+import { decrypt } from "../lib/crypto";
 import { env } from "../lib/env";
 import { getFreshYouTubeAccessToken } from "./youtube-token";
+import { tracedFetch } from "../lib/tracing";
+import { n8nDispatchDuration, secondsSince } from "../lib/metrics";
 
 // facebook-poster.json's "Route by Media Type" switch matches on these exact
 // strings, not our Prisma MediaType enum values.
@@ -158,6 +160,8 @@ export interface LinkedInDispatchPayload {
   content: string;
   media_type: string;
   media_urls: string[];
+  // Of media_urls[0]; null when unknown, and the workflow probes instead.
+  media_size_bytes: number | null;
   token: { access_token: string; author_urn: string };
   callback_url: string;
 }
@@ -172,6 +176,7 @@ export interface LinkedInDispatchPayload {
 export function buildLinkedInPayload(
   post: Post,
   connectedAccount: ConnectedAccount,
+  mediaSizes: (number | null)[] = [],
 ): LinkedInDispatchPayload {
   if (
     connectedAccount.refreshStrategy === "REQUIRES_RECONNECT" &&
@@ -190,6 +195,7 @@ export function buildLinkedInPayload(
     content: post.caption,
     media_type: post.mediaType,
     media_urls: post.mediaUrls as string[],
+    media_size_bytes: mediaSizes[0] ?? null,
     token: {
       access_token: accessToken,
       author_urn: `urn:li:person:${connectedAccount.platformAccountId}`,
@@ -212,6 +218,8 @@ export interface YouTubeDispatchPayload {
   platform: "youtube";
   media_type: string;
   media_urls: string[];
+  // Of media_urls[0]; null when unknown, and the workflow probes instead.
+  media_size_bytes: number | null;
   youtube_metadata: {
     title: string;
     description: string;
@@ -234,6 +242,7 @@ const SHORTS_TAG = "#Shorts";
 export async function buildYouTubePayload(
   post: Post,
   connectedAccount: ConnectedAccount,
+  mediaSizes: (number | null)[] = [],
 ): Promise<YouTubeDispatchPayload> {
   // routes/post-groups.ts rejects YouTube targets without these before the Post row
   // is created, so this is always set here.
@@ -254,6 +263,7 @@ export async function buildYouTubePayload(
     platform: "youtube",
     media_type: post.mediaType,
     media_urls: post.mediaUrls as string[],
+    media_size_bytes: mediaSizes[0] ?? null,
     youtube_metadata: {
       title: options.title,
       description,
@@ -273,12 +283,19 @@ export async function buildYouTubePayload(
 const N8N_DISPATCH_TIMEOUT_MS = 15_000;
 
 async function postToN8n(webhookPath: string, payload: unknown): Promise<void> {
-  const response = await fetch(`${env.N8N_BASE_URL}/webhook/${webhookPath}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(N8N_DISPATCH_TIMEOUT_MS),
-  });
+  // propagate: n8n continues this trace through the workflow, and its
+  // callback brings it back to us (websitePlan.md §14.5).
+  const start = performance.now();
+  const response = await tracedFetch(
+    `${env.N8N_BASE_URL}/webhook/${webhookPath}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(N8N_DISPATCH_TIMEOUT_MS),
+    },
+    { propagate: true },
+  ).finally(() => n8nDispatchDuration.record(secondsSince(start), { workflow: webhookPath }));
 
   if (!response.ok) {
     throw new Error(`n8n dispatch failed (${response.status}): ${await response.text()}`);
@@ -306,8 +323,13 @@ export async function dispatchYouTubeToN8n(payload: YouTubeDispatchPayload): Pro
 }
 
 // One target → its platform's workflow. Throws on anything that means the
-// post never reached n8n (expired token, n8n down/timeout).
-export async function dispatchPost(post: Post, connectedAccount: ConnectedAccount): Promise<void> {
+// post never reached n8n (expired token, n8n down/timeout). mediaSizes lines
+// up with post.mediaUrls.
+export async function dispatchPost(
+  post: Post,
+  connectedAccount: ConnectedAccount,
+  mediaSizes: (number | null)[] = [],
+): Promise<void> {
   switch (connectedAccount.platform) {
     case "FACEBOOK":
       return dispatchToN8n(buildFacebookPayload(post, connectedAccount));
@@ -316,9 +338,9 @@ export async function dispatchPost(post: Post, connectedAccount: ConnectedAccoun
     case "THREADS":
       return dispatchThreadsToN8n(buildThreadsPayload(post, connectedAccount));
     case "LINKEDIN":
-      return dispatchLinkedInToN8n(buildLinkedInPayload(post, connectedAccount));
+      return dispatchLinkedInToN8n(buildLinkedInPayload(post, connectedAccount, mediaSizes));
     case "YOUTUBE":
-      return dispatchYouTubeToN8n(await buildYouTubePayload(post, connectedAccount));
+      return dispatchYouTubeToN8n(await buildYouTubePayload(post, connectedAccount, mediaSizes));
     default:
       throw new Error(`${connectedAccount.platform} accounts can't be dispatched yet`);
   }

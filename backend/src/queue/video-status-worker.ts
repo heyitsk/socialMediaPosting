@@ -4,10 +4,13 @@ import { prisma } from "../db/client";
 import { decrypt } from "../lib/crypto";
 import { getVideoStatus as getFacebookVideoStatus } from "../lib/facebook";
 import { getVideoStatus as getLinkedInVideoStatus } from "../lib/linkedin";
+import { logger } from "../lib/logger";
 import { getVideoStatus as getYouTubeVideoStatus } from "../lib/youtube";
+import { pauseForLimitError } from "../service/limit-pauses";
 import { markTargetFailed, markTargetPublished } from "../service/post-groups";
 import { getFreshYouTubeAccessToken } from "../service/youtube-token";
 import { redisConnection } from "./connection";
+import { linkToProducer, type TraceLinkData, telemetry } from "./telemetry";
 import {
   pollBackoffStrategy,
   pollTimeoutMs,
@@ -15,7 +18,7 @@ import {
   type VideoPollPlatform,
 } from "./video-status-queue";
 
-interface VideoStatusJobData {
+interface VideoStatusJobData extends TraceLinkData {
   postId: string;
   platform: VideoPollPlatform;
   platformPostId: string;
@@ -71,6 +74,7 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
   return new Worker<VideoStatusJobData>(
     VIDEO_STATUS_QUEUE,
     async (job) => {
+      linkToProducer(job.data);
       const { postId, platform, platformPostId, mediaId } = job.data;
       const { label, check } = PLATFORMS[platform];
 
@@ -78,7 +82,22 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
         where: { id: postId },
         include: { connectedAccount: true },
       });
-      const result = await check(post.connectedAccount, mediaId);
+      let result: VideoCheckResult;
+      try {
+        result = await check(post.connectedAccount, mediaId);
+      } catch (err) {
+        // A status check can hit a limit too (YouTube's videos.list spends
+        // the shared project quota) — pause like a failed post would, then
+        // let BullMQ retry as usual. websitePlan.md §13.7.
+        await pauseForLimitError({
+          platform,
+          platformAccountId: post.connectedAccount.platformAccountId,
+          raw: err instanceof Error ? err.message : String(err),
+        }).catch((pauseErr: unknown) =>
+          logger.error({ postId, err: pauseErr }, "couldn't pause after video-status poll"),
+        );
+        throw err;
+      }
 
       if (result.state === "ready") {
         await markTargetPublished(postId, platform, platformPostId);
@@ -108,6 +127,7 @@ export function startVideoStatusWorker(): Worker<VideoStatusJobData> {
       connection: redisConnection(),
       concurrency: CONCURRENCY,
       settings: { backoffStrategy: pollBackoffStrategy },
+      telemetry,
     },
   );
 }

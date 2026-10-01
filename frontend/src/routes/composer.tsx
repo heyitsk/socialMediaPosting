@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
+import { MediaFitDialog } from "@/components/media-fit-dialog";
+import { MediaFitPreview, type PreviewTile } from "@/components/media-fit-preview";
 import { MediaPicker, useMediaUploads } from "@/components/media-picker";
 import { PlatformMark } from "@/components/platform-mark";
 import { PostGroupCard } from "@/components/post-group-card";
@@ -18,23 +20,30 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { api, apiErrorMessage } from "@/lib/api";
 import type { components } from "@/lib/api-schema";
-import { isVideoFile } from "@/lib/media-upload";
+import { defaultTileFit, effectiveRatio, mediaFitsFor, type TileFit } from "@/lib/media-fit";
+import { formatBytes, isVideoFile } from "@/lib/media-upload";
 import {
   CONTENT_KIND_LABELS,
   CONTENT_KINDS,
   type ContentKind,
   captionLength,
   countHashtags,
+  formatRatio,
   MEDIA_TYPE_LABELS,
+  type MediaType,
   PLATFORM_LABELS,
   type PlatformCapabilities,
   type PostGroupValidationError,
+  ratioWithin,
+  type SurfaceFit,
   YOUTUBE_CATEGORIES,
   YOUTUBE_PRIVACY_OPTIONS,
   YOUTUBE_TITLE_MAX,
   type YouTubeOptions,
 } from "@/lib/posting";
+import { AUTO_DELAY_MS, formatWhen, pausedText, usePostingLimits } from "@/lib/posting-limits";
 import { useWorkspaceId } from "@/lib/session";
+import { trackEvent } from "@/lib/telemetry";
 import { cn } from "@/lib/utils";
 
 type Account = components["schemas"]["ConnectedAccountSummary"];
@@ -72,40 +81,6 @@ interface Problem {
   message: string;
   // Not filled in yet, as opposed to filled in wrong.
   missing?: boolean;
-}
-
-interface VideoShape {
-  width: number;
-  height: number;
-  durationSeconds: number;
-}
-
-// Reads a video's dimensions in the browser (metadata only — no download of
-// the whole file) for the Shorts check. The backend re-checks with ffprobe;
-// this just surfaces the problem before submit. null while unknown.
-function useVideoShape(url: string | null): VideoShape | null {
-  const [shape, setShape] = useState<{ url: string; shape: VideoShape } | null>(null);
-  useEffect(() => {
-    if (!url) return;
-    const video = document.createElement("video");
-    video.preload = "metadata";
-    video.onloadedmetadata = () =>
-      setShape({
-        url,
-        shape: {
-          width: video.videoWidth,
-          height: video.videoHeight,
-          durationSeconds: video.duration,
-        },
-      });
-    video.src = url;
-    return () => {
-      video.onloadedmetadata = null;
-      video.removeAttribute("src");
-      video.load();
-    };
-  }, [url]);
-  return shape && shape.url === url ? shape.shape : null;
 }
 
 // datetime-local wants local time without a zone.
@@ -157,6 +132,14 @@ export function ComposerPage() {
   const [serverErrors, setServerErrors] = useState<PostGroupValidationError | null>(null);
   const [resultGroupId, setResultGroupId] = useState<string | null>(null);
   const [submitAttempted, setSubmitAttempted] = useState(false);
+  // Per-platform crop/pad, by preview tile key; tiles not in here use their
+  // default. Accounts in `customized` have a tile of their own.
+  const [tileFits, setTileFits] = useState<Record<string, TileFit>>({});
+  const [customized, setCustomized] = useState<string[]>([]);
+  // The tile whose Adjust dialog is open.
+  const [adjusting, setAdjusting] = useState<string | null>(null);
+
+  const { byAccount: limits } = usePostingLimits(workspaceId);
 
   const capabilitiesByPlatform = new Map(
     capabilities?.platforms.map((platform) => [platform.platform, platform]) ?? [],
@@ -173,6 +156,20 @@ export function ComposerPage() {
     if (account.needsReconnect) return "Reconnect this account on the Dashboard first";
     if (kind && !platformCapabilities.mediaTypes.some((option) => option.kind === kind)) {
       return `${PLATFORM_LABELS[account.platform]} doesn't support ${CONTENT_KIND_LABELS[kind].toLowerCase()} posts`;
+    }
+    // Posting limits (websitePlan.md §13.8). The backend has the last word;
+    // this only hides accounts it would certainly refuse.
+    const limit = limits.get(account.id);
+    if (limit?.cooldown) {
+      // Scheduling for after the pause ends is fine.
+      const at =
+        scheduleMode === "later" && scheduledAt ? new Date(scheduledAt).getTime() : Date.now();
+      if (at < Date.parse(limit.cooldown.until)) return pausedText(limit);
+    }
+    if (limit && scheduleMode === "now") {
+      if (limit.nextFreeAt === null) return "No free posting slot in the next 7 days";
+      if (Date.parse(limit.nextFreeAt) > Date.now() + AUTO_DELAY_MS)
+        return `Posting limit reached — the next free slot is ${formatWhen(limit.nextFreeAt)}. Schedule the post for then`;
     }
     return null;
   }
@@ -212,18 +209,73 @@ export function ComposerPage() {
   const mediaAssetIds = mediaItems.flatMap((item) =>
     item.status === "ready" && item.assetId ? [item.assetId] : [],
   );
-  const nonJpeg = mediaItems.filter(
-    (item) => kind !== "VIDEO" && item.contentType !== "image/jpeg",
-  );
+  // Read from the local file first, so the Shorts and aspect-ratio checks
+  // don't wait for the upload.
+  const videoShape = kind === "VIDEO" ? (mediaItems[0]?.shape ?? null) : null;
 
-  const wantsShort = selectedAccounts.some(
-    (account) =>
-      account.platform === "YOUTUBE" && settingsFor(account.id).youtubeMediaType === "SHORTS",
-  );
-  // The local file, so the check doesn't wait for the upload.
-  const videoShape = useVideoShape(
-    kind === "VIDEO" && wantsShort ? (mediaItems[0]?.previewUrl ?? null) : null,
-  );
+  // What the account's workflow is sent for this kind (YouTube: the user's
+  // Video/Short pick), and how that surface shows media.
+  function mediaTypeFor(account: Account): MediaType | null {
+    if (account.platform === "YOUTUBE" && kind === "VIDEO")
+      return settingsFor(account.id).youtubeMediaType;
+    return (
+      capabilitiesByPlatform
+        .get(account.platform)
+        ?.mediaTypes.find((option) => option.kind === kind)?.mediaTypes[0] ?? null
+    );
+  }
+  function fitFor(account: Account): SurfaceFit | null {
+    const mediaType = mediaTypeFor(account);
+    return (
+      capabilities?.surfaces.find(
+        (surface) => surface.platform === account.platform && surface.mediaType === mediaType,
+      ) ?? null
+    );
+  }
+
+  // One preview tile per platform + media type, shared by its accounts —
+  // unless an account was customized, which then gets a tile of its own
+  // (websitePlan.md §12.9).
+  const tileKeyFor = (account: Account, surface: SurfaceFit) =>
+    customized.includes(account.id)
+      ? `account:${account.id}`
+      : `${surface.platform}:${surface.mediaType}`;
+  const tileFitFor = (key: string, surface: SurfaceFit): TileFit =>
+    tileFits[key] ?? defaultTileFit(surface, mediaItems);
+
+  const tilesByKey = new Map<string, PreviewTile>();
+  for (const account of selectedAccounts) {
+    const surface = fitFor(account);
+    if (!surface) continue;
+    const key = tileKeyFor(account, surface);
+    const tile = tilesByKey.get(key) ?? {
+      key,
+      surface,
+      fit: tileFitFor(key, surface),
+      accounts: [],
+      customized: key.startsWith("account:"),
+    };
+    tile.accounts.push({ id: account.id, name: account.accountName });
+    tilesByKey.set(key, tile);
+  }
+  const tiles = [...tilesByKey.values()];
+  const tileFor = (account: Account) =>
+    tiles.find((tile) => tile.accounts.some((member) => member.id === account.id)) ?? null;
+  const adjustingTile = tiles.find((tile) => tile.key === adjusting) ?? null;
+
+  // Starts from what the account's shared tile has now.
+  const customize = (accountId: string) => {
+    const account = selectedAccounts.find((candidate) => candidate.id === accountId);
+    const surface = account && fitFor(account);
+    if (!account || !surface) return;
+    const shared = `${surface.platform}:${surface.mediaType}`;
+    setTileFits((all) => ({ ...all, [`account:${accountId}`]: tileFitFor(shared, surface) }));
+    setCustomized((ids) => [...ids, accountId]);
+  };
+  const resetCustomized = (accountId: string) => {
+    setCustomized((ids) => ids.filter((id) => id !== accountId));
+    setTileFits(({ [`account:${accountId}`]: _dropped, ...rest }) => rest);
+  };
 
   // --- Validation (mirrors the backend's; the backend has the final say) ---
 
@@ -282,22 +334,50 @@ export function ComposerPage() {
       if (mediaItems.length >= 2 && (mediaItems.length < min || mediaItems.length > max))
         errors.push({ message: `${label} carousels take ${min}-${max} images` });
     }
-    // Instagram's publishing API takes JPEG images only.
-    if (account.platform === "INSTAGRAM" && nonJpeg.length > 0) {
-      errors.push({
-        message: `Instagram only accepts JPEG images — ${nonJpeg.map((item) => item.file.name).join(", ")} ${nonJpeg.length === 1 ? "isn't" : "aren't"}`,
+    const maxVideoBytes = platformCapabilities.videoMaxBytes;
+    if (kind === "VIDEO" && maxVideoBytes) {
+      for (const item of mediaItems) {
+        if (item.file.size > maxVideoBytes)
+          errors.push({
+            message: `${label} doesn't support videos over ${maxVideoBytes / 1024 / 1024} MB — ${item.file.name} is ${formatBytes(item.file.size)}`,
+          });
+      }
+    }
+    // Shapes the platform's API refuses (websitePlan.md §12.2), after any crop
+    // or pad. Instagram's JPEG-only rule is handled by the backend converting.
+    const tile = tileFor(account);
+    const accepted = tile?.surface.accepted;
+    if (tile && accepted) {
+      const outside = mediaItems.flatMap((item) => {
+        const ratio = effectiveRatio(tile.fit, item);
+        return ratio !== null && !ratioWithin(ratio, accepted)
+          ? [`${item.file.name} is ${formatRatio(ratio)}`]
+          : [];
       });
+      if (outside.length > 0) {
+        errors.push({
+          message: `${label} only takes ${formatRatio(accepted.min)} to ${formatRatio(accepted.max)} ${kind === "VIDEO" ? "videos" : "images"} — ${outside.join(", ")}. Use Adjust under "How it will look" to crop or pad it`,
+        });
+      }
     }
     if (account.platform === "YOUTUBE") {
       if (own.youtubeTitle.trim() === "")
         errors.push({ message: "Add a video title", missing: true });
       if (/[<>]/.test(own.youtubeTitle)) errors.push({ message: "The title can't contain < or >" });
       if (own.youtubeMediaType === "SHORTS" && videoShape && capabilities) {
-        if (videoShape.height < videoShape.width)
+        // A landscape video cropped or padded to vertical is fine.
+        const video = mediaItems[0];
+        const ratio =
+          (tile && video && effectiveRatio(tile.fit, video)) ??
+          videoShape.width / videoShape.height;
+        if (!ratioWithin(ratio, { min: 0, max: 1 }))
           errors.push({
-            message: `Can't post as a Short: it's landscape (${videoShape.width}x${videoShape.height}) — Shorts must be vertical or square`,
+            message: `Can't post as a Short: it's landscape (${videoShape.width}x${videoShape.height}) — Shorts must be vertical or square. Use Adjust to crop or pad it`,
           });
-        if (videoShape.durationSeconds > capabilities.shortsMaxDurationSeconds)
+        if (
+          videoShape.durationSeconds != null &&
+          videoShape.durationSeconds > capabilities.shortsMaxDurationSeconds
+        )
           errors.push({
             message: `Can't post as a Short: it's ${Math.round(videoShape.durationSeconds)}s long — Shorts can be at most ${capabilities.shortsMaxDurationSeconds}s`,
           });
@@ -334,6 +414,32 @@ export function ComposerPage() {
     setServerErrors((current) => current && { ...current, targets: [] });
   };
 
+  // Accounts refused for their posting limit come back with the earliest time
+  // they'd take it — the latest of those works for all of them (§13.8).
+  const freeTimes = (serverErrors?.targets ?? []).flatMap((target) =>
+    target.nextFreeAt && selectedIds.includes(target.connectedAccountId)
+      ? [Date.parse(target.nextFreeAt)]
+      : [],
+  );
+  const scheduleForThen = freeTimes.length > 0 ? Math.max(...freeTimes) : null;
+  const scheduleAtFreeSlot = () => {
+    if (scheduleForThen === null) return;
+    // The picker has minute precision; round up so it's never too early.
+    setScheduledAt(toLocalInputValue(new Date(Math.ceil(scheduleForThen / 60_000) * 60_000)));
+    setScheduleMode("later");
+    setServerErrors((current) => current && { ...current, targets: [] });
+  };
+
+  // "Post now" accounts that have to wait for their posting pace.
+  const now = Date.now();
+  const pushedBack =
+    scheduleMode === "now"
+      ? selectedAccounts.flatMap((account) => {
+          const at = limits.get(account.id)?.nextFreeAt;
+          return at && Date.parse(at) > now + 30_000 ? [{ account, at }] : [];
+        })
+      : [];
+
   const createGroup = useMutation({
     mutationFn: async () => {
       if (!kind) throw new Error("Pick what you're posting");
@@ -353,6 +459,10 @@ export function ComposerPage() {
               return {
                 connectedAccountId: account.id,
                 captionOverride: own.overrideCaption ? own.caption : undefined,
+                mediaFits: (() => {
+                  const tile = tileFor(account);
+                  return tile ? mediaFitsFor(tile.fit, mediaItems) : [];
+                })(),
                 mediaType: account.platform === "YOUTUBE" ? own.youtubeMediaType : undefined,
                 youtubeOptions:
                   account.platform === "YOUTUBE"
@@ -372,28 +482,46 @@ export function ComposerPage() {
           },
         },
       );
-      if (error) throw error;
+      if (error || !data) throw error ?? new Error("Empty response");
       return { group: data, created: response.status === 201 };
     },
     onMutate: () => setServerErrors(null),
     onSuccess: ({ group, created }) => {
       queryClient.setQueryData(["post-group", workspaceId, group.id], group);
       queryClient.invalidateQueries({ queryKey: ["post-groups", workspaceId] });
+      queryClient.invalidateQueries({ queryKey: ["posting-limits", workspaceId] });
       setResultGroupId(group.id);
+      trackEvent("post_group_created", {
+        kind: group.contentKind,
+        targets: String(group.targets.length),
+        scheduled: String(Boolean(group.scheduledFor)),
+      });
+      // "Post now" targets the limiter pushed back wait as SCHEDULED.
+      const waiting = group.scheduledFor
+        ? 0
+        : group.targets.filter((target) => target.status === "SCHEDULED").length;
       if (!created) toast.info("That post was already submitted — showing its status");
-      else if (group.status === "SCHEDULED") toast.success("Post scheduled");
+      else if (group.scheduledFor) toast.success("Post scheduled");
+      else if (waiting > 0)
+        toast.success(
+          `Posting — ${waiting} ${waiting === 1 ? "account waits" : "accounts wait"} for a safe gap after their last post`,
+        );
       else toast.success(`Posting to ${group.targets.length} accounts…`);
       // Ready for the next post; keep the account picks, which are often reused.
       setIdempotencyKey(crypto.randomUUID());
       setCaption("");
       media.clear();
       setSettings({});
+      setTileFits({});
+      setCustomized([]);
       setScheduleMode("now");
       setScheduledAt("");
       setSubmitAttempted(false);
     },
     onError: (err) => {
-      if (err && typeof err === "object" && "targets" in err) {
+      const refused = !!err && typeof err === "object" && "targets" in err;
+      trackEvent("post_group_create_failed", { reason: refused ? "targets_refused" : "error" });
+      if (refused) {
         setServerErrors(err as unknown as PostGroupValidationError);
         toast.error("Some accounts can't take this post — see below");
       } else {
@@ -414,7 +542,18 @@ export function ComposerPage() {
       if (error) throw error;
       return data;
     },
-    refetchInterval: (query) => (query.state.data?.status === "PROCESSING" ? 3000 : false),
+    // Fast while any account is sending — the group reads SCHEDULED when one
+    // account was pushed back by its posting limit, even if others are
+    // sending now. Slow while a "post now" still has an account waiting for
+    // its slot (at most an hour); a real scheduled post needs no polling.
+    refetchInterval: (query) => {
+      const group = query.state.data;
+      if (!group) return false;
+      if (group.targets.some((target) => target.status === "PROCESSING")) return 3000;
+      if (!group.scheduledFor && group.targets.some((target) => target.status === "SCHEDULED"))
+        return 30_000;
+      return false;
+    },
   });
 
   // Clickable even with problems left, so the click can reveal what's missing.
@@ -624,6 +763,34 @@ export function ComposerPage() {
                       )}
                   </div>
                 )}
+
+                {kind !== "TEXT" && mediaItems.length > 0 && tiles.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>How it will look</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Each platform shows your media at its own shape. Use Adjust to crop or pad it
+                      for one platform — your upload and the other platforms stay as they are.
+                    </p>
+                    <MediaFitPreview
+                      tiles={tiles}
+                      items={mediaItems}
+                      onAdjust={(tile) => setAdjusting(tile.key)}
+                      onCustomize={customize}
+                      onReset={resetCustomized}
+                    />
+                  </div>
+                )}
+                {adjustingTile && (
+                  <MediaFitDialog
+                    tile={adjustingTile}
+                    items={mediaItems}
+                    onClose={() => setAdjusting(null)}
+                    onSave={(fit) => {
+                      setTileFits((all) => ({ ...all, [adjustingTile.key]: fit }));
+                      setAdjusting(null);
+                    }}
+                  />
+                )}
               </section>
             )}
 
@@ -687,6 +854,16 @@ export function ComposerPage() {
                     onChange={(e) => setScheduledAt(e.target.value)}
                   />
                 )}
+                {pushedBack.length > 0 && (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    {pushedBack.map(({ account, at }) => (
+                      <p key={account.id}>
+                        {PLATFORM_LABELS[account.platform]} · {account.accountName} goes out around{" "}
+                        {formatWhen(at)}, to keep a safe gap between its posts.
+                      </p>
+                    ))}
+                  </div>
+                )}
               </section>
             )}
 
@@ -706,6 +883,11 @@ export function ComposerPage() {
                     <Button variant="outline" size="sm" onClick={deselectInvalid}>
                       Deselect invalid accounts
                     </Button>
+                    {scheduleForThen !== null && (
+                      <Button variant="outline" size="sm" onClick={scheduleAtFreeSlot}>
+                        Schedule for {formatWhen(scheduleForThen)}
+                      </Button>
+                    )}
                   </div>
                 )}
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">

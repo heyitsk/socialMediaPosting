@@ -1,5 +1,6 @@
 import type { Platform, PostStatus, Prisma } from "@prisma/client";
 import { prisma } from "../db/client";
+import { postsCompleted } from "../lib/metrics";
 
 type Tx = Prisma.TransactionClient;
 
@@ -55,7 +56,12 @@ async function transitionTarget(
     await lockGroup(tx, target.groupId);
     const post = await tx.post.findUniqueOrThrow({
       where: { id: postId },
-      select: { status: true, attempt: true },
+      select: {
+        status: true,
+        attempt: true,
+        mediaType: true,
+        connectedAccount: { select: { platform: true } },
+      },
     });
     if (!apply(post)) return false;
 
@@ -72,6 +78,13 @@ async function transitionTarget(
     }
     await tx.post.update({ where: { id: postId }, data: { status: next } });
     await recomputeGroupStatus(tx, target.groupId);
+    if (next === "PUBLISHED" || next === "FAILED" || next === "CANCELLED") {
+      postsCompleted.add(1, {
+        platform: post.connectedAccount.platform,
+        media_type: post.mediaType,
+        outcome: next.toLowerCase(),
+      });
+    }
     return true;
   });
 }

@@ -6,6 +6,9 @@ import type { Platform } from "@prisma/client";
 //   400 - "{\"error\":{\"message\":\"...\", ...}}" (node: Publish Image)
 // i.e. the status code, then the response body as a JSON-encoded string. The
 // Build Error Result nodes may also append the JS stack (" - AxiosError: ...").
+// The video relay Code nodes (websitePlan.md §15) throw the same
+// "<status> - <body>" shape, which n8n suffixes with " [line N]"; a failed
+// read of our own S3 object is prefixed "Reading the media file failed: ".
 //
 // Order of preference: a matching ERROR_RULES entry, then the platform's own
 // message pulled out of the response body, then a sentence per status code.
@@ -36,6 +39,15 @@ const ERROR_RULES: ErrorRule[] = [
     node: /Download|Probe/,
     message: "Couldn't read the media file — try again.",
   },
+  {
+    text: /^Reading the media file failed: 40[34]\b/,
+    message:
+      "Couldn't read the media file — it may have been removed (uploads are kept 15 days). Create the post again.",
+  },
+  {
+    text: /^Reading the media file failed/,
+    message: "Couldn't read the media file — try again.",
+  },
 
   // --- Account access ---
   {
@@ -51,10 +63,26 @@ const ERROR_RULES: ErrorRule[] = [
     message: "The platform didn't accept this account's login — reconnect it on the Dashboard.",
   },
 
-  // --- Limits ---
+  // --- Limits (these also pause the account, lib/limit-errors.ts) ---
+  {
+    text: /\\?"code\\?":\s*368\b|temporarily blocked/i,
+    message:
+      "Meta flagged this as spam and blocked posting from this account for now — it's paused for 24 hours, and retrying sooner makes the block longer.",
+  },
+  {
+    platform: "INSTAGRAM",
+    text: /2207042/,
+    message: "This Instagram account has reached its limit of posts per 24 hours.",
+  },
   {
     platform: "YOUTUBE",
-    text: /quotaExceeded|uploadLimitExceeded/,
+    text: /quotaExceeded/,
+    message:
+      "The app's daily YouTube quota is used up — YouTube posts resume after midnight Pacific time.",
+  },
+  {
+    platform: "YOUTUBE",
+    text: /uploadLimitExceeded/,
     message: "YouTube's upload limit for this channel is used up — try again tomorrow.",
   },
   {
@@ -79,7 +107,8 @@ const ERROR_RULES: ErrorRule[] = [
   },
   {
     text: /aspect ratio/i,
-    message: "The platform doesn't accept this image or video's aspect ratio.",
+    message:
+      "The platform doesn't accept this image or video's aspect ratio — crop or pad it for this platform in the composer.",
   },
   {
     text: /media (?:download has failed|could not be (?:fetched|downloaded))|failed to (?:fetch|download) (?:the )?media/i,
@@ -149,6 +178,8 @@ export function friendlyPlatformError(raw: string, platform?: Platform): string 
     .replace(/\s*\((?:last )?node: [^)]*\)\s*$/, "")
     // A stack appended by Build Error Result: " - AxiosError: ... at ...".
     .replace(/\s+-\s+[A-Za-z]*Error:\s[\s\S]*$/, "")
+    // Where a Code node threw.
+    .replace(/\s*\[line \d+\]$/, "")
     .trim();
   if (!text) return "Posting failed";
 

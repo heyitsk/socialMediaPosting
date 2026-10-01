@@ -224,7 +224,7 @@ Gotcha: Instagram crops **every carousel item to the first item's aspect ratio**
 * **Smart default crop.** Images: `sharp`'s attention/entropy strategy (`position: sharp.strategy.attention`), `smartcrop.js`, or face detection. Video: center crop to start; subject-tracking reframing (MediaPipe AutoFlip-style) as a later upgrade for 16:9 → 9:16.
 * **Per-platform preview grid + user adjust.** The composer shows how the media will look on each selected platform. Each tile opens a ratio-locked cropper (`react-easy-crop` or `Cropper.js`) so the user can drag/zoom. Stories/Reels/Shorts previews overlay a **safe zone** (the top and bottom ~14% are covered by platform UI).
 * **Blurred-background padding instead of black bars.** When the user doesn't want to crop (e.g. a wide group photo into a 9:16 story), the media sits on a blurred, zoomed copy of itself. Easy in both `sharp` and `ffmpeg`.
-* **Render in a worker at publish time.** A BullMQ job reads the master + crop settings, runs `sharp`/`ffmpeg`, writes each version to S3, and sends that version's URL to the platform's n8n workflow. Video rendering goes in its **own queue** (ffmpeg is CPU-heavy) and can later scale on queue depth via KEDA (§5), separately from the API.
+* **Render in a worker at publish time** (§12.5 refines this: rendered right after the post is created, and publish waits for it). A BullMQ job reads the master + crop settings, runs `sharp`/`ffmpeg`, writes each version to S3, and sends that version's URL to the platform's n8n workflow. Video rendering goes in its **own queue** (ffmpeg is CPU-heavy) and can later scale on queue depth via KEDA (§5), separately from the API.
 * **Optional, later — generative outpainting** to extend backgrounds instead of cropping/padding. The results look great, but it costs real money and can invent strange details, so it's offered as a premium feature, not the default.
 
 **Build order:**
@@ -246,7 +246,7 @@ Gotcha: Instagram crops **every carousel item to the first item's aspect ratio**
 
 ### Streaming-Relay Decision — planned for LinkedIn video, blocked on S3 (Sep 22, 2026; revised same day after the multi-part upload fix landed)
 
-**Status: planned, not built.** `linkedin-poster.json` currently uses a `Download` → `Merge` → `Split Video Into Parts` → `Upload Binary` pattern (see §5's `linkedin-poster` notes / `history.md` Session 24) for its video branch, and the plain `Download` → `Merge` → `Upload Binary` pattern (no splitting needed) for images. Once an S3 bucket exists (Phase 2 roadmap item, currently blocking — no AWS account provisioned yet), the streaming-relay fix will be applied **video only**, one platform at a time, LinkedIn then YouTube (or vice versa — whichever's S3 wiring lands first). Decisions locked in:
+**Status: planned, not built. S3 now exists (§11); build steps are in §15 (Sep 30), which proposes a chunked relay instead of the raw pipe described below.** `linkedin-poster.json` currently uses a `Download` → `Merge` → `Split Video Into Parts` → `Upload Binary` pattern (see §5's `linkedin-poster` notes / `history.md` Session 24) for its video branch, and the plain `Download` → `Merge` → `Upload Binary` pattern (no splitting needed) for images. Once an S3 bucket exists (Phase 2 roadmap item, currently blocking — no AWS account provisioned yet), the streaming-relay fix will be applied **video only**, one platform at a time, LinkedIn then YouTube (or vice versa — whichever's S3 wiring lands first). Decisions locked in:
 
 * **Video only, not image.** Images are small enough that the download-then-upload pattern's extra latency/memory pass is negligible; the complexity and error-handling cost of a hand-rolled streaming Code node isn't worth it there. Video is where large files make the double I/O pass actually expensive, so that's the only branch getting rebuilt. Image branches (`LI Download Image` → `Merge Image Upload` → `LI Upload Image Binary`, and YouTube's equivalent) stay on the plain `HTTP Request` pattern.
 * **Revised shape of the change (Sep 22 update):** the real, tested `linkedin-poster.json` now confirms LinkedIn caps every upload part at exactly 4,194,304 bytes (4 MiB) — `initializeUpload` always returns one `uploadInstructions` entry per part, each with its own `firstByte`/`lastByte` range, even for a single-part upload. That reshapes the relay from "one whole-file stream" into **one stream per part**, matched 1:1 to those ranges, which is a better fit for S3 anyway:
@@ -507,22 +507,22 @@ Tokens must be **reversibly encrypted, not hashed** — unlike a password, the b
 
 ### Phase 2 — Media Engine & Post Composer
 - [x] Set up AWS S3 bucket and presigned URL upload handler (§11, Sep 29 2026 — code done; bucket deploy + live test pending).
-- [ ] Pre-dispatch media dimension probe + per-platform aspect-ratio warnings in the composer (§3 "Per-Platform Media Fitting", step 1 — doable before S3).
-- [ ] Per-platform preview grid + ratio-locked cropper with safe-zone overlays; store per-platform crop settings against a single master upload (§3, step 2 — needs S3).
-- [ ] `sharp`/`ffmpeg` render worker on its own BullMQ queue (crop or blurred-background pad), dispatching rendered-version S3 URLs to n8n (§3, step 3).
-- [ ] Smart-crop defaults, video auto-reframing, optional generative outpainting (§3, step 4 — later).
+- [x] Pre-dispatch media dimension probe + per-platform aspect-ratio warnings and read-only preview grid in the composer (§3 "Per-Platform Media Fitting", step 1; implementation plan §12.7 step 1 — code done Sep 30 2026, see §12.10; live upload test pending).
+- [x] Ratio-locked cropper with safe-zone overlays; store per-target crop settings against a single master upload (§3, step 2; §12.7 step 2 — code done Sep 30 2026, see §12.11; composer not yet tried in a browser).
+- [x] `sharp`/`ffmpeg` render worker on its own BullMQ queue (crop or blurred-background pad, images and video in one release), dispatching rendered-version S3 URLs to n8n (§3, step 3; §12.7 step 2 — renders verified against S3 Sep 30 2026, see §12.11; no live post yet).
+- [ ] Smart-crop defaults, video auto-reframing, optional generative outpainting (§3, step 4 — later; §12.7 step 3).
 - [ ] Build Post Composer UI with real-time platform validation rules.
 
 ### Phase 3 — n8n Webhook & Execution Workflow
 - [x] Build one independent n8n workflow per platform (`facebook-poster`, `instagram-poster`, `threads-poster`, `youtube-poster`) — no shared "master" workflow with internal platform branching. (`pinterest-poster` still pending Developer App review.)
 - [x] Configure platform nodes with dynamic expressions for tokens and IDs, sourced from the per-call webhook payload only — confirmed for `facebook-poster`, `instagram-poster` (Sep 17, including per-call `graph_host` selection, per §2.2/§5), and `threads-poster` (Sep 21, simplest `token` shape of the three — just `access_token`, per §5).
-- [ ] Implement S3 binary download for YouTube node — `youtube-poster.json` currently uses a plain HTTP GET stand-in (Session 13/14); real S3 wiring and the streaming-relay fix (§3) not yet built. (Backend wiring itself done Sep 23 — see next item.)
-- [x] Wire YouTube to the backend (Sep 23) — Google OAuth connect (§2.4), `ON_DEMAND` token refresh, `buildYouTubePayload`/`dispatchYouTubeToN8n`, `youtube-poster.json` callback secret + new metadata fields, YouTube added to the shared video-status poller with exponential backoff (§6), composer title/visibility/category/made-for-kids/tags fields. Not yet confirmed with a live end-to-end post.
+- [x] Implement S3 binary download for YouTube node — replaced by the chunked resumable relay from S3 (§15, Oct 1). Tested live through the app Oct 1, including a large video and Wi-Fi turned off mid-upload.
+- [x] Wire YouTube to the backend (Sep 23) — Google OAuth connect (§2.4), `ON_DEMAND` token refresh, `buildYouTubePayload`/`dispatchYouTubeToN8n`, `youtube-poster.json` callback secret + new metadata fields, YouTube added to the shared video-status poller with exponential backoff (§6), composer title/visibility/category/made-for-kids/tags fields. Confirmed with live end-to-end posts through the app (Oct 1).
 - [ ] Log a `FAILED` `PostLog` when a video-status poll job exhausts its attempts by *throwing* (network error/revoked token) — currently leaves the post stuck in `PROCESSING` (§6).
-- [ ] Apply the streaming-relay fix (§3, video-only) to `linkedin-poster.json` and `youtube-poster.json` — planned Sep 22, blocked on the Phase 2 S3 bucket item; `linkedin-poster.json` itself (text/image/video, standalone-tested Sep 22) is otherwise a V2-deferred platform (see header) not yet wired to the backend dispatcher.
+- [x] Apply the streaming-relay fix (§3, video-only) to `linkedin-poster.json` and `youtube-poster.json` — built Oct 1 as a chunked relay (§15.10), tested live through the app on LinkedIn and YouTube Oct 1; `linkedin-poster.json` itself (text/image/video, standalone-tested Sep 22) is wired to the backend dispatcher and posts through the app (text, image, carousel and video confirmed Oct 1).
 - [ ] Stand up n8n in **queue mode**: Postgres for shared workflow storage, Redis for the job queue, `n8n-main` + `n8n-worker` roles. (Current dev setup, Sep 16, is a single non-queue-mode n8n container in `backend/docker-compose.yml` — fine for one platform/low volume, not yet the queue-mode architecture this section describes.)
 - [ ] Deploy n8n main/worker on Kubernetes; configure **KEDA** autoscaling of worker replicas on Redis queue depth. *(Deferred until the triggers in `deploymentPlan.md` §6; launch runs compose on one EC2 instance.)*
-- [ ] Build the backend **fan-out dispatcher** (`Promise.allSettled` over selected platforms) and **per-`(user, platform)` rate limiter** (token bucket sized to each platform's quota) — current dispatch (Sep 16) is a single synchronous call to one platform (Facebook), not the multi-platform fan-out this describes. **Planned in detail in §10 (Sep 29)** — fan-out is now per-target BullMQ `publish` jobs rather than an in-request `Promise.allSettled`, so scheduling shares the same path.
+- [ ] Build the backend **fan-out dispatcher** (`Promise.allSettled` over selected platforms) and **per-`(user, platform)` rate limiter** (token bucket sized to each platform's quota) — current dispatch (Sep 16) is a single synchronous call to one platform (Facebook), not the multi-platform fan-out this describes. **Planned in detail in §10 (Sep 29)** — fan-out is now per-target BullMQ `publish` jobs rather than an in-request `Promise.allSettled`, so scheduling shares the same path. The rate limiter itself is **planned in §13 (Sep 30)**: per platform account slots in Postgres, pacing, duplicate guard and a circuit breaker.
 - [x] Build Return Webhook Callback handler on backend (Sep 16) — implements per-callback `PostLogs` insert + direct `Posts.status` update for the single-platform case; cross-callback aggregation across multiple platforms (Section 6) still pending, since nothing dispatches to more than one platform yet.
 - [x] Add `CAROUSEL` support to `threads-poster.json` (Sep 23) — same split/aggregate pattern as `instagram-poster`'s carousel, image-only.
 - [ ] Replace the fixed-`Wait`-then-publish pattern in `instagram-poster.json` (Reels) and `threads-poster.json` (Video) with real container-status polling before calling `media_publish`/`threads_publish` — documented as a known gap in §6 ("Known Gap: Container-Status Polling Before Publish", added Sep 23); not yet built.
@@ -876,8 +876,931 @@ Rate limit: 120 upload starts per user per 10 min.
 
 - WebP on Facebook, LinkedIn and Threads is untested.
 - In dev, presigned URLs signed with temporary `aws login` credentials stop working when that session expires (scheduled posts need long-lived credentials — a role in production).
-- Next: per-platform media fitting (§3 steps 2-4) and the streaming relay for YouTube/LinkedIn video (§3).
+- Next: per-platform media fitting (§3 steps 2-4, planned in §12) and the streaming relay for YouTube/LinkedIn video (§3).
 
+## 12. Per-Platform Media Fitting — Implementation Plan (Sep 30, 2026, planning only)
+
+Turns §3 "Per-Platform Media Fitting" into buildable steps on top of §10 (post groups) and §11 (S3 uploads). Goal: before posting, the user sees how each file will look on every selected platform, and can crop it or blur-pad it per platform. The upload in S3 is never changed. Each target stores its fit settings, and the fitted files are rendered by a worker before dispatch.
+
+### 12.1 What already exists
+
+- `components/media-picker.tsx` keeps each picked `File` plus a blob `previewUrl`, so previews and the cropper work on the local file: no S3 download and no CORS.
+- `composer.tsx`'s `useVideoShape` already reads a video's width, height and duration in the browser (Shorts check, §10.5).
+- `lib/media-probe.ts` `probeVideo` (ffprobe, rotation-aware) runs at group create for the Shorts check only.
+- `lib/capabilities.ts` + `GET /api/capabilities` is the single source of platform rules. Fit rules go here too, so the composer can't drift from the backend.
+- Each target's publish job already signs its own URLs at send time (`queue/publish-worker.ts` → `service/media.ts` `mediaUrlsForDispatch`). The only change is which object gets signed: the target's rendition if it has one, else the master. Signing is a local HMAC with no S3 call, and uncropped targets all point at the one master object. Nothing is stored twice.
+- Instagram + non-JPEG image is a hard validation error today (§11.5).
+
+### 12.2 Surfaces and fit rules (`capabilities.ts`)
+
+A **surface** is a (platform, media type) pair, e.g. `INSTAGRAM/STORIES`. Each one gets a fit rule, served in `/api/capabilities`:
+
+```ts
+interface SurfaceFit {
+  minRatio: number;          // width / height the platform accepts
+  maxRatio: number;
+  enforced: boolean;         // true: the API rejects out-of-range media; false: the platform crops or letterboxes it on display
+  presets: { label: string; ratio: number | null }[]; // cropper choices, first is the default; null = keep original
+  outputWidth: number;       // render width; height follows the chosen ratio
+  safeZone?: { top: number; bottom: number };         // fraction of the frame covered by platform UI
+  sameRatioAcrossCarousel?: boolean;                  // Instagram crops every item to the first one's ratio
+}
+```
+
+Starting values (re-check each against the platform's current docs when building):
+
+| Surface | Accepts | Enforced | Presets | Notes |
+|---|---|---|---|---|
+| IG IMAGE / CAROUSEL | 4:5 – 1.91:1 | yes | 4:5, 1:1, 1.91:1 | carousel: one ratio for all items |
+| IG REELS | wide range, shown 9:16 | no | 9:16, original | safe zone top ~14%, bottom ~20% (caption) |
+| IG STORIES | wide range, shown 9:16 | no | 9:16, original | safe zone top/bottom ~14% |
+| FB IMAGE / CAROUSEL / VIDEO | any | no | original, 4:5, 1:1, 1.91:1 (video: 16:9, 9:16) | feed crops tall media to 4:5 |
+| THREADS IMAGE / CAROUSEL / VIDEO | any | no | original, 4:5, 1:1 | |
+| LINKEDIN IMAGE / CAROUSEL / VIDEO | any | no | original, 1.91:1, 1:1, 4:5 | |
+| YT VIDEO | any | no | original, 16:9 | |
+| YT SHORTS | ≤ 1:1 (vertical/square) | yes (§10.5) | 9:16, 1:1 | a landscape video + 9:16 crop becomes Short-eligible |
+
+### 12.3 Data model
+
+**`media_assets` gains probed dimensions:** `width`, `height` (display orientation, with EXIF orientation / rotation flag applied) and `duration_seconds` (video). They're filled at `POST /media/:id/complete`. Images are ≤ 8 MB, so the backend downloads them and reads `sharp().metadata()`. Videos use the existing `probeVideo`. The Shorts check and fit validation then read stored values instead of probing on every create. Old rows stay null and are treated as "unknown, no fit check".
+
+**New `media_fits`** (one row per target × asset, only when the file isn't sent as-is):
+
+```
+MediaFit
+- id
+- postId        -> Post (the target)
+- mediaAssetId  -> MediaAsset
+- mode          CROP | PAD
+- ratio         output width / height
+- x, y, w, h    Float, 0-1, relative to the display-oriented master (CROP: region kept; PAD: whole frame)
+- renditionId?  -> MediaRendition
+- unique(postId, mediaAssetId)
+```
+
+No row means the original is sent, which is today's behaviour. Relative coordinates keep settings independent of output size, and they're what `react-easy-crop` returns. Fits are stored **per target (account)**, so each account can have its own crop. The composer still edits one fit per surface by default (§12.6), so the common case costs one click.
+
+**New `media_renditions`** (rendered files):
+
+```
+MediaRendition
+- id, mediaAssetId, specHash (unique with mediaAssetId)
+- key          `<workspaceId>/<assetId>/r/<specHash>.<jpg|mp4>`
+- status       PENDING | READY | FAILED | DELETED
+- width, height, sizeBytes, error?
+```
+
+`specHash` = hash of (mode, rounded rect, ratio, output size, format). Targets with the same fit, e.g. two Instagram accounts that weren't customized, share one render. A new file only exists when an account's fit actually differs. The hourly cleaner (§11.5) deletes renditions together with their master.
+
+### 12.4 API and validation
+
+- `GET /api/capabilities` gains `surfaces`.
+- `POST /post-groups`: each target gains `mediaFits?: [{ mediaAssetId, mode, ratio, rect }]`.
+- Per-target checks (collected like §10.4, all-or-nothing):
+  - The rect is inside 0–1 and matches `ratio` × the master's dimensions (±1%).
+  - On an enforced surface, the effective ratio (the fit's ratio, else the master's) is within range. There is no automatic fix: out-of-range media without a fit is an error until the user picks crop or pad.
+  - Instagram carousels use one ratio for every item.
+  - The Shorts check uses the effective ratio.
+- **Instagram images are always rendered to JPEG**, even without a crop (a plain "convert" rendition). This removes today's "Instagram only accepts JPEG" error.
+- Editing a scheduled post (cancel-and-recreate, §10.6) pre-fills the fits.
+
+### 12.5 Rendering
+
+- **Server-side for images and video (decided, §12.9).** The browser only sends the fit; it never renders or uploads a cropped copy. One pipeline covers both media kinds, the user uploads once, and re-editing a fit never re-uploads.
+- **Queue:** a new `render` BullMQ queue + worker (`queue/render-queue.ts`, `queue/render-worker.ts`), concurrency 1–2 and separate from `publish`, because ffmpeg saturates CPU. It can later become its own deployment scaled on queue depth by KEDA (§5).
+- **Render eagerly at create:** right after the group transaction, enqueue one job per distinct rendition (`jobId = render:<renditionId>`, so it dedupes). Scheduled posts are ready long before send time, and render failures show up early. The §10.6 reconciler also re-enqueues `PENDING` renditions.
+- **Publish worker:**
+  - A rendition still `PENDING`: `moveToDelayed(now + 15 s)` until a render deadline (~5 min image, ~30 min video).
+  - `FAILED` or past the deadline: the target fails with a readable message (new `ERROR_RULES` entries, §10.9).
+  - Otherwise `mediaUrlsForDispatch` signs the rendition's key when the target has one, else the master's.
+  - n8n payloads don't change.
+- **Images (`sharp`):**
+  - `.rotate()` first (EXIF auto-orient, so the coordinates match what the browser showed).
+  - CROP: `extract` → `resize(outW, outH)`.
+  - PAD: a blurred, darkened `cover` copy as background with a `contain` copy composited in the centre.
+  - Output JPEG (mozjpeg, q≈90) in sRGB with metadata stripped.
+- **Video (`ffmpeg`, reads the presigned URL, writes a temp file, multipart-uploads to S3):**
+  - CROP: `crop=w:h:x:y,scale=W:H,setsar=1`.
+  - PAD: `split[a][b];[a]scale=W:H:force_original_aspect_ratio=increase,crop=W:H,boxblur=20:5[bg];[b]scale=W:H:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2`.
+  - Encoding: `-c:v libx264 -preset veryfast -crf 20 -c:a aac -movflags +faststart`. ffmpeg auto-rotates by default, matching the display-oriented coordinates.
+  - The timeout scales with duration, and the worker needs temp disk of about 2× the input size.
+- No new `PostStatus`. The results panel shows "Preparing media…" while a target's renditions are `PENDING`.
+
+### 12.6 Frontend
+
+1. **Preview grid** (`components/media-fit/`): shown once media and at least one account are picked. Plain ratio frames with safe-zone bands; no mock platform UI (avatar, caption, buttons).
+   - One tile per distinct surface among the selected targets. A tile applies to every selected account on that surface. "Customize for this account" splits one account off into its own tile, and "Reset" merges it back.
+   - Each tile is a frame at the fit ratio showing the local blob, CSS only (no canvas):
+     - CROP: `object-fit: cover` positioned from the rect.
+     - PAD: a CSS-blurred copy behind `object-fit: contain`.
+     - Original: the platform's own display behaviour.
+   - Carousels page through items.
+   - 9:16 surfaces overlay striped safe-zone bands.
+   - Badges: "Fits", "Platform will crop this", "Instagram will reject this — crop or pad".
+2. **Cropper dialog** per tile, using `react-easy-crop` (it handles `<video>` too and returns relative crop areas): preset ratio chips from `surfaces`, a Crop / Blur-pad toggle, zoom, and a safe-zone overlay. Carousels choose one ratio, then position each item.
+3. **Defaults:**
+   - Enforced surface with out-of-range media: nothing is pre-applied. The tile says "Instagram will reject this — choose Crop or Blur-pad" and submit stays blocked until the user picks.
+   - Images on 9:16 surfaces (Stories, Reels) whose ratio differs from 9:16: default to **blur-pad**, since cropping a wide photo to 9:16 loses most of it. The user can switch to crop.
+   - Everything else: send the original.
+4. Submit sends `mediaFits` per target. The preview and the render use the same relative rect, so what the user sees is what gets rendered.
+
+### 12.7 Build order
+
+1. **Probe + warnings** (usable on its own): dimension columns + migration (hand-written SQL + `migrate deploy`), probing at upload complete, `surfaces` in capabilities, a read-only preview grid with badges and safe zones, enforced-range validation, and the Shorts check switched to stored dimensions.
+2. **Cropper + rendering for images and video** (one release, decided §12.9): `media_fits` + `media_renditions`, API field + validation, cropper dialog with per-account customization, render queue/worker with `sharp` and `ffmpeg` (crop and blur-pad, temp-disk handling, render deadline), per-target dispatch URLs, Instagram JPEG conversion, the "Preparing media…" state, cleaner support. Internally, build and test images first, since they're the faster loop, then add video before shipping.
+3. **Smart defaults and extras:**
+   - `sharp`'s attention strategy (or `smartcrop.js` in the browser) positions the default crop.
+   - AutoFlip-style video reframing later.
+   - Generative outpainting as a paid extra, never the default.
+
+### 12.8 Risks
+
+- `sharp` under Bun: check that its prebuilt libvips loads in the backend runtime before building on it.
+- Portrait phone photos (EXIF orientation) and rotated phone videos are the classic mismatch between browser preview and server output. Test both first.
+- Video re-encoding is slow and CPU-heavy (a 1 GB 4K file can take minutes) and loses a little quality. It only runs when the user actually crops or pads a video. Shipping video in the first release makes this the release's biggest risk; size the render worker's CPU and disk before launch.
+- Renditions add storage, with the same 15-day retention as their master.
+
+### 12.9 Decisions (Kushagra, Sep 30)
+
+| Question | Decision |
+|---|---|
+| Where cropped files are made | **Server** (`sharp` / `ffmpeg`) from the master, for images and video. The browser sends only the fit. Browser-side canvas cropping was rejected: it can't handle video, and it re-uploads on every edit. |
+| Fit granularity | **Editable per account.** Default is one fit per surface shared by its accounts, with "customize for this account". Identical fits share one rendition. Uncropped targets share the master. |
+| Out-of-range media on a strict surface | **User chooses** crop or blur-pad. No automatic crop; submit is blocked until they choose. |
+| Video in the first release | **Yes**, together with images. |
+| Preview style | **Plain ratio frames** with safe-zone bands, no mock platform UI. |
+| Story / Reels images | **Blur-pad by default** when not 9:16. |
+| Instagram images | **Always converted to JPEG** by the render worker, even uncropped. This replaces the §11.5 "JPEG only" validation error. |
+| Per-target presigned URLs | Not a cost concern. Signing is local, and uncropped targets point at the same S3 object. |
+
+### 12.10 Step 1 as built (Sep 30, 2026)
+
+- **Dimensions at upload.** Migration `20260930090000_add_media_dimensions` adds `media_assets.width`, `height` and `duration_seconds`. `POST /media/:id/complete` fills them through `service/media.ts` `probeMediaAsset`:
+  - Images: `sharp` metadata on the downloaded object, EXIF-oriented (`autoOrient`). `sharp` is a new backend dependency, confirmed working under Bun.
+  - Videos: the existing rotation-aware `probeVideo` (ffprobe) on a 15-minute presigned URL.
+  - A file that can't be measured is rejected and deleted, like a failed magic-byte check.
+  - The `MediaAsset` API response now includes the three fields.
+- **Fit rules.** `lib/capabilities.ts` `SURFACE_FITS` defines, per platform and media type:
+  - `display`: the ratio range shown whole.
+  - `beyond`: what happens outside it, `CROP` or `LETTERBOX`.
+  - `accepted`: the range the API refuses to go beyond. Set for Instagram feed/carousel (4:5-1.91:1) and LinkedIn video (1:2.4-2.4:1).
+  - `safeZone`: set for Reels, Stories and Shorts.
+  - `carouselUsesFirstRatio`: set for Instagram carousels.
+  - These rules are served as `surfaces` in `GET /api/capabilities`. The ratio tolerance is 1%, so a 1080x1349 export still counts as 4:5.
+- **Validation.** `POST /post-groups` adds a per-target error when a file is outside a surface's `accepted` range. Files uploaded before the migration have no dimensions and skip this check. The Shorts check reads the stored dimensions and only probes older uploads.
+- **Composer.**
+  - `media-picker.tsx` reads each file's dimensions in the browser as soon as it's picked, then replaces them with the backend's once the upload completes. This replaces the old Shorts-only `useVideoShape`.
+  - The new `components/media-fit-preview.tsx` shows one tile per platform + media type under the media picker, covering the tile's accounts. Each tile has a frame per file at the shape the platform will show, drawn with CSS only.
+  - Each tile gets a verdict: fits, cropped, letterboxed, or rejected. Shaded safe-zone bands appear on full-screen vertical surfaces.
+  - Rejected shapes block submit with the same message the backend gives.
+- **Not built yet:** cropping, padding and JPEG conversion (step 2 — built next, see §12.11).
+
+### 12.11 Step 2 as built (Sep 30, 2026)
+
+- **Data model (refines §12.3).** The fit spec lives on the rendition, and a thin join table says which target uses which one. This way the render worker never looks at posts, and identical fits share a row and a file without extra bookkeeping. Migration `20260930120000_add_media_renditions`:
+  - `media_renditions`: `mode` (`CROP` | `PAD` | `CONVERT`), the crop rect (`crop_x/y/w/h`, 0-1 of the displayed master), output `width`/`height`, `content_type`, `key` = `<workspaceId>/<assetId>/r/<specHash>.<jpg|mp4>`, and `status` (`PENDING` | `READY` | `FAILED` | `DELETED`). Unique on `(media_asset_id, spec_hash)`.
+  - `post_media_renditions (post_id, media_asset_id, rendition_id)`: a target with no row for a file sends the master.
+- **Output size (`lib/render.ts` `renditionSpec`).** At most 1080 on the short edge and 1920 on the long one, never upscaled, even dimensions. `CONVERT` keeps the master's size. `specHash` covers mode, rect, size and type, so two targets with the same fit share one render.
+- **Presets.** `SURFACE_FITS[...].presets` (served in `/api/capabilities`) lists the shapes the cropper offers:
+  - feed images: 4:5, 1:1, 1.91:1
+  - feed video: 4:5, 1:1, 16:9
+  - Reels and Stories: 9:16
+  - YouTube video: 16:9
+  - Shorts: 9:16, 1:1
+
+  The API only accepts a crop or pad at one of these.
+- **API.** Each `POST /post-groups` target gains `mediaFits: [{ mediaAssetId, mode: CROP|PAD, ratio, rect? }]`. `service/media-fits.ts` `resolveTargetMedia`:
+  - validates the fits: the shape must be a preset, the rect must be inside the picture and match the shape within 2%, the file must have stored dimensions, and each file can have one fit
+  - drops no-op fits
+  - adds a `CONVERT` for Instagram non-JPEG images, which replaces the old "JPEG only" error
+  - checks each file's final shape against `accepted` and the Shorts rule
+
+  The group transaction upserts renditions and links them. Pending renders are queued right after it commits.
+- **Rendering (`queue/render-worker.ts`).** The `media-render` queue has concurrency 2 and 2 attempts, and one job per rendition.
+  - Images: `sharp` auto-orients, then extract + resize (crop) or composites onto a blurred, darkened cover (pad). Output is always JPEG (mozjpeg q90, white background for transparent PNGs).
+  - Video: `ffmpeg` reads a presigned URL of the master and crops/scales or blur-pads (H.264 CRF 20 veryfast, AAC, `+faststart`) into a temp file, which is streamed to S3 with `@aws-sdk/lib-storage`.
+  - A reconciler re-queues `PENDING` renditions every 5 minutes. When a master is deleted, the media cleaner deletes its renditions too.
+- **Publishing.**
+  - The publish worker waits for this target's renditions by re-delaying its own job every 15 s. It gives up after 10 minutes for images and 45 for video with a readable failure.
+  - A `FAILED` rendition fails the target. Retrying the target re-queues its failed renders.
+  - `mediaUrlsForDispatch` signs the rendition's key when there is one, so n8n payloads are unchanged.
+  - Targets expose `preparingMedia`, and History shows "Preparing media…".
+- **Composer.**
+  - Each preview tile has an **Adjust** button that opens `media-fit-dialog.tsx`: As uploaded / Crop / Blur-pad, a shape picker from the presets, `react-easy-crop` for images and video, a per-file strip for carousels, and a live platform-shaped preview with safe zones.
+  - A tile's fit covers all its accounts. "Different for one account?" splits an account into its own tile, and "Use the same as other … accounts" merges it back.
+  - Defaults: Stories images that aren't 9:16 start blur-padded. Everything else starts as uploaded, and a shape the platform refuses blocks submit until the user crops or pads it.
+  - The tile previews draw crops and pads with CSS from the same rect the backend renders.
+- **Verified:**
+  - Validation rules checked in isolation.
+  - Real renders through the running render worker against S3: PNG crop to 4:5, pad to 9:16 and JPEG convert, plus video crop to 9:16 and pad to 9:16. All came out at the expected sizes and codecs in about 4 s, and dispatch signed the rendition keys.
+  - EXIF-rotated photos and rotated phone videos checked locally.
+- **Not verified yet:** the composer's Adjust dialog in a browser, and a real post of a rendered file to each platform.
+
+## 13. Per-Platform Posting Limits — Implementation Plan (Sep 30, 2026, planning only)
+
+> **Status (Sep 30, 2026):** steps 1-5 built on branch `worktree-rate-limit-plan` (§13.10.1-13.10.5). Step 6 is deferred to V2 (§13.12). Makes the §5 "per-`(user, platform)` rate limiter" and "circuit breaker" concrete. Kushagra's decisions are in §13.9. Scope: Facebook, Instagram, Threads, LinkedIn and YouTube. Pinterest gets a policy row when it's wired.
+
+**Goal:** a user should never lose an account for hours because the app sent too much, too fast. The backend holds every post back until the platform will accept it. It never sends one that would go over a limit.
+
+### 13.1 What each platform enforces (checked against the official docs, Sep 30, 2026)
+
+| Platform | Published limit | Window | Scope | Live check |
+|---|---|---|---|---|
+| Facebook Page | **No post-count limit is published.** Pages API calls: 4,800 × engaged users per 24 h (Business Use Case limit). The real risk is **spam detection** (§13.2). | rolling 24 h | per Page | `X-Business-Use-Case-Usage` header (`call_count`, `estimated_time_to_regain_access` in minutes) |
+| Instagram | **100 API-published posts** (a carousel counts once). The same docs page also says 50 in its Limitations list, so plan for 50. | rolling 24 h | per IG account, counts posts from **every** app using it | `GET /<IG_ID>/content_publishing_limit` |
+| Threads | **250 posts**, 1,000 replies, 100 deletes | rolling 24 h | per Threads profile | `GET /{id}/threads_publishing_limit` |
+| LinkedIn (Share on LinkedIn, `w_member_social`) | **150 API calls per member** and 100,000 per app. It counts **calls, not posts**. An image post is about 3 calls, a video is 4+ plus the §6 poller's status checks. | calendar day, resets 00:00 UTC | per member | Developer Portal → Analytics. A 429 when over. |
+| YouTube | **Project-wide**, shared by every user of the SaaS: 10,000 units/day, plus 100 `videos.insert`/day. The video-status poller also spends units (`videos.list`, about 11 per upload). Channels have their own unpublished upload cap (`uploadLimitExceeded`). The §5 case 3 audit gate applies before launch. | calendar day, resets 00:00 Pacific | per project + per channel | Cloud Console quotas |
+| Pinterest *(not wired yet)* | Trial: a small daily budget **per app**, shared by every user. Standard: per user per minute. | day / minute | per app / per user | `x-ratelimit-remaining`, `x-ratelimit-reset` |
+
+Sources: Meta Graph API "Rate Limits", Instagram "Content Publishing", Threads "Troubleshooting", YouTube "Quota Calculator", LinkedIn "API Rate Limiting". These numbers change without notice, so all of them live in one table (§13.3) that is easy to update.
+
+### 13.2 Why the Sep 2026 block happened
+
+`history.md` records Meta error **`368` / subcode `1390008`, "spam prevention"**, on Instagram and then the Facebook Page after several test posts in a few minutes. This isn't a counter that runs out. It's Meta's trust check reacting to **bursts**, **the same content repeated**, and **apps in development mode**. A daily cap alone would not have prevented it. What prevents it:
+
+1. **Pacing**: a minimum gap between two sends to the same account, and a per-hour cap.
+2. **Daily caps** set well below the published limits.
+3. **A duplicate guard**: the same caption and media to the same account within 24 h is refused.
+4. **A circuit breaker**: after one 368 or 429, the account is paused so nothing else is sent into the block and makes it longer.
+
+### 13.3 Policy table (`backend/src/lib/posting-limits.ts`)
+
+One record per platform, next to `capabilities.ts`: `{ perDay, window: "ROLLING_24H" | "UTC_DAY" | "PACIFIC_DAY", perHour, minGapSeconds, cost(mediaType), duplicateWindowHours }`. `cost` is 1 per post, except LinkedIn (API calls) and YouTube (units). Confirmed caps, deliberately about half the published limit:
+
+| Platform | Our daily cap | Per hour | Min gap | Cost per post |
+|---|---|---|---|---|
+| Facebook Page | 25 posts | 4 | 5 min | 1 |
+| Instagram | 25 posts (published: 50-100) | 5 | 3 min | 1 |
+| Threads | 100 posts (published: 250) | 10 | 1 min | 1 |
+| LinkedIn | 100 calls (published: 150), so about 25-30 posts | 4 | 5 min | text 1, image 3, carousel 1 + 2 per image, video 12 |
+| YouTube channel | 6 uploads | 2 | 10 min | 1 |
+| YouTube project (all users) | 80 `videos.insert` and 8,000 units | — | — | insert 1 + about 15 units of polling |
+
+- `POSTING_LIMITS_PROFILE=dev` halves every number, and doubles each gap. Meta treats development-mode apps more strictly, and that is where the block happened.
+- The caps are the same for everyone. Workspaces can't change them (§13.9 decision 2).
+
+### 13.4 What a limit is keyed on
+
+The platform counts per **platform account**, not per app user or per `ConnectedAccount` row. So the key is `(platform, platformAccountId)`:
+
+- A Page connected in two workspaces, or an Instagram account connected through both Facebook Login and Instagram Login (§2.2), shares **one** budget. Otherwise two teams could each use "their" 25 and still trigger the block.
+- YouTube also has an **app-wide** budget (`platformAccountId = "*"`), checked in addition to the per-channel one. Pinterest Trial will need the same when it's wired.
+- Separately, an app-level abuse guard: `rateLimitByUser("post-groups", 30, 3600)` on `POST /post-groups`, using the existing middleware. This protects n8n. It's unrelated to platform limits.
+
+### 13.5 Data model (hand-written SQL + `migrate deploy`, as usual)
+
+```
+dispatch_slots                          account_cooldowns
+- id                                    - platform, platform_account_id   (PK)
+- platform, platform_account_id         - until            timestamptz
+- post_id, attempt                      - reason           ABUSE_BLOCK | RATE_LIMIT | QUOTA
+- cost             int                  - message          (shown to the user)
+- slot_at          timestamptz          - source_post_id
+- content_hash     text                 - created_at
+- released_at      timestamptz null
+index (platform, platform_account_id, slot_at)
+```
+
+- A slot is a **reservation**: "this target may go out at `slot_at`". Window usage is `SUM(cost)` over unreleased slots in the window, so scheduled posts count against the day they will actually be sent.
+- **Postgres, not Redis.** If Redis is flushed, the counters would drop to zero and allow exactly the burst we're guarding against. Postgres is already the source of truth for schedules (§10.6), and the volume is tiny.
+- **Concurrency:** every reservation runs in a transaction that first takes `pg_advisory_xact_lock(hashtext(platform || ':' || platformAccountId))`. Two workers, two groups, or two backend replicas can't both take the last slot.
+
+### 13.6 Where it's enforced
+
+**`service/posting-limits.ts`** exposes `reserveSlot(tx, key, cost, earliest, contentHash)` → `slotAt`, `releaseSlot(postId, attempt)`, `getCooldown(key)`, `setCooldown(...)` and `usage(key)`. `reserveSlot` finds the earliest time ≥ `earliest` (and ≥ any cooldown) where the minimum gap, the hour and the day all have room. It searches at most 7 days ahead.
+
+1. **Create (`POST /post-groups`, §10.4 step 2 and 4):**
+   - The duplicate guard runs with the other validation. A matching `content_hash` (normalized caption + media asset ids) on the same account within 24 h is a target error: "You posted this to @page 2 hours ago". There is no "post anyway" (§13.9 decision 3).
+   - Slots are reserved inside the transaction that creates the posts. The publish job's delay becomes `slotAt - now` instead of `scheduledFor - now`.
+   - If `slotAt` is later than requested but within the **1 h auto-delay allowance** (§13.9 decision 1), the target is accepted. The response and results panel say "goes out at 14:05 (Instagram posting pace)".
+   - Beyond the allowance, for example when the day's cap is full, it's a normal §10.4 target error with the next free time: "@brand has used today's 25 Instagram posts — next free slot tomorrow 09:12". The UI offers "Schedule for then" next to "Deselect".
+2. **Publish worker (the final check):** before `markTargetProcessing`, re-read the cooldown and the slot.
+   - If `slot_at` is still in the future, re-delay the job with `moveToDelayed` (the same mechanism as the render wait).
+   - If the account is cooling down, **fail** the target with the reason and the resume time, and release its slot (§13.9 decision 4). This catches anything the cooldown sweep in §13.7 missed.
+   - `MAX_SCHEDULE_LATENESS_MS` is measured from `slot_at`, so a post the limiter pushed back is never failed as "missed".
+3. **Slot release:** the slot is released if the target fails **before** hand-off to n8n (disconnected, render failed, cancelled). The platform never saw it. After hand-off it's kept, even on failure, because the platform may already have counted the call.
+4. **Retry:** takes a new slot. A retry can't bypass pacing.
+5. **Cancel:** releases the group's future slots.
+
+### 13.7 Circuit breaker (webhook + video poller)
+
+n8n already sends the raw error text, so `routes/webhooks.ts` classifies it with the same kind of regex table as `platform-error.ts`. No n8n changes are needed for V1.
+
+| Signal | Cooldown | Scope |
+|---|---|---|
+| Meta `code 368` (any subcode), "temporarily blocked" | **24 h** | account |
+| Meta `4 / 17 / 32 / 613 / 80001`, HTTP 429 | `estimated_time_to_regain_access` if sent, else 1 h | account |
+| Instagram publishing limit (`code 9`, subcode `2207042`) | until the oldest slot in the rolling 24 h leaves the window | account |
+| Threads publishing limit | same, rolling 24 h | account |
+| LinkedIn 429 | until 00:00 UTC | account |
+| YouTube `uploadLimitExceeded` | 24 h | channel |
+| YouTube `quotaExceeded` | until 00:00 Pacific | **all YouTube posts** (`"*"`) |
+
+While an account is cooling down:
+
+- **Setting a cooldown fails that account's waiting targets right away** (§13.9 decision 4): every `SCHEDULED` target whose `slot_at` is before `until` has its publish job removed, is marked `FAILED` with "Paused by Facebook until 14:05 tomorrow (flagged as spam) — retry after that", and releases its slot. Targets already handed to n8n are left alone. Scheduled posts after `until` are kept.
+- Retrying a failed target while its account is still cooling down returns 409 with the resume time.
+- The composer shows the account disabled: "Paused until 14:05 — Meta flagged rapid posting". A post scheduled after `until` is still allowed.
+- Nobody can clear a cooldown early. Sending into a 368 makes it longer, and caps aren't adjustable per workspace either.
+
+### 13.8 API and frontend
+
+- `GET /api/workspaces/:ws/posting-limits` returns, for each connected account: `{ used, cap, window, resetsAt, nextSlotAt, cooldown: { until, reason, message } | null }`.
+- **Dashboard:** a small usage bar on each account card ("Instagram 12 / 25 today"), and a paused badge.
+- **Composer:** accounts that are paused, or have no slot within the allowance, are shown disabled with the reason. The "When" step shows "goes out around 14:05" for a target the limiter pushed back.
+- **Results panel / History:** a target the limiter pushed back shows "Waiting for posting limit — goes out at 14:05" (status stays `SCHEDULED`, no new enum). A cooldown hit shows the reason and the resume time, not a generic failure.
+
+### 13.9 Decisions (Kushagra, Sep 30)
+
+1. **Limit hit on "Post now" or a schedule:** the post waits automatically if a slot opens within **1 hour**. Beyond that the target is rejected with the next free time.
+2. **Caps:** the §13.3 numbers as written. **Workspaces can't change them.**
+3. **Duplicate content** to the same account within 24 h is **blocked**, with no override.
+4. **Cooldowns:** 24 h after a Meta 368. Posts waiting for a cooling-down account **fail** instead of waiting, so the user decides what to do. This applies to every cooldown reason, not only 368, so the behaviour is the same everywhere.
+5. **Scope:** all five wired platforms (Facebook, Instagram, Threads, LinkedIn, YouTube) in the first build. Pinterest waits until it's wired.
+
+### 13.10 Build order
+
+1. `lib/posting-limits.ts` (policy table, window maths) + migration for `dispatch_slots` and `account_cooldowns`.
+2. `service/posting-limits.ts` (`reserveSlot` with advisory lock, release, cooldowns) + tests for slot search: gap, hour, rolling vs calendar day, cooldown.
+3. Wire into create (duplicate guard, reservation, allowance errors), the publish worker (pace re-delay, cooldown fail), retry and cancel. Add the per-user create limit.
+4. Webhook/poller error classifier → cooldowns, plus the sweep that fails waiting targets. YouTube project-wide budget.
+5. `GET /posting-limits` + frontend (dashboard usage, composer disabled/next slot, results panel and History messages).
+6. **Deferred to V2 (Kushagra, Sep 30) — see §13.12.** Have n8n callbacks pass `X-Business-Use-Case-Usage` / `x-ratelimit-*` through (the §6 `usage` field) to pause proactively above 80 %. Before an Instagram/Threads publish when our own count is above 80 %, call `content_publishing_limit` / `threads_publishing_limit`. That catches posts made through other tools on the same account. Add Pinterest limits when it's wired.
+
+### 13.10.1 Step 1 as built (Sep 30, 2026)
+
+- **Migration `20260930170000_add_posting_limits`** (applied to the dev database): `dispatch_slots`, `account_cooldowns` and the `CooldownReason` enum, as in §13.5. Two changes from the sketch:
+  - Timestamps are `TIMESTAMP(3)`, like every other table, not `timestamptz`.
+  - `dispatch_slots` is unique on `(post_id, attempt, platform_account_id)`, because a YouTube target takes two slots: its channel's and the app-wide `"*"` one.
+- **`lib/posting-limits.ts`:**
+  - the §13.3 policy table, and LinkedIn's call cost read from `linkedin-poster.json`
+  - `budgetsFor(platform, platformAccountId, profile)`
+  - UTC and Pacific calendar days, with the DST changes handled
+  - `fitsAt` / `nextFreeTime`, the slot search. It moved here from step 2 because it's pure maths.
+  - `contentHash` + `mediaFingerprint` for the duplicate guard. Uploads keep no checksum, so a file is identified by its type, exact size, dimensions and duration. The same file uploaded again still matches.
+
+  The file doesn't read `env`: callers pass `env.POSTING_LIMITS_PROFILE`, so it can be tested on its own.
+- **YouTube app-wide budget** counts only `videos.insert` (80/day). The status polls' units (about 15 per upload) run out long after the inserts do.
+- **`POSTING_LIMITS_PROFILE`** (`standard` | `dev`, default `standard`). `.env.example` suggests `dev` while the Meta app is in development mode.
+- **Tests:** `bun test` (new `test` script), 22 cases in `lib/posting-limits.test.ts`: gap on both sides, hourly and rolling-24 h windows including scheduled sends, calendar-day resets, both Pacific DST days, and a brute-force check that `nextFreeTime` returns the earliest time that fits.
+- **Not wired yet:** nothing reads or writes the new tables until steps 2-3.
+
+### 13.10.2 Step 2 as built (Sep 30, 2026)
+
+`backend/src/service/posting-limits.ts`:
+
+- **`reserveSlot(tx, request)`** must run inside a transaction: the post-creating one, or its own. It:
+  1. takes `pg_advisory_xact_lock(hashtext('<PLATFORM>:<accountId>'))` for each budget, in sorted order so the YouTube channel + `"*"` pair can't deadlock
+  2. returns the existing slot if this post and attempt is already booked
+  3. runs the duplicate check. Earlier attempts of the same post are ignored, so a retry isn't a duplicate of itself.
+  4. starts the search after any active pause
+  5. finds the earliest time every budget accepts (`nextFreeTimeForAll` in the lib)
+  6. inserts one row per budget, or books nothing and returns `NO_SLOT` with `nextFreeAt` when that time is after `latest`
+
+  Result: `{ ok: true, slotAt }` | `DUPLICATE { duplicateAt }` | `NO_SLOT { nextFreeAt, cooldown }`. Step 3 passes `latest = earliest + 1 h` (§13.9 decision 1).
+- **`bookedSlotAt`** and **`releaseSlot`** are for the publish worker, cancel and failures before hand-off.
+- **`setCooldown`** takes the same per-account lock and never shortens a pause that ends later. **`activeCooldown`** checks the account's own row and the app-wide `"*"` one.
+- **`accountUsage`** returns `{ used, upcoming, cap, window, resetsAt, nextFreeAt, cooldown }` for the step 5 endpoint.
+- `NODE_ENV` accepts `test` (set by `bun test`).
+- **Tests:** 11 in `service/posting-limits.test.ts`, run against the dev database. Each run makes its own user, workspace, account and posts and deletes them afterwards. They cover:
+  - the gap, idempotent re-booking, the duplicate rules and `latest`
+  - release, LinkedIn's call-based daily cap, and YouTube's two rows
+  - pauses (never shortened, the app-wide YouTube pause) and usage
+  - 8 posts booking one account at the same moment. With the lock switched off this test fails: all 8 got the same time.
+
+### 13.10.3 Step 3 as built (Sep 30, 2026)
+
+The limiter now drives real posting.
+
+- **Create (`POST /post-groups`).**
+  - Inside the create transaction, after the posts and renditions, each target books a slot in `lockOrderKey` order. `earliest` is `scheduledFor` or now, and `latest` is `earliest + AUTO_DELAY_MS` (1 h). The content hash is the target's caption plus its files' fingerprints.
+  - A duplicate, or no slot within the hour, throws `PostingLimitError`. That rolls back the whole create (all-or-nothing, like validation) and returns the usual 400. Each refused target gets a message and `nextFreeAt` (ISO, or null), for step 5's "Schedule for then".
+  - Limit errors are only reported once validation passes, so a post with validation errors doesn't show its limit errors yet.
+  - A "post now" target pushed past now becomes `SCHEDULED`. The group status is recomputed, and the job is queued with its `slotAt` as the delay. The transaction timeout is 15 s, because booking can wait on other posts to the same account.
+  - New: `rateLimitByUser("post-groups", 30, 3600)`.
+- **Messages** say how long ("in about 3 hours"), not what time, because the server doesn't know the user's timezone. `lib/posting-limits.ts` holds `limitRefusalMessage`, `pausedFailureMessage` and `durationInWords`.
+- **Publish worker.**
+  - Every failure before hand-off also releases the slot (`failUnsent`): cancelled, missed time, disconnected, reconnect needed, render failed or too slow. Failures after hand-off keep it.
+  - "Missed its scheduled time" is measured from `slotAt` for scheduled groups.
+  - A paused account fails the target with "Not sent: this account is paused (…) — retry in …".
+  - A job that runs before its slot is moved back to the slot time.
+  - `publish` is exported for tests.
+- **Reconciler** also re-queues lost jobs for `SCHEDULED` targets with a due slot and no `scheduledFor`, i.e. pushed-back "post now" targets.
+- **Retry** books `attempt + 1` before `prepareRetry`. It returns 409 with the limit message if the account is paused or has no slot within the hour, and releases the slot if the retry then loses a race. The job is queued at `slotAt`. Retries stay `PROCESSING` while waiting, so they can't be cancelled.
+- **Cancel** releases each cancelled target's slot.
+- **API:** each target has `sendAt`, the booked time of the current attempt.
+- **Frontend (minimal).** The composer's results panel polls every 3 s while any target is `PROCESSING`. A mixed group reads `SCHEDULED`, which used to stop the polling. It polls every 30 s while a "post now" group still has a pushed-back target. History already shows these as Scheduled with a Cancel button.
+- **Tests:** `routes/post-groups.limits.test.ts` runs the real route and worker against the dev database. The publish/render queues and n8n are stubbed so nothing is queued or sent. It covers:
+  - a second post to the same Page getting `SCHEDULED` at +gap and queued then
+  - the duplicate refusal
+  - all-or-nothing with a paused account (`nextFreeAt` = pause end, nothing written for the other account)
+  - cancel freeing the slot for the next post
+  - retry refused while paused, then paced after attempt 1
+  - the worker failing a paused account's post and freeing its slot
+  - the worker moving an early job to its slot
+
+  40/40 pass with both profiles. Not yet tested with a real post through n8n.
+
+### 13.10.4 Step 4 as built (Sep 30, 2026)
+
+Platform limit errors now pause accounts automatically.
+
+- **`lib/limit-errors.ts`** holds the `classifyLimitError(raw, platform)` rules table from §13.7. It reads the same raw text as `platform-error.ts` (n8n's `400 - "{…}" (node: …)`, or the poller's `… failed (403): {…}`). First match wins:
+
+  | Error | Pause | Scope |
+  |---|---|---|
+  | Meta `368` / "temporarily blocked" | 24 h (`ABUSE_BLOCK`) | account |
+  | Instagram subcode `2207042` | rolling 24 h (`QUOTA`) | account |
+  | Threads "publishing limit / quota" text | rolling 24 h (`QUOTA`) | account |
+  | Meta codes `4/17/32/613/80001/80002` | 1 h (`RATE_LIMIT`) | account |
+  | YouTube `quotaExceeded` | to Pacific midnight (`QUOTA`) | **app-wide `"*"`** |
+  | YouTube `uploadLimitExceeded` | 24 h (`QUOTA`) | channel |
+  | YouTube `rateLimitExceeded` | 1 h (`RATE_LIMIT`) | channel |
+  | LinkedIn 429 | to UTC midnight (`QUOTA`) | account |
+  | any other 429 | 1 h (`RATE_LIMIT`) | account |
+
+  - The code match is anchored on a JSON `"code"` key, so `error_subcode: 4`, `code: 40`, and HTTP 400 don't match.
+  - Threads doesn't document its over-the-limit error, so that rule is a guess.
+  - `estimated_time_to_regain_access` isn't used: n8n doesn't pass response headers through yet (step 6).
+- **`service/limit-pauses.ts`:**
+  - `pauseForLimitError` classifies the error, works out the pause's end, calls `setCooldown` (never shortened), then `failWaitingTargets`.
+  - Rolling pauses end when our oldest slot in the last 24 h leaves the window. They last at least 1 h, because posts made with other tools aren't counted; with no slots they last 24 h.
+  - `failWaitingTargets` finds every `SCHEDULED` target for that account (every YouTube account for `"*"`, in every workspace) that is due before the pause ends. It removes the job, fails the target with the paused message, and releases the slot. Targets due after the pause, and ones already handed to n8n, are kept.
+- **Wired into:**
+  - `routes/webhooks.ts`: every FAILED callback, duplicates and late ones included. Errors here are logged, never turned into a 500.
+  - `queue/video-status-worker.ts`: a status check that throws (e.g. `videos.list` spending YouTube's project quota) pauses, then rethrows so BullMQ's retry still applies.
+- **History wording** (`platform-error.ts`): new rules for 368, which warns that retrying sooner makes the block longer; for Instagram `2207042`; and for YouTube's project quota, now separate from the channel's upload limit.
+- **Tests:** `lib/limit-errors.test.ts` (7), plus 2 callback tests in `routes/post-groups.limits.test.ts`:
+  - a real n8n-shaped 368 callback pauses the Page for 24 h. Its pushed-back post fails with the paused message and its slot is freed, a post scheduled 48 h out stays `SCHEDULED`, the sent post's slot still counts, and History shows the 368 wording.
+  - a plain 500 pauses nothing.
+
+  49/49 pass with both profiles.
+
+### 13.10.5 Step 5 as built (Sep 30, 2026)
+
+Users can now see the limits.
+
+- **`GET /api/workspaces/:ws/posting-limits`** (`routes/posting-limits.ts`) returns, for each connected account on a platform we post to: `{ connectedAccountId, platform, unit: posts|calls, used, upcoming, cap, window, resetsAt, nextFreeAt, cooldown }`.
+  - It uses `accountUsage` from step 2. Two connections of one Instagram account share one lookup.
+  - `nextFreeAt` is for a one-cost post, so it's never later than what a real post would get.
+- **`backend/src/app.ts`** now holds the HTTP app; `index.ts` only serves it and starts the workers. **`bun run openapi <file>`** (`scripts/openapi.ts`) writes the OpenAPI spec without starting the server or workers, which would otherwise pick up the shared dev queue's jobs. The frontend's `api-schema.d.ts` was regenerated from it with `bunx openapi-typescript <file> -o src/lib/api-schema.d.ts`.
+- **Frontend `lib/posting-limits.ts`:** `usePostingLimits` (refetched every 60 s, and invalidated after posting, retry and cancel), `formatWhen` ("10:05" / "tomorrow 09:12" / "Fri 3 Oct, 09:12", in the browser's timezone), `windowLabel` and `pausedText`.
+- **Dashboard:** each account card shows
+  - "12 / 25 posts in the last 24 hours" (LinkedIn: calls, "today (resets at midnight UTC)"), with a bar that turns amber at 80 %
+  - how many are queued, and "Next post can go out at 10:05" when that's more than a minute away
+  - when paused: a **Paused** badge in place of Connected, and "Paused until tomorrow 14:05 — Meta flagged the posting as spam".
+- **Composer:**
+  - Paused accounts are disabled with the reason, unless the post is scheduled after the pause ends.
+  - For "Post now", an account whose next free slot is more than an hour away is disabled with that time. The backend still decides; this only hides certain refusals.
+  - The Timing step lists "Facebook · My Page goes out around 10:05, to keep a safe gap between its posts" for pushed-back accounts.
+  - A 400 with `nextFreeAt` adds a **"Schedule for {time}"** button. It uses the latest of the refused accounts' times, rounded up to the minute, and switches to Schedule.
+  - The success toast says how many accounts wait for a safe gap.
+- **Post card (results panel and History):** a target booked later than asked shows "Waiting for its posting limit — goes out at 10:05". That covers pushed-back "post now" targets, retries and nudged schedules.
+- **Tests:** 2 more in `routes/post-groups.limits.test.ts` for the endpoint (usage, queued count and `nextFreeAt` computed the same way as the limiter; a pause). 51/51 pass with both profiles. The frontend type-checks and builds.
+- **Not checked in a browser yet.** A dev backend started from this branch would run its workers against the shared dev Redis.
+
+### 13.11 Risks
+
+- Meta publishes no Facebook post limit or spam threshold, so the Facebook numbers are guesses. Start strict and loosen them based on what we see.
+- Our count can't see posts sent through other tools (Buffer, Meta Business Suite) on the same account. The step 6 live checks and the circuit breaker cover that.
+- The YouTube project budget is shared by every user, so one heavy workspace could use it up for everyone. A per-workspace share of it may be needed once there are real users.
+
+### 13.12 V2: pausing before a limit is hit (step 6, deferred Sep 30, 2026)
+
+**Decision (Kushagra, Sep 30):** not in V1. Test the step 1-5 limiter with real posts first. Build this if History starts showing Meta throttling errors (codes 4 / 17 / 32 / 613 / 80001) once there are real users.
+
+**What it adds.** Today the app only learns about an API limit when a post fails with it. Step 4 then pauses the account for a fixed time. Two sources would let it act earlier:
+
+1. **Meta's usage headers.** Every Graph API response carries a usage meter in its headers: `X-App-Usage`, `X-Page-Usage` and `X-Business-Use-Case-Usage`. They give `call_count`, `total_time` and `total_cputime` as a percentage of the allowance, and `estimated_time_to_regain_access` in minutes once blocked. Example:
+   ```
+   X-Business-Use-Case-Usage: {"<page id>":[{"type":"pages","call_count":85,
+     "total_time":30,"total_cputime":20,"estimated_time_to_regain_access":0}]}
+   ```
+   n8n reads only the response body today, so these are discarded.
+2. **Live post-count endpoints.** `GET /<IG_ID>/content_publishing_limit` (Instagram) and `GET /{threads-user-id}/threads_publishing_limit` (Threads) return how much of the account's rolling 24 h post limit is used. That count includes posts made with other tools (Meta Business Suite, Buffer), which `dispatch_slots` can't see (§13.11).
+
+**Plan.**
+- **n8n:** in `facebook-poster`, `instagram-poster` and `threads-poster`, turn on the HTTP Request nodes' "Include Response Headers and Status" option, then add the highest usage figures to the callback. This is the §6 `usage` field, which was designed but never sent.
+  - **This is the bulk of the work.** With headers included, a node's output changes from `$json` to `$json.body` (e.g. `$json.id` → `$json.body.id`). Every downstream expression in those three workflows must be updated and retested.
+- **Backend:**
+  - `n8nCallbackSchema` accepts an optional `usage`.
+  - Any figure at or above ~80 % sets a short `RATE_LIMIT` cooldown (e.g. 30-60 min) through `setCooldown`. It does **not** fail waiting posts the way a hard error does; they just wait. That may need a softer cooldown kind than §13.9 decision 4's "fail".
+  - A throttling error that arrives with `estimated_time_to_regain_access` pauses for exactly that long instead of step 4's 1 h guess (`lib/limit-errors.ts`).
+- **Before publishing** to Instagram or Threads, when our own count for the account is above ~80 % of its cap, call the live endpoint from the publish worker. If the account is full, re-delay or fail the target the same way a pause does.
+- **Pinterest:** use `x-ratelimit-remaining` / `x-ratelimit-reset` the same way once `pinterest-poster` is wired.
+
+**What it doesn't do.** It would **not** have prevented the Sep 2026 block. That was Meta's code 368 spam check, which has no counter and no warning header. What guards against 368 is the pacing, caps, duplicate guard and cooldown from steps 1-4. This work only helps with API throttling, which grows with user count and posting volume.
+
+## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
+
+> **Status (Oct 1, 2026):** steps 1-5 built and checked end to end (§14.11.1-§14.11.5), including the n8n leg. Step 6: dashboards and alert rules built and checked locally (§14.11.6-§14.11.7); Grafana Cloud deferred by Kushagra (Oct 1), so production telemetry stays off until it's set up. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+
+**Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
+
+### 14.1 Why Grafana Cloud + OpenTelemetry
+
+- **The backend runs on Bun.** Vendor APM agents (New Relic, Datadog) and OTel's `auto-instrumentations-node` rely on patching `require`/`node:http`. `Bun.serve` doesn't go through `node:http`, so auto HTTP spans never appear. What does work under Bun: the OTel `NodeSDK`, OTLP exporters, and instrumentations the library itself calls (Prisma, BullMQ, `@hono/otel`). Grafana speaks plain OTLP end to end, so it needs no agent.
+- **Correlation comes built in.** Loki log → Tempo trace (derived field on `trace_id`), Tempo span → Loki logs, and RED metrics (rate, errors, duration) computed from spans.
+- **The same setup works from laptop to production.** Local dev uses the `grafana/otel-lgtm` Docker image (Grafana :3000, OTLP gRPC :4317, OTLP HTTP :4318; dev-only, not for production). Production points the same OTLP env vars at Grafana Cloud. When the V2 K8s move happens, Grafana Alloy / k8s-monitoring Helm drops in with no app change.
+- **No lock-in.** The app only emits OTLP. Switching vendor means changing an endpoint and a header.
+- **Free tier (third-party figures, check grafana.com/pricing):** 10k active metric series, 50 GB logs, 50 GB traces per month, 14-day retention, 3 users. Enough for V1. The 10k series cap is why §14.6 bans high-cardinality labels.
+
+### 14.2 What already exists
+
+- Logs: 28 `console.log/warn/error` calls across routes, workers and services, plus `hono/logger` text lines (`app.ts`). None carry a request, post or job id in a structured way.
+- `middleware/error-handler.ts` prints unhandled errors with `console.error`.
+- One process runs the API and all workers (`index.ts`): `post-publish`, `media-render` and `video-status` queues and workers, plus three `setInterval` loops (schedule reconciler, render reconciler, media cleaner).
+- n8n dispatch is one `fetch` in `service/n8n.ts`, and the result comes back later on `POST /api/webhooks/n8n-callback`. Nothing ties the two together except `post_id`.
+- The frontend calls the API from the same origin (`lib/api.ts`, Vite proxy in dev, reverse proxy in prod).
+
+### 14.3 Backend tracing (`backend/src/otel.ts`)
+
+- **Bootstrap:** `otel.ts` starts `NodeSDK` with OTLP HTTP exporters for traces, metrics and logs, and a resource of `service.name=smposting-backend`, `service.version` (git sha), `deployment.environment`, `telemetry.sdk.runtime=bun`. It's the **first import in `index.ts`**, so it's loaded before `@prisma/client`. `app.ts` doesn't import it, so `bun run openapi` and `bun test` stay silent. Configuration uses only the standard `OTEL_*` env vars (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SDK_DISABLED`, `OTEL_TRACES_SAMPLER`), so there's no new `env.ts` schema beyond an optional `OTEL_SERVICE_VERSION`.
+- **HTTP:** `httpInstrumentationMiddleware` from `@hono/otel` is registered as the **first** `app.use` in `app.ts`, before CORS, CSRF and the logger, so every later middleware and log line runs inside the request span. Spans are renamed to the route template (`POST /api/workspaces/:workspaceId/post-groups`), never the raw path.
+- **Redaction (must have):** `@hono/otel` records `url.full` including the query string. OAuth callbacks (`/api/auth/*/callback`, `/api/login/*`) carry `code` and `state` there, so a span processor strips query strings from `url.full` before export. Request/response headers are **not** captured (`cookie`, `x-callback-secret`). No request or response bodies ever go into spans or logs, because dispatch payloads contain decrypted platform tokens.
+- **Prisma:** `PrismaInstrumentation` from `@prisma/instrumentation` (pin to 6.19.3, same as `@prisma/client`). Tracing is GA since 6.1, so no preview flag is needed. There's a known issue where `prisma:engine:db_query` spans lose their SQL text on some 6.x versions (prisma#27666). Acceptable: the `prisma:client:operation` span still names the model and action.
+- **Outbound HTTP:** Bun's global `fetch` isn't auto-instrumented. A small `lib/traced-fetch.ts` wraps it in a CLIENT span and injects `traceparent` with `propagation.inject`. It's used by `service/n8n.ts` (dispatch) and the platform clients in `lib/*.ts` (OAuth token exchanges, video-status polls). S3 calls go through the AWS SDK and are left untraced in V1.
+- **User context:** `requireAuth`/`requireWorkspace` set `enduser.id` and `smposting.workspace_id` on the active span. They're span attributes only, never metric labels (§14.6).
+- **Errors:** `error-handler.ts` calls `span.recordException(err)` + `setStatus(ERROR)` and logs through the logger (§14.4).
+
+### 14.4 Logs (`backend/src/lib/logger.ts`)
+
+- **pino**, JSON. A `mixin` adds `trace_id`/`span_id` from `trace.getActiveSpan()` to every line.
+- **Shipping:** logs go out through the OTel Logs SDK (OTLP → Loki), so no file tailing or agent is needed locally. Transports that run in a worker thread (`pino-opentelemetry-transport`) are avoided because the log context must stay in-process under Bun. Instead, a small in-process pino destination emits each record to the SDK `LoggerProvider` with its severity and the active context. Logs also stay on stdout, which K8s/Alloy will scrape later.
+- **Replace all 28 `console.*` calls** with `logger.info/warn/error({ postId, jobId, platform, err }, "message")`. Fields become structured attributes, and messages stay short and fixed so they can be grouped.
+- `hono/logger` is replaced by one pino line per request (method, route, status, duration), written from inside the request span.
+- Loki is set up with a derived field on `trace_id` → Tempo, and Tempo's "logs for this span" → Loki `{service_name="smposting-backend"} | trace_id="…"`.
+
+### 14.5 Async boundaries (the traces that matter most)
+
+- **BullMQ:** one shared `BullMQOtel` from `bullmq-otel` (`{ tracerName: "smposting", enableMetrics: true }`) is passed as `telemetry` to all three `Queue`s and all three `Worker`s. The span that enqueues a job carries its context in the job, so the worker's `process` span is part of the same trace as the create request.
+  - **Delayed jobs start a new trace with a link, not a parent (§14.10 decision 4).** A scheduled post, or a "post now" target the limiter pushed back, runs minutes to days after the request that queued it. As one trace, its duration would be the wait, not the work, and it would bury the traces that are really slow. So any job added with `delay > 0` is enqueued under `ROOT_CONTEXT` (so `bullmq-otel` starts a new trace in the worker), and the producer's `traceparent` goes in the job data (`traceLink`). The worker adds it as a span link (`span.addLink`), which Tempo shows as a clickable jump back to the create request. Jobs with no delay keep the normal parent. The jobs are `enqueuePublish` with `runAt`, the render re-checks, and the deadline and video-status jobs (they're delayed too).
+- **Reconcilers and cleaner:** each `setInterval` tick starts its own root span (`reconcile schedules`, `reconcile renders`, `clean media`) so their Prisma queries aren't orphans.
+- **n8n (native OTel, preview since n8n 2.19):**
+  - `traced-fetch` sends `traceparent` on the dispatch webhook. n8n makes its `workflow.execute` span a child of it, with a `node.execute` span per node.
+  - n8n injects `traceparent` into outbound HTTP Request node calls (`N8N_OTEL_TRACES_INJECT_OUTBOUND`, default on). So the callback node's `POST /api/webhooks/n8n-callback` joins the **same trace**, and `@hono/otel` picks up the incoming header.
+  - Compose env for the `n8n` service: `N8N_OTEL_ENABLED=true`, `N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4318`, `N8N_OTEL_EXPORTER_SERVICE_NAME=smposting-n8n`, `N8N_OTEL_TRACES_PRODUCTION_ONLY=true`. The `n8n` image is currently unpinned (`docker.n8n.io/n8nio/n8n`); step 3 pins a version of 2.19 or later.
+  - When n8n moves to queue mode (V2), workers need a build with the traceparent persistence fix (n8n PR #36757). Otherwise worker spans land on a separate trace.
+- **Video-status poller:** the poll job is enqueued from inside the callback span, so the poll attempts join the same trace too.
+
+For a "post now" target the result is one trace that reads: `POST post-groups` → `publish` job → `POST n8n/webhook/facebook-poster` → `workflow.execute facebook-poster` → Graph API node → `POST n8n-callback`. Video-status polls (delayed) and scheduled sends are separate traces linked back to it.
+
+### 14.6 Metrics
+
+**Label rule:** labels only from small fixed sets: `platform`, `media_type`, `outcome`, `reason`, `queue`, `route`, `status_class`. **Never** `workspace_id`, `user_id`, `post_id` or `account_id`. Those go in spans and logs. This keeps us well under 10k series.
+
+- **HTTP:** request count and duration per route come from `@hono/otel` metrics.
+- **BullMQ:** completed/failed/duration per queue come from `bullmq-otel` `enableMetrics`. Queue depth is an observable gauge that calls `getJobCounts()` on each queue every 30 s (waiting, delayed, active, failed).
+- **Business metrics** (`lib/metrics.ts`):
+  - `smposting.posts.dispatched` {platform, media_type}
+  - `smposting.posts.completed` {platform, media_type, outcome=published|failed|cancelled}
+  - `smposting.posts.publish_duration` histogram, from send to final status {platform, media_type}
+  - `smposting.n8n.dispatch.duration` {platform, status_class}
+  - `smposting.n8n.callback_deadline_hits` {platform}. A post where n8n never called back.
+  - `smposting.limits.pauses` {platform, reason} from `limit-pauses.ts`
+  - `smposting.limits.slot_refusals` {platform}. A target refused because no posting slot was free.
+  - `smposting.render.duration` {kind=image|video, outcome}
+  - `smposting.media.uploads` {kind, outcome}
+- **Runtime:** process memory and event-loop lag from `@opentelemetry/host-metrics` if it works under Bun; otherwise skip it.
+
+### 14.7 Frontend (Grafana Faro)
+
+- `@grafana/faro-web-sdk` + `@grafana/faro-web-tracing`, initialized in `main.tsx` **only when `VITE_FARO_URL` is set**. Captures errors, console errors, Web Vitals, sessions and fetch spans.
+- **Trace propagation:** the API is same-origin, so `traceparent` goes on `/api` calls by default and the backend `@hono/otel` span becomes a child of the browser's fetch span. If `VITE_API_URL` ever points at another origin, add it to `propagateTraceHeaderCorsUrls` **and** allow `traceparent`/`tracestate` in `middleware/cors.ts`.
+- **Routes:** Faro's React Router integration targets v6-style routers, and we're on `react-router` 8, so skip `@grafana/faro-react`'s router option. A small `useLocation` effect in `layout.tsx` calls `faro.api.setView({ name: <route pattern> })`.
+- **User:** after `/api/me` succeeds, `faro.api.setUser({ id })`. Id only; no email or name (PII).
+- **Business events:** `faro.api.pushEvent` for composer submit, upload failure and crop-dialog save. These show the path the user took before a failure.
+- **Local:** `otel-lgtm` has no Faro receiver. Frontend telemetry is off locally by default. To test it, run the optional `alloy` compose service with `faro.receiver` forwarding to `otel-lgtm` (§14.10 Q3).
+
+### 14.8 Dashboards and alerts
+
+- **Dashboards** live as JSON in `observability/dashboards/`, imported into Grafana Cloud (and into local Grafana by hand).
+  1. **Publishing health:** published/failed per platform, failure rate, p50/p95 send-to-published, callback-deadline hits, limit pauses by reason, slot refusals.
+  2. **API:** RED per route, 5xx list, slowest Prisma operations (from span metrics).
+  3. **Queues:** depth per queue and state, job duration, failed jobs, reconciler re-queues.
+  4. **Frontend:** Web Vitals, JS errors, sessions (Faro's built-in Frontend Observability app in Grafana Cloud covers most of this).
+- **Alerts** (Grafana Cloud alerting → email to start):
+  - failure rate for one platform > 20 % over 30 min (min 5 posts)
+  - any callback-deadline hit
+  - `post-publish` failed-job count rising
+  - API 5xx rate > 2 % over 10 min
+  - a limit pause with reason `SPAM` (Meta 368)
+
+### 14.9 Production wiring
+
+- Grafana Cloud stack → OTLP endpoint + instance id + API token (`MetricsPublisher`/`LogsPublisher`/`TracesPublisher` scopes). The backend and n8n get `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic …`.
+- The token is a secret. Store it in AWS Secrets Manager and resolve it at deploy time (see the `CLAUDE.md` secret rules). It never goes in `.env` in git or `docker-compose.yml`. For n8n use `N8N_OTEL_EXPORTER_OTLP_HEADERS_FILE`.
+- The Faro collector URL is public by design (it's shipped in the browser bundle), so it's a plain `VITE_FARO_URL` build var.
+- Sampling: `parentbased_always_on` (100 %) while volume is low. Revisit if traces near 50 GB/month, e.g. drop to 20 % and keep 100 % of errors with tail sampling in Alloy.
+
+### 14.10 Decisions (Kushagra, Sep 30)
+
+1. **Frontend Faro in the first build:** yes, as step 5. It's cheap, and it's how we'd see composer errors users never report.
+2. **n8n node spans:** on (`N8N_OTEL_TRACES_INCLUDE_NODE_SPANS=true`). It shows exactly which Graph API node failed. Turn it off if trace volume grows.
+3. **Local Faro testing:** Faro off locally, with an optional `alloy` compose profile (`docker compose --profile faro up`).
+4. **Scheduled-post traces:** link, not parent. Each delayed send starts its own short trace that links back to the create request (§14.5). A parent trace would last as long as the wait, so its duration would be wrong and it would crowd out the traces that are really slow. Seeing the full journey costs one click on the link. (Changed from "parent" on Sep 30.)
+
+### 14.11 Build order
+
+1. **Spike + bootstrap.** Add `otel-lgtm` to `backend/docker-compose.yml`. Write `otel.ts` with the NodeSDK, `@hono/otel` and Prisma instrumentation, plus the query-string redaction. **Exit check:** in local Grafana, a `GET /api/workspaces/:workspaceId/post-groups` trace shows `prisma:client:operation` spans nested under the Hono span. If context propagation breaks under Bun (AsyncLocalStorage), stop and rethink before going further.
+2. **Logs.** `lib/logger.ts` (pino + trace mixin + OTLP bridge). Replace the 28 `console.*` calls, `hono/logger` and the error handler's `console.error`. Set up the Loki ↔ Tempo links. **Exit check:** clicking a log line's trace id opens its trace.
+3. **Async boundaries.** `bullmq-otel` on all queues and workers, root spans for the three interval loops, `lib/traced-fetch.ts` for the n8n dispatch and platform calls, n8n `N8N_OTEL_*` env + pinned image. **Exit check:** one real "post now" Facebook post shows create → job → n8n workflow → callback in one trace, and a post scheduled a few minutes ahead gets its own trace whose link opens the create request.
+4. **Metrics.** `lib/metrics.ts` business metrics, BullMQ metrics, queue-depth gauges, host metrics if they work.
+5. **Frontend.** Faro init, `setView` on route change, `setUser`, business events. **Exit check:** a composer submit's trace starts in the browser.
+6. **Dashboards, alerts and Grafana Cloud.** Commit the dashboard JSON, create the alerts, add the Secrets Manager wiring and production env.
+
+New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@opentelemetry/exporter-{trace,metrics,logs}-otlp-http`, `@opentelemetry/sdk-logs`, `@hono/otel`, `@prisma/instrumentation@6.19.3`, `bullmq-otel`, `pino`. Frontend `@grafana/faro-web-sdk`, `@grafana/faro-web-tracing`.
+
+### 14.11.1 Step 1 as built (Oct 1, 2026)
+
+- **`backend/src/otel.ts`:** `NodeSDK` (0.222) with OTLP HTTP trace and metric exporters (metrics every 30 s), `PrismaInstrumentation`, and a resource of `service.name=smposting-backend`, `deployment.environment.name`, `process.runtime.name=bun`. It only starts when `OTEL_EXPORTER_OTLP_ENDPOINT` is set and `OTEL_SDK_DISABLED` isn't `true`, and it flushes on SIGTERM/SIGINT. Imported first in `index.ts`; `app.ts` doesn't import it, so `bun test` and `bun run openapi` export nothing.
+- **Two span processors:**
+  - `RedactUrlProcessor` strips the query string from `url.full` when the span starts.
+  - `ClientErrorStatusProcessor`: `@hono/otel` marks a span ERROR whenever the handler threw, which includes every `HTTPException`. So a 401 from `/api/me` would count as a failure. This processor hands the exporter a copy of SERVER spans with a 4xx status and the status cleared. 5xx stays ERROR.
+- **`app.ts`:** `httpInstrumentationMiddleware()` (`@hono/otel` 1.2) is the first `app.use`. No headers are captured. Span names and the `http.route` label use the Hono route pattern.
+- **`middleware/auth.ts`:** `enduser.id` and `smposting.workspace_id` are set on the request span.
+- **`docker-compose.yml`:** `otel-lgtm` pinned to `grafana/otel-lgtm:0.11.10` (Grafana 12.1, Tempo 2.8, Loki 3.5, Prometheus 3.5). Grafana is on host port **3001** (3000 is often taken), login admin/admin. No volume, so local telemetry resets with the container. The image is 1.84 GB.
+- **`.env.example`:** `OTEL_EXPORTER_OTLP_ENDPOINT` (empty = off) and `OTEL_RESOURCE_ATTRIBUTES`.
+- **Spike result under Bun 1.3.13 (exit check passed):** a `POST /api/webhooks/n8n-callback?code=…&state=…` sent with a fixed `traceparent` produced:
+  - a Hono SERVER span whose parent is the incoming span id, so an incoming trace is continued. This is what n8n's callback will rely on.
+  - a `url.full` with the query string removed.
+  - Prisma spans (`prisma:client:operation` → `prisma:engine:db_query` → `prisma:engine:js:query:sql`) nested under the Hono span. The SQL text is present (prisma#27666 doesn't hit us).
+  - on a `GET /api/me` 401 span, the status UNSET.
+  - `http_server_request_duration_seconds` in Prometheus labelled by `http_route` and `http_response_status_code`.
+  - `bun test`: 51/51.
+- **Not yet:** the reconcilers and media cleaner run Prisma outside any request, so their queries show up as root `prisma:client:operation` traces every tick. Step 3 wraps each tick in its own span.
+
+### 14.11.2 Step 2 as built (Oct 1, 2026)
+
+- **`backend/src/lib/logger.ts`:** pino 10, `base: undefined`, `LOG_LEVEL` (default `info`).
+  - A `mixin` adds `trace_id`/`span_id` from the active span to every line.
+  - Output goes through a custom in-process destination, not a pino transport, because transports run in a worker thread and lose the caller's trace context. Each line goes:
+    - to stdout: pino-pretty in dev (trace ids hidden), raw JSON in production.
+    - to the OTel Logs SDK, using `context.active()` so Loki gets the trace id natively. Fields become attributes (objects JSON-encoded). `err` maps to `exception.type` / `exception.message` / `exception.stacktrace`.
+  - The OTel logger is looked up per line, so a logger created before `otel.ts` starts isn't stuck as a no-op.
+- **`otel.ts`:** adds a `BatchLogRecordProcessor` with the OTLP HTTP log exporter.
+- **`middleware/request-log.ts`:** replaces `hono/logger`. One `request` line per request with `method`, `route` (Hono pattern, not the raw path), `status` and `durationMs`. It logs at `error` for 5xx. It's registered right after `@hono/otel`, so it's inside the request span.
+- **`error-handler.ts`:** `logger.error({ err }, "unhandled error")`.
+- **Every `console.*` call replaced** (all but `lib/env.ts`, which runs before anything else and exits):
+  - `index.ts`, the five OAuth callback routes (`{ platform, err }`), `login.ts` (message only, never the code/state/id_token, as before), `media.ts`, `post-groups.ts` and `webhooks.ts` routes;
+  - the publish, render and video-status workers;
+  - `service/media.ts` and `service/limit-pauses.ts`, whose pause line now carries `platform`, `platformAccountId`, `until`, `reason` and `failedWaiting` as fields.
+  - Messages are fixed strings; ids moved into fields.
+- **Checked against local otel-lgtm:**
+  - The `request` line for a `POST /api/webhooks/n8n-callback` sent with a fixed `traceparent` reached Loki with that trace id and span id, and `route`/`status`/`method` as structured metadata.
+  - A logged `Error` arrived with `exception.*` attributes.
+  - The bundled Grafana already provisions Loki `trace_id` → Tempo and Tempo → Loki links. In Grafana Cloud these must be set up by hand (step 6).
+  - `bun test`: 51/51. `tsc` clean.
+- **Known gap:** OAuth helper errors (`lib/facebook.ts` etc.) include the platform's error response body in `err.message`. It was already printed that way. They're error bodies, not tokens, but it's worth a look before production.
+
+### 14.11.3 Step 3 as built (Oct 1, 2026)
+
+- **`queue/telemetry.ts`:**
+  - One `BullMQOtel` (`bullmq-otel` 2.0, `enableMetrics: true`) passed as `telemetry` to all three `Queue`s and `Worker`s.
+  - `laterJob()` for jobs that run later: it sets BullMQ's job option `telemetry.omitContext` (so the worker's `process` span starts a new trace) and puts the caller's `traceparent` in `job.data.traceLink`.
+  - `linkToProducer(job.data)`, called first in the publish and video-status processors, adds it as a span link.
+  - Where each job lands:
+    - **Delayed `publish` jobs** (schedules and limiter push-backs): new trace + link.
+    - **Deadline jobs:** always new trace + link.
+    - **Video-status polls:** new trace + link, since their retries run up to ~33 min.
+    - **Immediate publishes and renders:** keep the parent.
+  - A job that starts immediately and is later re-delayed (render wait, pacing) keeps its parent, because BullMQ reuses the job's stored context. Acceptable for now.
+- **`lib/tracing.ts`:**
+  - `withRootSpan(name, fn)` gives the schedule reconciler, render reconciler and media cleaner one root span per tick (`reconcile schedules`, `reconcile renders`, `clean media`).
+  - `tracedFetch(url, init, { propagate })` is a CLIENT span per call. `url.full` never includes the query string (Graph API URLs carry `access_token`).
+  - `traceparent` is only sent with `propagate: true`, which is set only for the n8n dispatch in `service/n8n.ts`. Platform APIs get no trace headers. All 17 `fetch` calls (`service/n8n.ts`, `lib/{facebook,instagram,threads,linkedin,youtube,google-login}.ts`) go through it.
+- **`docker-compose.yml` n8n:** image pinned to `docker.n8n.io/n8nio/n8n:2.41.4` (the `stable` tag on Oct 1). Added `N8N_OTEL_ENABLED=true`, `N8N_OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4318`, `N8N_OTEL_EXPORTER_SERVICE_NAME=smposting-n8n`.
+  - **The running container is still 2.13.4.** Upgrading means recreating it on the external `n8n_data` volume, and n8n runs its DB migrations on first start. Back up the volume first.
+- **Checked** with a throwaway `otel-spike` queue, using the same helpers against local Redis and otel-lgtm:
+  - An immediate job's `add` → `process` → `complete` spans sat in the request's trace.
+  - A delayed job's `process` span had no parent and a link to the request's trace.
+  - `tracedFetch` sent `traceparent` only with `propagate`.
+  - `url.full` came through with the query string stripped.
+  - `bun test` 51/51, `tsc` clean.
+- **n8n leg checked (Oct 1, exit check passed):**
+  - The running n8n was upgraded 2.13.4 → 2.41.4 after backing up `n8n_data` (187 MB tarball incl. `database.sqlite` and `config`). All posters stayed published.
+  - A real Facebook "post now" produced one trace (`d1b81c33…`, 341 spans) running from the browser through n8n and back:
+    - `smposting-frontend` `POST …/post-groups`
+    - → backend `POST /api/workspaces/:workspaceId/post-groups` with Prisma spans
+    - → BullMQ `post-publish` add → process
+    - → `POST localhost:5678` (`/webhook/facebook-poster`)
+    - → `smposting-n8n` `workflow.execute facebook-poster` (3.8 s) with one `node.execute` per node. The Graph API HTTP node took 3.5 s.
+    - → n8n's callback HTTP node → backend `POST /api/webhooks/n8n-callback` (204).
+  - The deadline job was added in the same trace. Its run will be a separate linked trace, as designed.
+  - Both backend `request` log lines (201 create, 204 callback) carry the trace id in Loki.
+
+### 14.11.4 Step 4 as built (Oct 1, 2026)
+
+- **`lib/metrics.ts`** (all labels from fixed sets; Prometheus names shown):
+  - `smposting_posts_dispatched_total` {platform, media_type}: after a successful n8n hand-off (publish worker).
+  - `smposting_posts_completed_total` {platform, media_type, outcome=published|failed|cancelled}: in `transitionTarget` (`service/post-groups.ts`), which now also selects `mediaType` and the account's platform. A late SUCCESS after a deadline FAILED counts once as each.
+  - `smposting_posts_deadline_hits_total` {platform}: only when the deadline job actually failed the target.
+  - `smposting_n8n_dispatch_duration_seconds` {workflow}: around the dispatch call in `service/n8n.ts`. `workflow` is the webhook path, e.g. `facebook-poster`.
+  - `smposting_limits_pauses_total` {platform, reason}: in `pauseForLimitError`. `reason` is the `CooldownReason`.
+  - `smposting_limits_refusals_total` {platform, reason=duplicate|no_slot|paused}: in `refusalError` (create and retry refusals).
+  - `smposting_render_duration_seconds` {kind=image|video, outcome=ready|failed}: the render worker's work moved into `renderRendition`, timed from after the no-op checks.
+  - `smposting_media_uploads_total` {kind, outcome=ready|rejected}: at upload complete and in `reject`.
+- **`queue/telemetry.ts`:** observable gauge `smposting_queue_jobs` {queue, state=waiting|delayed|active|failed}, read with `getJobCounts` at each 30 s export, for the three queues. BullMQ's own `bullmq_jobs_completed_total`, `bullmq_job_duration_milliseconds` and friends come from `enableMetrics`.
+- **Dropped for now:**
+  - Send → published duration (§14.6): `posts` has no dispatch timestamp, so it needs a migration. Traces already show it per post.
+  - Host/runtime metrics: not tried under Bun.
+- **Checked:** a 45 s run of the backend exported all 12 `smposting_queue_jobs` series and the BullMQ and HTTP metrics to local Prometheus. The business counters only appear once their event happens; with no real posts in the test they're covered by `tsc` only. `bun test` 51/51.
+
+### 14.11.5 Step 5 as built (Oct 1, 2026)
+
+- **`frontend/src/lib/telemetry.ts`:** `@grafana/faro-web-sdk` + `@grafana/faro-web-tracing` 2.12, started from `main.tsx` **only when `VITE_FARO_URL` is set**.
+  - The SDK is loaded with a dynamic `import()`. Unset, Vite drops it entirely (one 589 kB bundle, as before). Set, it's two lazy chunks of 84 kB and 116 kB.
+  - `getWebInstrumentations()` + `TracingInstrumentation`. The API is same-origin, so fetches carry `traceparent` with no CORS changes.
+  - `trackView`, `setTelemetryUser` and `trackEvent` are no-ops when off. A view or user set before the SDK finishes loading is applied once it has.
+- **`App.tsx`:** `useTelemetryContext()` sets the Faro view on every route change, with UUID path segments replaced by `:id` (e.g. `/w/:id/compose`), and sets the user id (id only) from `/api/me`.
+- **Events** (string attributes only):
+  - `post_group_created` {kind, targets, scheduled} and `post_group_create_failed` {reason=targets_refused|error} in the composer;
+  - `media_upload_failed` {kind} in the media picker;
+  - `media_fit_applied` {mode} in the crop dialog.
+- **Local receiver (§14.10 decision 3):** `alloy` compose service under the `faro` profile (`grafana/alloy:v1.20.1`, port 12347, config `backend/alloy/faro.alloy`). Vite proxies `/faro/*` to it, so locally `VITE_FARO_URL=/faro/collect`. The app is opened on the ngrok domain, and an HTTPS public page calling `http://localhost` directly would hit CORS and Chrome's local-network blocking. `telemetry.ts` resolves a relative URL against the page so Faro still recognizes (and doesn't trace) its own collector calls. `faro.receiver` → logs through `otelcol.receiver.loki` and a transform setting `service.name=smposting-frontend` → OTLP to otel-lgtm; traces straight to OTLP. CORS allows `http://localhost:5173`.
+- **`frontend/.env.example`:** `VITE_FARO_URL`, `VITE_APP_VERSION`.
+- **Checked:**
+  - `tsc -b` and `vite build` pass, with and without `VITE_FARO_URL`.
+  - Alloy started cleanly.
+  - A Faro-format event posted to `/collect` reached Loki as `service_name="smposting-frontend"` with `event_name` and `view_name`.
+- **Browser check (Oct 1, Firefox):** sessions, view changes, resource timings, Web Vitals and the user id reached Loki. But no browser traces, and backend request spans had no browser parent.
+  - **Cause:** `openapi-fetch`'s `createClient` keeps the `globalThis.fetch` that existed when `lib/api.ts` loaded. Faro's fetch instrumentation replaces `fetch` later, so every API call bypassed it.
+  - **Fix:** `lib/api.ts` passes `fetch: (request) => globalThis.fetch(request)`. A script that patches `fetch` after creating the client confirmed the default client ignored the patch and the fixed one used it.
+  - Confirmed after the fix (Oct 1): API requests carry `traceparent`, and Tempo shows `smposting-frontend` traces. **Step 5 exit check passed.**
+  - S3 uploads use XHR to another origin, so Faro traces them without adding `traceparent`, which would break the presigned upload.
+
+### 14.11.6 Step 6, part 1: dashboards (Oct 1, 2026)
+
+- **`observability/dashboards/*.json`**, four dashboards with uids `smposting-publishing`, `-api`, `-queues`, `-frontend`, cross-linked by the `smposting` tag:
+  - **Publishing:** stat tiles (published, failed, failure rate, no-callback deadline hits, accounts paused, limiter refusals over the range), published and failed per platform (stacked bars), n8n accept time p95 per workflow, refusals by platform and reason, and backend WARN/ERROR logs linked to traces.
+  - **API:** req/s, 5xx share, p95, in-flight; requests by status class; p50/p95/p99; a per-route table (req/s, p95, 5xx share); a Tempo table of requests over 500 ms.
+  - **Queues and media:** publish waiting/scheduled, renders waiting, failed jobs kept; waiting and delayed by queue; BullMQ job duration p95; jobs finished; render p95 by kind; uploads by outcome.
+  - **Frontend** (Loki/Faro): sessions, JS errors, Web Vitals p75 (LCP, INP, CLS, TTFB, with Google's good/poor thresholds), errors over time, composer outcomes, page views, browser error logs, a Tempo table of browser calls over 1 s.
+- **Portable:**
+  - Data sources are dashboard variables (`prometheus`, `loki`, `tempo`) plus an `env` variable on `deployment_environment_name`, so the same files import into Grafana Cloud.
+  - Backend HTTP panels filter on `job="smposting-backend"`, because `@hono/otel`'s metrics carry no `service_name` label.
+- **Colours:** each platform keeps a fixed colour in every panel (blue Facebook, orange Instagram, aqua Threads, yellow LinkedIn, magenta YouTube; dark-surface reference palette, validator passed). Red is used only for failures and errors. One y-axis per panel.
+- **`observability/import-dashboards.sh`:** creates an "smPosting" folder and overwrites the dashboards in it. Local by default (`admin:admin` on :3001); Grafana Cloud with `GRAFANA_URL` and `GRAFANA_TOKEN` (service account).
+- **`lib/metrics.ts` seeds counters at 0** for every valid label set (the 18 platform/media pairs from `MEDIA_TYPES`, refusal reasons, upload kinds), about 85 series. Without it, a series' first event is invisible to `increase()`, so a platform that rarely posts would read 0.
+- **Checked:** all four imported into local Grafana. Every panel query was run against the real data sources: none errored. The empty ones only need events that haven't happened yet (no 5xx, renders, refusals, browser errors; Firefox reports no LCP/INP/CLS). The seeded series show up (12 per platform, 6 for YouTube).
+- **Next (part 2):** alert rules, then Grafana Cloud.
+
+### 14.11.7 Step 6, part 2: alert rules (Oct 1, 2026)
+
+- **`observability/alerts/rules.json`:** Grafana-managed rule group `smposting` (1-minute evaluation), five rules. No data counts as OK (no posts or traffic isn't a problem). Each rule links to the dashboard panel that shows it and sends straight to the `smposting-email` contact point (`notification_settings`), so the notification policy tree is untouched.
+
+  | Rule | Fires when | Severity |
+  |---|---|---|
+  | Platform failure rate above 20% | per platform, failed ÷ (published + failed) > 0.2 over 30 min, with at least 5 finished | warning |
+  | Post got no result back from n8n | any callback-deadline hit in 15 min, per platform | critical |
+  | Publish job crashed | any `"publish job crashed"` log line in 15 min (Loki) | critical |
+  | API server errors above 2% | 5xx share > 2% over 10 min, with at least 20 requests | warning |
+  | Meta spam block (code 368) | any `ABUSE_BLOCK` pause in 15 min, per platform | critical |
+
+  - The crash rule is log-based on purpose: BullMQ's failed-job counter only appears at the first failure, which `increase()` can't see.
+  - `lib/metrics.ts` now also seeds `smposting_limits_pauses_total` at 0 for every platform × `CooldownReason`, so the first spam block is seen.
+- **`observability/import-alerts.sh`:**
+  - Creates the folder.
+  - Creates the email contact point from `ALERT_EMAIL` (first run only; no address in git).
+  - Fills in the `${PROMETHEUS_UID}`/`${LOKI_UID}` placeholders (local defaults `prometheus`/`loki`; Grafana Cloud's are set by env).
+  - Replaces the rule group in one `PUT` with `X-Disable-Provenance`, so the rules stay editable in the UI.
+- **Checked locally:** all five loaded and evaluated with health `ok`, state inactive. `/api/v1/eval` on the deadline rule returned one series per platform at 0, so each platform alerts separately.
+  - **Local otel-lgtm has no SMTP**, so firing rules there show in Alerting but send no email. Grafana Cloud sends email out of the box.
+- **Grafana Cloud: deferred (Kushagra, Oct 1).** Everything runs against local otel-lgtm for now. Nothing in the app needs to change when it's picked up:
+  1. Create a stack and an access policy token (metrics/logs/traces write).
+  2. Store the token in AWS Secrets Manager and resolve it at runtime into `OTEL_EXPORTER_OTLP_HEADERS` (and n8n's `N8N_OTEL_EXPORTER_OTLP_HEADERS_FILE`).
+  3. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to the stack's OTLP endpoint, and `VITE_FARO_URL` to a Frontend Observability app's collector URL.
+  4. Run `import-dashboards.sh` and `import-alerts.sh` with `GRAFANA_URL`/`GRAFANA_TOKEN` and Cloud's data-source uids.
+  5. Set up the Loki ↔ Tempo trace links by hand.
+  6. Fire a test alert to confirm email delivery.
+
+### 14.12 Risks
+
+- **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
+- **n8n OTel is preview.** Env names or behaviour may change between n8n versions, so pin the image.
+- **Prisma SQL text** may be missing from engine spans on 6.19 (prisma#27666).
+- **Secrets in telemetry.** The biggest real risk is leaking an OAuth `code`, an access token or `x-callback-secret` into Grafana. The rules in §14.3 (no bodies, no headers, stripped query strings) and a review of the first exported spans in step 1 guard against it.
+- **Free-tier limits.** A wrong label (e.g. `post_id`) can blow the 10k series cap in a day. §14.6's label rule is enforced in review.
+
+## 15. Video Streaming Relay (S3 → LinkedIn / YouTube) — Implementation Plan (Sep 30, 2026, planning only)
+
+Turns §3's "Streaming-Relay Decision" into build steps now that S3 exists (§11). Scope: the **video** branches of `linkedin-poster.json` and `youtube-poster.json`. Images and the Meta platforms (which fetch the presigned URL themselves) are unchanged.
+
+### 15.1 What happens today (checked Sep 30)
+
+- The backend signs a 6 h presigned GET per target at dispatch (`mediaUrlsForDispatch`, `service/media.ts`) and sends it in `media_urls`, same field as the old public URLs. No workflow changed for S3.
+- **S3 multipart ≠ LinkedIn multipart.** The browser uploads videos to S3 in 16 MiB parts (`partSizeFor`, `lib/media-files.ts`), but after `CompleteMultipartUpload` S3 stores **one object**. n8n sees one file. The two part schemes are unrelated.
+- `linkedin-poster`: `LI Probe Video Size` (ranged GET `bytes=0-0`, reads the total from `Content-Range`) → `LI Init Video Upload` returns `uploadInstructions[]` (4,194,304-byte ranges) ∥ `LI Download Video` pulls the **whole** file into n8n binary storage → `Split Video Into Parts` loads the **whole** buffer into memory (`getBinaryDataBuffer`) and slices it → one PUT per part → `Collect Video Part ETags` → finalize. Works, but a 1 GB video (`MAX_VIDEO_BYTES`) means 1 GB on n8n disk **and** in the Code node's heap.
+- `youtube-poster`: `Download Video` (whole file) ∥ `Initiate Resumable Upload` → one PUT of the whole binary. Total time ≈ download + upload, and any failure restarts from byte 0.
+
+### 15.2 Design: chunked relay instead of a pipe
+
+§3 planned a true pipe (`sourceRes.pipe(putReq)` over raw `http`/`https`). **Proposed change:** relay in bounded chunks instead. Per chunk, one ranged S3 GET into a Buffer, then one PUT of that Buffer.
+
+- Memory is bounded by chunk size (4 MiB LinkedIn, 8-32 MiB YouTube). That's the goal of the pipe version, with much less code.
+- Every chunk is a separate request, so **retry per chunk** comes for free. A pipe can't retry mid-stream.
+- Content-Length is always known, so there's no chunked-transfer-encoding problem.
+- If `this.helpers.httpRequest` works for binary bodies inside the Code node (step 0), there's no `NODE_FUNCTION_ALLOW_BUILTIN` and no hand-written redirect loop (the helper follows redirects).
+- Cost vs a pipe: within one chunk, download and upload don't overlap. Fix by **prefetching chunk N+1 while chunk N uploads** (≤ 2 chunks in memory). For LinkedIn, parallel part uploads matter more (see 15.4).
+
+The node outputs **JSON only** (part ETags / video id). No binary goes into the execution record, so `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` stops mattering for these branches.
+
+### 15.3 Backend changes (small)
+
+- Add `media_size_bytes` (and `media_content_type`) to the LinkedIn and YouTube dispatch payloads (`service/n8n.ts`). The value comes from `MediaAsset.sizeBytes`, or `MediaRendition.sizeBytes` when a rendition is used. The workflow then skips the size probe. Keep the probe as a fallback for legacy URL posts and null rendition sizes.
+- Nothing else: presigned GET URLs already accept `Range` (proven by the `bytes=0-0` probe), and the 6 h TTL covers a 1 GB upload.
+
+### 15.4 LinkedIn (`linkedin-poster.json`)
+
+New video branch: `Route by Media Type` → `LI Init Video Upload` (size from payload, probe fallback) → **`LI Relay Video Parts`** (Code) → `LI Finalize Video Upload` → wait → publish.
+
+`LI Relay Video Parts`:
+- For each `uploadInstructions[i]`: GET `media_urls[0]` with `Range: bytes=firstByte-lastByte`. Require `206` and a body length of exactly `lastByte-firstByte+1`. Then PUT to `uploadUrl` with `Authorization`, `Content-Type`, and full-response mode to read the `ETag`.
+- Run parts through a concurrency pool (a constant, 1 to start; see 15.8 #3), then emit `uploadedPartIds` **in part order**.
+- Per-part retry: 3 attempts with backoff on network errors / 5xx / 429. On a 4xx, fail straight away.
+- Errors are thrown with the node name + part index + status + body snippet, so `lib/platform-error.ts` rules keep matching (update the rules that key on `LI Download Video` / `Split Video Into Parts`).
+- Remove `LI Download Video`, `Merge Video Upload`, `Split Video Into Parts`, `LI Upload Video Binary`, `Collect Video Part ETags`.
+
+### 15.5 YouTube (`youtube-poster.json`)
+
+New flow: `Validate Payload` → `Initiate Resumable Upload` (add `X-Upload-Content-Length` from the payload) → **`YT Relay Video`** (Code) → success callback.
+
+`YT Relay Video` uses YouTube's **chunked** resumable upload rather than one big PUT:
+- Chunk size is a multiple of 256 KiB (proposed 16 MiB). Each chunk: ranged S3 GET, then PUT to the session URL with `Content-Range: bytes a-b/total`.
+- Response `308` = continue from the `Range` header it returns (trust YouTube's offset, not ours). `200`/`201` on the last chunk = done, and its body has the video id the callback needs.
+- On a network error or 5xx: query the session (`PUT` with `Content-Range: bytes */total`) to get the committed offset, then resume from there. This retries up to N times, so a failure at 900 MB no longer restarts from 0.
+- Chunks must be sequential (YouTube requirement). Prefetch the next S3 chunk during the current PUT.
+- Remove `Download Video`, `Merge`, `Upload Video Binary`.
+
+### 15.6 Build order
+
+0. **Spike (half a day):** in the dev n8n (untagged `latest` image, so n8n 2.x with task runners), confirm inside a Code node: `this.helpers.httpRequest` with `encoding: 'arraybuffer'` + `returnFullResponse` for a ranged GET, and a PUT with a Buffer body that returns response headers. **If it fails**, fall back to Node 18+ global `fetch`, or `require('https')` with `NODE_FUNCTION_ALLOW_BUILTIN=https` set on the **runner** (not just the main container). Record the result here before step 1.
+1. Backend: `media_size_bytes` in the payloads, with tests. (The LinkedIn 500 MB check from 15.9 is already built.) `media_content_type` turned out unneeded: the relay takes the content type from S3's response.
+2. LinkedIn relay node; standalone test with a 27 MB video (the Sep 22 file) and a ~500 MB video; watch n8n memory (`docker stats`).
+3. YouTube chunked relay; the same two sizes, plus kill the network mid-upload to check resume.
+4. Update `platform-error.ts` rules for the new node names; update `setup.md` §9 if any env var is needed.
+5. Tick the Phase 3 items and update §3's decision note.
+
+### 15.7 Risks
+
+- **Task-runner sandbox (n8n 2.x):** helper availability and Buffer passing across the runner boundary are not verified. That's what step 0 is for.
+- **Execution timeout:** a 1 GB YouTube upload can run tens of minutes; check `EXECUTIONS_TIMEOUT` and set a per-request timeout per chunk instead of a whole-file one.
+- **LinkedIn upload URL expiry:** part URLs from `initializeUpload` expire; parallel parts shorten total time, which helps.
+- **No binary preview** in the n8n UI for these branches. Log part index/offset/status in the node's JSON output for debugging.
+- **Queue mode later (§5):** the relay keeps nothing on local disk, so it already fits multiple workers.
+
+### 15.8 Decisions (Kushagra, Sep 30)
+
+1. **Chunked relay** (15.2) replaces §3's raw-stream pipe.
+2. **YouTube: chunked resumable upload with resume on failure** (15.5).
+3. **LinkedIn part concurrency: start at 1** (decided Oct 1). Background facts (LinkedIn Videos API docs, `li-lms-2026-09`):
+   - Part PUTs go to `www.linkedin.com/dms-uploads/...`, not `api.linkedin.com/rest`. The docs don't say whether they count toward the 150-calls-per-member daily limit (§13.1). Either way concurrency changes **how fast** the calls happen, not **how many**: a 400 MB video is 100 parts whether sent 1 or 4 at a time.
+   - The docs don't forbid parallel parts. Order only matters in `finalizeUpload`'s `uploadedPartIds`, which the relay sorts by part index.
+   - Upload URLs expire together, typically 30 days after `initializeUpload`, so sequential uploads can't run out of time.
+   - Parallel helps when each part is latency-bound (S3 → n8n → LinkedIn round trips); it doesn't help if n8n's uplink is already full. Memory: 4 MiB × concurrency, negligible either way.
+   - It's a constant in the node, **set to 1** for the first live tests. Measure a 100-200 MB upload, then try 3-4 and keep it only if it's clearly faster with no 429s.
+4. **LinkedIn first**, then YouTube.
+5. **Facebook / Instagram / Threads stay as they are.** Meta fetches the presigned URL itself; no relay.
+
+### 15.9 Found while planning (Sep 30)
+
+- **LinkedIn video size limit — built Oct 1.** LinkedIn's spec is 75 KB-500 MB for feed video, but our upload cap is 1 GB (`MAX_VIDEO_BYTES`), so a bigger LinkedIn video used to fail only inside n8n. Now `VIDEO_MAX_BYTES` in `lib/capabilities.ts` (LinkedIn: 500 × 1024 × 1024, matching the MB the UI shows) is checked per target in `POST /post-groups` validation against the uploaded file's `sizeBytes`, and sent as `videoMaxBytes` in `GET /capabilities` so the composer blocks submit with the same message: "LinkedIn doesn't support videos over 500 MB — clip.mp4 is 600.0 MB". Other platforms are unaffected. A crop/pad rendition is rendered after create, so it isn't size-checked (rarely larger than the original). The `platform-error.ts` rule stays as a fallback. Tests in `routes/post-groups.limits.test.ts` ("video size").
+- **`linkedInCalls` cost (`lib/posting-limits.ts`) assumes each part PUT is one API call** ("12 covers a typical ~20 MB video"). A 500 MB video is 125 parts, which would blow past the 100-call cap if part PUTs really count. If they're on `dms-uploads` and don't count, the cost is flat. Check in LinkedIn's Developer Portal → Analytics after the step 2 test, then either make the cost size-based (`3 + ceil(size / 4 MiB)` + polls) or flat.
+
+### 15.10 As built (Oct 1, 2026)
+
+**Step 0 result (n8n 2.13.4, Node 24, internal task runner):**
+
+| Inside a Code node | Result |
+|---|---|
+| `this.helpers.httpRequest` (`encoding: 'arraybuffer'`) | 206 with the right length, but the body reaches the Code node as a plain object after crossing the runner boundary. PUT back to S3 stored 14.9 MB of garbage for a 4 MiB part. **Unusable for binary.** |
+| global `fetch` | Not defined in the sandbox. |
+| `require('https')` | Blocked by default ("Module 'https' is disallowed"). With `NODE_FUNCTION_ALLOW_BUILTIN=https` it works: 206 ranged GET + PUT with ETag, uploaded bytes identical to the source range. ~2.5 s GET + 2.2 s PUT per 4 MiB from the dev machine. |
+
+So the relay uses raw `https` (plus `http` only when a URL is `http:`, which is test-only). `NODE_FUNCTION_ALLOW_BUILTIN: https` is set on the n8n service in `backend/docker-compose.yml` and documented in `setup.md` §9. The internal runner inherits it from the main process. **The dev n8n container must be recreated (`docker compose up -d n8n`) and both workflows re-imported** for this to take effect.
+
+**Backend:** `mediaForDispatch` (`service/media.ts`, was `mediaUrlsForDispatch`) returns `{ mediaUrls, mediaSizes }`: each file's `sizeBytes`, from its rendition when the target has one, `null` for legacy URL posts. `dispatchPost` passes the sizes on, and the LinkedIn and YouTube payloads carry `media_size_bytes` (of `media_urls[0]`).
+
+**`linkedin-poster.json` video branch:** `Route by Media Type` → `LI Probe Video Size` (now a Code node: the payload size, else a `bytes=0-0` ranged GET) → `LI Init Video Upload` (`fileSizeBytes: $json.size_bytes`) → **`LI Relay Video Parts`** → `LI Finalize Video Upload` (ETags from the relay node) → wait → publish. Removed: `LI Download Video`, `Merge Video Upload`, `Split Video Into Parts`, `LI Upload Video Binary`, `Collect Video Part ETags`. Image and carousel branches are unchanged.
+
+**`youtube-poster.json`:** `Validate Payload` → **`YT Probe Video Size`** (same as LinkedIn's, passes the request fields through) → `Initiate Resumable Upload` (adds `X-Upload-Content-Length`) → **`YT Relay Video`** → `Build Success Result`. Removed: `Download Video`, `Merge`, `Upload Video Binary`.
+
+**Relay behaviour (same helper block copied into each relay Code node):**
+- Per request: 60 s idle timeout (a stalled connection fails after a minute of no data, not a minute in total); redirects followed (up to 5, same `Range` re-sent; 308 is never treated as a redirect because it's YouTube's "resume incomplete").
+- Retries: each ranged GET and each PUT separately, 5 attempts with 2 / 4 / 8 / 16 s waits (~30 s, enough for a short network outage), on network errors, 429 and 5xx. Any other 4xx fails straight away.
+- A ranged GET must return 206 with exactly the requested length. A cut-off body is retried; anything else fails as `Reading the media file failed: ...`.
+- LinkedIn: `PART_CONCURRENCY = 1` (§15.8). ETags are kept in `uploadInstructions` order; a missing ETag fails the node. The output's `retries` counts retried requests.
+- YouTube: 16 MiB chunks, the next one read while the current one uploads. The offset always comes from YouTube's `Range` header on a 308. On a network error, a 5xx/429, or an S3 read that ran out of retries, the node waits (2 s, 4 s, ...), asks the session for its committed offset (`Content-Range: bytes */total`) and resumes from there, up to 5 times. The output's `relay: { resumes, retries, seconds }` shows whether that happened (first version, Oct 1 morning: retries gave up after ~4 s and a failed S3 read wasn't resumed, so a Wi-Fi blip failed the post).
+- Errors are thrown as `<status> - <body>`. n8n appends ` [line N]`; `lib/platform-error.ts` now strips that and has rules for `Reading the media file failed` (403/404 → "may have been removed", else "try again"). Tests: `lib/platform-error.test.ts`.
+
+**Testing done:**
+- Outside n8n (Node, mock S3/LinkedIn/YouTube servers, 40 MiB random file, 11 LinkedIn parts): bytes identical after an S3 503, a LinkedIn 500 on one part, a 307 redirect, a YouTube connection dropped halfway through a chunk (resumed from the committed offset), and a 308 that took only 256 KiB. A 401 fails without retry and with a parseable message. A 12 s outage of every S3 and YouTube connection mid-upload finished with `resumes: 1` and identical bytes.
+- Inside the real n8n task runner (`n8n execute`, the node code copied from the workflow files, mock servers in the container): LinkedIn relay 2 parts, YouTube relay with a dropped connection. Both succeeded with MD5 identical to the source, and a thrown error reached the error output as `{ error: "404 - ... [line 35]" }`.
+
+- Live, through the app on n8n 2.41.4 (Kushagra, Oct 1): a normal-size and a large video posted to LinkedIn and YouTube, the YouTube upload survived Wi-Fi turned off mid-upload, LinkedIn text/image/carousel still post, and a LinkedIn video over 500 MB is refused at creation. All passed.
+
+**Not yet done:** the §15.9 LinkedIn call-cost check in the Developer Portal.
 ---
 *Created: 2026-08-14 | Master Specification for Social Media Auto-Poster SaaS*  
 *Updated: 2026-09-06 | Revised architecture: per-platform n8n workflows (not one monolithic workflow), n8n queue mode + Kubernetes/KEDA scaling, backend-owned fan-out/rate-limiting/aggregation. Source: separate planning discussion, recapped by Kushagra.*  
@@ -899,3 +1822,27 @@ Rate limit: 120 upload starts per user per 10 min.
 *Updated: 2026-09-29 | Planning only: new §10 "Multi-Posting (Post Groups) & Scheduling" — `PostGroup` parent over per-target `Post` rows, media-kind-first composer replacing the old one, per-platform caption overrides, all-or-nothing validation with one-click deselect, per-target BullMQ publish jobs (also used for scheduling), locked `recomputeGroupStatus` aggregation, callback-deadline jobs, webhook idempotency, manual per-target retry, ffprobe-verified YouTube Shorts, silent Instagram double-connection dedupe.*
 *Updated: 2026-09-29 | New §11 "Media Uploads to S3": composer URL fields replaced by direct browser-to-S3 uploads (presigned POST for images, presigned multipart for videos), `media_assets` table, magic-byte verification, presigned GETs signed at dispatch time, 15-day retention counted from send time with an hourly cleaner, CloudFormation template for the bucket. Storage client switched from Bun's native S3 client to AWS SDK v3 (§11.2). Phase 2 S3 item ticked.*  
 *Updated: 2026-09-30 | New §10.9: n8n failure text is mapped to short user-facing messages by a rules table (`lib/platform-error.ts`), raw text kept in `PostLog`; manual retry capped at 5 sends per target (`canRetry` in the API). LinkedIn video size probe switched from HEAD to a ranged GET (HEAD is refused on GET-presigned S3 URLs).*
+*Updated: 2026-09-30 | Planning only: new §12 "Per-Platform Media Fitting — Implementation Plan" turning §3 into three build steps: dimensions probed at upload complete, `surfaces` fit rules in `/api/capabilities`, CSS-only preview grid (plain ratio frames) with safe zones, `react-easy-crop` cropper, `media_fits` (per target × asset, relative rect, CROP/PAD) and shared `media_renditions`, eager `render` BullMQ queue (`sharp` images, `ffmpeg` video), per-target dispatch URLs, Instagram images always rendered to JPEG. §12.9 records Kushagra's decisions: server-side rendering for images and video, fits editable per account (shared per surface by default), user must choose crop or pad on strict surfaces, video ships with images, blur-pad default for Story/Reels images. Phase 2 roadmap items point at §12.*
+*Updated: 2026-09-30 | §12 step 1 built (§12.10): media dimensions stored at upload (`sharp` for images, ffprobe for video; migration `20260930090000_add_media_dimensions`), per-platform `surfaces` fit rules in `/api/capabilities`, API-rejected shapes validated per target, Shorts check on stored dimensions, and a read-only per-platform preview grid with safe zones in the composer. Phase 2 roadmap item ticked; live upload test pending.*
+*Updated: 2026-09-30 | §12 step 2 built (§12.11): per-platform crop / blur-pad / Instagram JPEG conversion. `media_renditions` + `post_media_renditions` (migration `20260930120000_add_media_renditions`), presets in `/api/capabilities`, `mediaFits` per target on `POST /post-groups`, `media-render` BullMQ queue rendering with `sharp` (images) and `ffmpeg` (video) right after create, publish waits for renders and signs rendition keys, Adjust dialog with `react-easy-crop` and per-account customizing in the composer. The "Instagram only accepts JPEG" error is gone. Renders verified against S3; composer dialog and live posts not yet tested.*
+*Updated: 2026-09-30 | Planning only: new §13 "Per-Platform Posting Limits". Official limits checked per platform (Instagram 50-100 and Threads 250 posts per rolling 24 h, LinkedIn 150 calls per member per UTC day, YouTube project-wide units, Facebook none published). The Sep 2026 block was Meta's code 368 spam check, not a quota, so the plan adds pacing (minimum gap, per-hour cap), daily caps at about half the published limits, a 24 h duplicate guard and a cooldown circuit breaker. Limits are keyed on the platform account, not the app user or `ConnectedAccount`. Reservations live in a Postgres `dispatch_slots` table behind an advisory lock. Open questions in §13.9.*
+*Updated: 2026-09-30 | §13.9 decisions recorded: 1 h auto-delay allowance, fixed caps (not adjustable per workspace), duplicates blocked outright, targets waiting on a cooled-down account fail (for every cooldown reason) instead of being held, and no early clearing. First build covers Facebook, Instagram, Threads, LinkedIn and YouTube.*
+*Updated: 2026-09-30 | §13 step 1 built (§13.10.1): migration `20260930170000_add_posting_limits` (`dispatch_slots`, `account_cooldowns`, `CooldownReason`), `lib/posting-limits.ts` with the fixed policy table, LinkedIn call costs, UTC/Pacific calendar days, the `fitsAt`/`nextFreeTime` slot search and the duplicate-guard hash, `POSTING_LIMITS_PROFILE` (`standard`|`dev`), and 22 `bun test` cases. Nothing wired into posting yet.*
+*Updated: 2026-09-30 | §13 step 2 built (§13.10.2): `service/posting-limits.ts` — `reserveSlot` under per-account Postgres advisory locks (duplicate check, pause-aware, multi-budget for YouTube, `NO_SLOT` with the next free time past `latest`), `releaseSlot`/`bookedSlotAt`, `setCooldown` (never shortens)/`activeCooldown`, and `accountUsage`. 11 database tests, including a concurrency test shown to fail without the lock. Still not wired into posting.*
+*Updated: 2026-09-30 | §13 step 3 built (§13.10.3): the posting limiter now drives real posting. Create books every target inside its transaction (1 h auto-delay, duplicates refused, all-or-nothing 400 with `nextFreeAt`), pushed-back "post now" targets become `SCHEDULED` and are queued at their slot, the publish worker fails paused accounts and releases slots on every failure before hand-off, retry books first (409 when paused or full), cancel releases slots, the reconciler covers pushed-back targets, targets expose `sendAt`, and create is limited to 30 per user per hour. Composer results panel keeps polling mixed groups. 7 route/worker tests (queues and n8n stubbed); 40/40 pass.*
+*Updated: 2026-09-30 | §13 step 4 built (§13.10.4): `lib/limit-errors.ts` classifies raw platform errors (Meta 368 → 24 h spam pause, Instagram 2207042 / Threads limit → rolling 24 h, Meta throttling codes and 429 → 1 h, YouTube `quotaExceeded` → app-wide until Pacific midnight, `uploadLimitExceeded` → 24 h, LinkedIn 429 → UTC midnight). `service/limit-pauses.ts` sets the pause and fails that account's waiting posts due before it ends, releasing their slots. Wired into the n8n callback and the video-status poller; History wording added for 368, the Instagram limit and the YouTube project quota. 49/49 tests pass.*
+*Updated: 2026-09-30 | §13 step 5 built (§13.10.5): `GET /posting-limits` (used / queued / cap / window / reset / next free time / pause per account); app setup moved to `app.ts` and `bun run openapi` writes the spec without starting workers; dashboard usage bars and Paused badges; composer disables paused accounts and "post now" accounts with no slot within the hour, lists pushed-back accounts with their time, and offers "Schedule for {time}" after a limit refusal; post cards show "Waiting for its posting limit — goes out at …". 51/51 tests pass; UI not yet checked in a browser.*
+*Updated: 2026-09-30 | §13 step 6 (pausing before a limit is hit, using Meta's usage headers and the Instagram/Threads live publishing-limit endpoints) deferred to V2 by Kushagra. The plan, the n8n `$json` → `$json.body` rework it needs, and why it wouldn't have prevented the code-368 block are recorded in §13.12. §13 status updated: steps 1-5 built.*  
+*Updated: 2026-09-30 | Planning only: new §15 "Video Streaming Relay". S3 multipart and LinkedIn multipart are unrelated (S3 stores one object); today's LinkedIn/YouTube video branches still download the whole file into n8n. Proposed: a Code node relaying bounded ranged-GET chunks (LinkedIn per 4 MiB part, in parallel; YouTube chunked resumable with resume on failure), file size sent in the payload, spike on n8n 2.x task runners first. Decisions in §15.8 (chunked relay, YouTube chunked resumable with resume, LinkedIn first, Meta unchanged); LinkedIn part concurrency still open.*  
+*Updated: 2026-09-30 | Planning only: new §14 "Observability". Grafana Cloud with OpenTelemetry chosen (Bun rules out vendor agents). Plan: `otel.ts` NodeSDK bootstrap with `@hono/otel`, Prisma instrumentation and query-string redaction; pino logs with trace ids shipped over OTLP; `bullmq-otel` on every queue and worker; a traced `fetch` that sends `traceparent` to n8n, whose native OTel (preview, 2.19+) continues the trace through the workflow and back into the callback; low-cardinality business metrics; Grafana Faro in the frontend; dashboards and alerts; `grafana/otel-lgtm` locally. Six build steps in §14.11. §14.10 decisions: Faro in the first build, n8n node spans on, Faro off locally, scheduled (delayed) sends get their own trace with a span link back to the create request.*
+*Updated: 2026-10-01 | §14 step 1 built (§14.11.1): `backend/src/otel.ts` (NodeSDK, OTLP traces + metrics, Prisma instrumentation, query-string redaction, 4xx not marked as errors), `@hono/otel` as the first middleware, user/workspace span attributes, `otel-lgtm` in compose (Grafana on :3001). Spike under Bun passed: incoming `traceparent` continued, Prisma spans nested under the request span with SQL text, HTTP metrics in Prometheus. 51/51 tests pass.*
+*Updated: 2026-10-01 | §14 step 2 built (§14.11.2): `lib/logger.ts` (pino with trace ids, in-process bridge to the OTel Logs SDK → Loki, `err` as `exception.*`), `middleware/request-log.ts` replacing `hono/logger`, and every `console.*` call except `lib/env.ts` moved to structured fields with fixed messages. Log → trace link checked in local Grafana. 51/51 tests pass.*
+*Updated: 2026-10-01 | §14 step 3 built (§14.11.3): `bullmq-otel` on every queue and worker; delayed publishes, deadlines and video-status polls start their own trace with a span link back (`queue/telemetry.ts`); root spans for the reconcilers and media cleaner; `tracedFetch` for all 17 outbound calls, sending `traceparent` only to n8n; n8n pinned to 2.41.4 with `N8N_OTEL_*` in compose. Parent/link/propagation/redaction checked in Tempo with a throwaway queue. The n8n leg needs the running n8n container upgraded from 2.13.4.*
+*Updated: 2026-10-01 | §14 step 4 built (§14.11.4): `lib/metrics.ts` business metrics (dispatched, completed by outcome, deadline hits, n8n dispatch time, limit pauses and refusals, render time, uploads) with fixed-set labels only, and a `smposting_queue_jobs` gauge per queue and state. Send-to-published duration deferred (needs a dispatch timestamp column). Queue gauge, BullMQ and HTTP metrics checked in local Prometheus.*
+*Updated: 2026-10-01 | §14 step 5 built (§14.11.5): Grafana Faro in the frontend (`lib/telemetry.ts`), lazy-loaded and only when `VITE_FARO_URL` is set, with route views (ids as `:id`), user id, and composer/upload/crop events. Optional local receiver: `alloy` compose service under the `faro` profile forwarding to otel-lgtm. Build and the receiver → Loki path checked; not yet checked in a browser.*
+*Updated: 2026-10-01 | §14 step 3 exit check passed: n8n upgraded to 2.41.4 (backup first), and a real Facebook post produced one trace from the browser through the backend, BullMQ, the `facebook-poster` workflow and its nodes, and back via the n8n callback, with the backend log lines linked to it.*
+*Updated: 2026-10-01 | §14 step 6 part 1 (§14.11.6): four Grafana dashboards (publishing, API, queues and media, frontend) as portable JSON in `observability/dashboards/` with an import script; publishing counters seeded at 0 so a first post is counted. Every panel query checked against local Grafana.*
+*Updated: 2026-10-01 | §14 step 6 part 2 (§14.11.7): five Grafana-managed alert rules (platform failure rate, n8n no-callback, publish job crash, API 5xx, Meta spam block) in `observability/alerts/rules.json` with an import script that also creates the email contact point; pause counters seeded at 0. All rules healthy in local Grafana.*
+*Updated: 2026-10-01 | §14 Grafana Cloud wiring deferred by Kushagra; the remaining setup steps are listed in §14.11.7. Steps 1-5 and the local dashboards and alerts go to review as one PR.*
+*Updated: 2026-10-01 | §15.8: LinkedIn part concurrency decided (start at 1). §15.9: LinkedIn videos over 500 MB are now refused at post creation (backend validation + composer, `VIDEO_MAX_BYTES` in `lib/capabilities.ts`, exposed as `videoMaxBytes` in `/capabilities`).*  
+*Updated: 2026-10-01 | §15 steps 0-4 built (§15.10): in n8n 2.x only raw `https` works for binary in a Code node (`NODE_FUNCTION_ALLOW_BUILTIN=https`); LinkedIn video now relays 4 MiB parts from S3 (`LI Relay Video Parts`), YouTube uses a chunked resumable relay with resume-on-failure (`YT Relay Video`); payloads carry `media_size_bytes`; `platform-error.ts` handles the relay's errors. Mock-tested inside n8n; live platform test pending.*

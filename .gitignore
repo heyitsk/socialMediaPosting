@@ -27,3 +27,4 @@ backend/postgres_data/
 .claude/settings.local.json
 .claude/.headroom_wrap_marker.json
 CLAUDE.md
+.claude/worktrees/

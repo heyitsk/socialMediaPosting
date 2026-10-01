@@ -1,0 +1,48 @@
+// Local-only Faro receiver (websitePlan.md §14.7): otel-lgtm has no endpoint
+// for the browser SDK, so this takes Faro's payloads and forwards them to
+// otel-lgtm over OTLP. Run with `docker compose --profile faro up -d alloy`
+// and start the frontend with VITE_FARO_URL=/faro/collect — Vite proxies
+// /faro here, so the browser (on the ngrok domain) never calls localhost.
+// Production sends Faro straight to Grafana Cloud's collector instead.
+
+faro.receiver "browser" {
+  server {
+    listen_address       = "0.0.0.0"
+    listen_port          = 12347
+    cors_allowed_origins = ["http://localhost:5173"]
+  }
+
+  output {
+    logs   = [otelcol.receiver.loki.browser.receiver]
+    traces = [otelcol.exporter.otlphttp.lgtm.input]
+  }
+}
+
+// Faro's logs, errors, events and Web Vitals arrive as Loki entries; convert
+// them so everything reaches otel-lgtm through the same OTLP endpoint.
+otelcol.receiver.loki "browser" {
+  output {
+    logs = [otelcol.processor.transform.browser.input]
+  }
+}
+
+// Loki entries carry no service name; without this they land as
+// unknown_service.
+otelcol.processor.transform "browser" {
+  error_mode = "ignore"
+
+  log_statements {
+    context    = "resource"
+    statements = [`set(attributes["service.name"], "smposting-frontend")`]
+  }
+
+  output {
+    logs = [otelcol.exporter.otlphttp.lgtm.input]
+  }
+}
+
+otelcol.exporter.otlphttp "lgtm" {
+  client {
+    endpoint = "http://otel-lgtm:4318"
+  }
+}

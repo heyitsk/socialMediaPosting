@@ -18,6 +18,13 @@ export default defineConfig({
     allowedHosts: [".ngrok-free.dev"],
     proxy: {
       "/api": { target: "http://localhost:4000", xfwd: true },
+      // Local Faro receiver (the optional `alloy` compose service), same
+      // origin so the page never calls localhost directly. Use with
+      // VITE_FARO_URL=/faro/collect. websitePlan.md §14.7.
+      "/faro": {
+        target: "http://localhost:12347",
+        rewrite: (path) => path.replace(/^\/faro/, ""),
+      },
     },
   },
 });

@@ -9,6 +9,7 @@ import {
   fetchInstagramBusinessAccount,
   fetchPages,
 } from "../../lib/facebook";
+import { logger } from "../../lib/logger";
 
 export const facebookAuthRoute = new Hono();
 
@@ -94,7 +95,7 @@ facebookAuthRoute.get("/callback", async (c) => {
 
     return c.redirect(connectRedirect("connected=facebook", ctx.workspaceId));
   } catch (err) {
-    console.error("Facebook OAuth callback failed:", err);
+    logger.error({ platform: "facebook", err }, "OAuth callback failed");
     return c.redirect(connectRedirect("error=facebook_connect_failed", ctx.workspaceId));
   }
 });
