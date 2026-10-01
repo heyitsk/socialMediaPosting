@@ -2,7 +2,33 @@ import { useQuery } from "@tanstack/react-query";
 import { PostGroupCard } from "@/components/post-group-card";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
+import type { components } from "@/lib/api-schema";
 import { useWorkspaceId } from "@/lib/session";
+
+type PostGroup = components["schemas"]["PostGroup"];
+
+// A send resolves within its callback deadline (90 min for video), so a target
+// still PROCESSING well past that is stuck — fast polling won't change it.
+const IN_FLIGHT_MS = 2 * 60 * 60_000;
+
+// When a target's current send started: the group's creation, its schedule,
+// or the target's posting-limit slot (pushed back, or a fresh retry).
+function sendStartedAt(group: PostGroup, target: PostGroup["targets"][number]): number {
+  return Math.max(
+    Date.parse(group.createdAt),
+    group.scheduledFor ? Date.parse(group.scheduledFor) : 0,
+    target.sendAt ? Date.parse(target.sendAt) : 0,
+  );
+}
+
+function hasSendInFlight(groups: PostGroup[], now: number): boolean {
+  return groups.some((group) =>
+    group.targets.some(
+      (target) =>
+        target.status === "PROCESSING" && now - sendStartedAt(group, target) < IN_FLIGHT_MS,
+    ),
+  );
+}
 
 export function HistoryPage() {
   const workspaceId = useWorkspaceId() ?? "";
@@ -20,10 +46,10 @@ export function HistoryPage() {
       if (error) throw error;
       return data;
     },
-    // Only poll while something is on its way out — scheduled posts don't
-    // change until their time comes.
+    // Fast only while something is on its way out — scheduled posts don't
+    // change until their time comes, and a stuck send never will.
     refetchInterval: (query) =>
-      query.state.data?.some((group) => group.status === "PROCESSING") ? 3000 : 30_000,
+      query.state.data && hasSendInFlight(query.state.data, Date.now()) ? 3000 : 30_000,
   });
 
   return (
