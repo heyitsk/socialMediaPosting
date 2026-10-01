@@ -7,9 +7,11 @@ import { useWorkspaceId } from "@/lib/session";
 
 type PostGroup = components["schemas"]["PostGroup"];
 
-// A send resolves within its callback deadline (90 min for video), so a target
-// still PROCESSING well past that is stuck — fast polling won't change it.
-const IN_FLIGHT_MS = 2 * 60 * 60_000;
+// Most sends resolve within minutes, so a target still PROCESSING after an hour
+// is treated as stuck and drops to the slow refresh. A long video can still be
+// going between 60 and 90 min (its callback deadline); it then shows up on the
+// 30 s refresh instead.
+const IN_FLIGHT_MS = 60 * 60_000;
 
 // When a target's current send started: the group's creation, its schedule,
 // or the target's posting-limit slot (pushed back, or a fresh retry).
