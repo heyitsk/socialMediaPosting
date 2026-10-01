@@ -1392,7 +1392,7 @@ Users can now see the limits.
 
 ## 14. Observability (Logs, Traces, Metrics) — Implementation Plan (Sep 30, 2026, planning only)
 
-> **Status (Oct 1, 2026):** steps 1-5 built (§14.11.1-§14.11.5); step 6 (dashboards, alerts, Grafana Cloud) not started; the n8n leg of step 3 waits on upgrading the running n8n container. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
+> **Status (Oct 1, 2026):** steps 1-5 built and checked end to end (§14.11.1-§14.11.5), including the n8n leg. Step 6 (dashboards, alerts, Grafana Cloud) not started. Kushagra picked Grafana Cloud with OpenTelemetry over New Relic and CloudWatch. His decisions are in §14.10.
 
 **Goal:** when a post fails or is slow, open one trace and follow the whole path: composer click → Hono route → Prisma → BullMQ job → n8n workflow → platform API → n8n callback → back in the backend. Every log line in that path links to the trace, and a dashboard shows publish health per platform without anyone opening a trace.
 
@@ -1576,7 +1576,17 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
   - `tracedFetch` sent `traceparent` only with `propagate`.
   - `url.full` came through with the query string stripped.
   - `bun test` 51/51, `tsc` clean.
-- **Not yet checked:** the n8n leg (dispatch → `workflow.execute` → callback in one trace) needs the n8n upgrade plus a real post, which is §14.11 step 3's exit check.
+- **n8n leg checked (Oct 1, exit check passed):**
+  - The running n8n was upgraded 2.13.4 → 2.41.4 after backing up `n8n_data` (187 MB tarball incl. `database.sqlite` and `config`). All posters stayed published.
+  - A real Facebook "post now" produced one trace (`d1b81c33…`, 341 spans) running from the browser through n8n and back:
+    - `smposting-frontend` `POST …/post-groups`
+    - → backend `POST /api/workspaces/:workspaceId/post-groups` with Prisma spans
+    - → BullMQ `post-publish` add → process
+    - → `POST localhost:5678` (`/webhook/facebook-poster`)
+    - → `smposting-n8n` `workflow.execute facebook-poster` (3.8 s) with one `node.execute` per node. The Graph API HTTP node took 3.5 s.
+    - → n8n's callback HTTP node → backend `POST /api/webhooks/n8n-callback` (204).
+  - The deadline job was added in the same trace. Its run will be a separate linked trace, as designed.
+  - Both backend `request` log lines (201 create, 204 callback) carry the trace id in Loki.
 
 ### 14.11.4 Step 4 as built (Oct 1, 2026)
 
@@ -1664,3 +1674,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-10-01 | §14 step 3 built (§14.11.3): `bullmq-otel` on every queue and worker; delayed publishes, deadlines and video-status polls start their own trace with a span link back (`queue/telemetry.ts`); root spans for the reconcilers and media cleaner; `tracedFetch` for all 17 outbound calls, sending `traceparent` only to n8n; n8n pinned to 2.41.4 with `N8N_OTEL_*` in compose. Parent/link/propagation/redaction checked in Tempo with a throwaway queue. The n8n leg needs the running n8n container upgraded from 2.13.4.*
 *Updated: 2026-10-01 | §14 step 4 built (§14.11.4): `lib/metrics.ts` business metrics (dispatched, completed by outcome, deadline hits, n8n dispatch time, limit pauses and refusals, render time, uploads) with fixed-set labels only, and a `smposting_queue_jobs` gauge per queue and state. Send-to-published duration deferred (needs a dispatch timestamp column). Queue gauge, BullMQ and HTTP metrics checked in local Prometheus.*
 *Updated: 2026-10-01 | §14 step 5 built (§14.11.5): Grafana Faro in the frontend (`lib/telemetry.ts`), lazy-loaded and only when `VITE_FARO_URL` is set, with route views (ids as `:id`), user id, and composer/upload/crop events. Optional local receiver: `alloy` compose service under the `faro` profile forwarding to otel-lgtm. Build and the receiver → Loki path checked; not yet checked in a browser.*
+*Updated: 2026-10-01 | §14 step 3 exit check passed: n8n upgraded to 2.41.4 (backup first), and a real Facebook post produced one trace from the browser through the backend, BullMQ, the `facebook-poster` workflow and its nodes, and back via the n8n callback, with the backend log lines linked to it.*
