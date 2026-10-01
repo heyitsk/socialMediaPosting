@@ -1,4 +1,5 @@
 import { metrics, ValueType } from "@opentelemetry/api";
+import type { CooldownReason } from "@prisma/client";
 import { MEDIA_TYPES, POSTABLE_PLATFORMS } from "./capabilities";
 
 // Business metrics (websitePlan.md §14.6). Labels come only from small fixed
@@ -62,7 +63,7 @@ export function secondsSince(start: number): number {
 // A counter series appears at its first event with value 1, and Prometheus's
 // increase() can't see that first step — a platform that posts rarely would
 // read 0 on the dashboards. Exporting every valid label set at 0 from startup
-// fixes that. Bounded: 18 platform/media pairs (MEDIA_TYPES) → ~85 series.
+// fixes that. Bounded: 18 platform/media pairs (MEDIA_TYPES) → ~100 series.
 function seedCounters(): void {
   for (const platform of POSTABLE_PLATFORMS) {
     const mediaTypes = new Set(Object.values(MEDIA_TYPES[platform]).flat());
@@ -73,6 +74,10 @@ function seedCounters(): void {
       }
     }
     postsDeadlineHits.add(0, { platform });
+    // The spam-pause alert (observability/alerts) watches ABUSE_BLOCK.
+    for (const reason of ["ABUSE_BLOCK", "RATE_LIMIT", "QUOTA"] satisfies CooldownReason[]) {
+      limitPauses.add(0, { platform, reason });
+    }
     for (const reason of ["duplicate", "no_slot", "paused"]) {
       limitRefusals.add(0, { platform, reason });
     }

@@ -1644,6 +1644,29 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 - **Checked:** all four imported into local Grafana. Every panel query was run against the real data sources: none errored. The empty ones only need events that haven't happened yet (no 5xx, renders, refusals, browser errors; Firefox reports no LCP/INP/CLS). The seeded series show up (12 per platform, 6 for YouTube).
 - **Next (part 2):** alert rules, then Grafana Cloud.
 
+### 14.11.7 Step 6, part 2: alert rules (Oct 1, 2026)
+
+- **`observability/alerts/rules.json`:** Grafana-managed rule group `smposting` (1-minute evaluation), five rules. No data counts as OK (no posts or traffic isn't a problem). Each rule links to the dashboard panel that shows it and sends straight to the `smposting-email` contact point (`notification_settings`), so the notification policy tree is untouched.
+
+  | Rule | Fires when | Severity |
+  |---|---|---|
+  | Platform failure rate above 20% | per platform, failed ÷ (published + failed) > 0.2 over 30 min, with at least 5 finished | warning |
+  | Post got no result back from n8n | any callback-deadline hit in 15 min, per platform | critical |
+  | Publish job crashed | any `"publish job crashed"` log line in 15 min (Loki) | critical |
+  | API server errors above 2% | 5xx share > 2% over 10 min, with at least 20 requests | warning |
+  | Meta spam block (code 368) | any `ABUSE_BLOCK` pause in 15 min, per platform | critical |
+
+  - The crash rule is log-based on purpose: BullMQ's failed-job counter only appears at the first failure, which `increase()` can't see.
+  - `lib/metrics.ts` now also seeds `smposting_limits_pauses_total` at 0 for every platform × `CooldownReason`, so the first spam block is seen.
+- **`observability/import-alerts.sh`:**
+  - Creates the folder.
+  - Creates the email contact point from `ALERT_EMAIL` (first run only; no address in git).
+  - Fills in the `${PROMETHEUS_UID}`/`${LOKI_UID}` placeholders (local defaults `prometheus`/`loki`; Grafana Cloud's are set by env).
+  - Replaces the rule group in one `PUT` with `X-Disable-Provenance`, so the rules stay editable in the UI.
+- **Checked locally:** all five loaded and evaluated with health `ok`, state inactive. `/api/v1/eval` on the deadline rule returned one series per platform at 0, so each platform alerts separately.
+  - **Local otel-lgtm has no SMTP**, so firing rules there show in Alerting but send no email. Grafana Cloud sends email out of the box.
+- **Next:** Grafana Cloud (stack, OTLP endpoint + token in Secrets Manager, Faro app, import both scripts with Cloud's data-source uids).
+
 ### 14.12 Risks
 
 - **OTel under Bun is not officially supported.** The SDK and the library-driven instrumentations work, per several 2026 guides, but that's community experience, not a guarantee. Step 1 is a spike for this reason.
@@ -1692,3 +1715,4 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 *Updated: 2026-10-01 | §14 step 5 built (§14.11.5): Grafana Faro in the frontend (`lib/telemetry.ts`), lazy-loaded and only when `VITE_FARO_URL` is set, with route views (ids as `:id`), user id, and composer/upload/crop events. Optional local receiver: `alloy` compose service under the `faro` profile forwarding to otel-lgtm. Build and the receiver → Loki path checked; not yet checked in a browser.*
 *Updated: 2026-10-01 | §14 step 3 exit check passed: n8n upgraded to 2.41.4 (backup first), and a real Facebook post produced one trace from the browser through the backend, BullMQ, the `facebook-poster` workflow and its nodes, and back via the n8n callback, with the backend log lines linked to it.*
 *Updated: 2026-10-01 | §14 step 6 part 1 (§14.11.6): four Grafana dashboards (publishing, API, queues and media, frontend) as portable JSON in `observability/dashboards/` with an import script; publishing counters seeded at 0 so a first post is counted. Every panel query checked against local Grafana.*
+*Updated: 2026-10-01 | §14 step 6 part 2 (§14.11.7): five Grafana-managed alert rules (platform failure rate, n8n no-callback, publish job crash, API 5xx, Meta spam block) in `observability/alerts/rules.json` with an import script that also creates the email contact point; pause counters seeded at 0. All rules healthy in local Grafana.*
