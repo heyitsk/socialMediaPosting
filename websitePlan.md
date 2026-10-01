@@ -1615,7 +1615,7 @@ New dependencies: backend `@opentelemetry/api`, `@opentelemetry/sdk-node`, `@ope
 - **Browser check (Oct 1, Firefox):** sessions, view changes, resource timings, Web Vitals and the user id reached Loki. But no browser traces, and backend request spans had no browser parent.
   - **Cause:** `openapi-fetch`'s `createClient` keeps the `globalThis.fetch` that existed when `lib/api.ts` loaded. Faro's fetch instrumentation replaces `fetch` later, so every API call bypassed it.
   - **Fix:** `lib/api.ts` passes `fetch: (request) => globalThis.fetch(request)`. A script that patches `fetch` after creating the client confirmed the default client ignored the patch and the fixed one used it.
-  - Still to confirm in the browser: Tempo shows `smposting-frontend` traces with the backend span underneath.
+  - Confirmed after the fix (Oct 1): API requests carry `traceparent`, and Tempo shows `smposting-frontend` traces. **Step 5 exit check passed.**
   - S3 uploads use XHR to another origin, so Faro traces them without adding `traceparent`, which would break the presigned upload.
 
 ### 14.12 Risks
