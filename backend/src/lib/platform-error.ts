@@ -26,6 +26,18 @@ interface ErrorRule {
   message: string;
 }
 
+// An expired or revoked token: nothing but reconnecting the account fixes
+// it, so retrying is pointless. "reconnect the account" is what
+// service/youtube-token.ts throws when Google refuses the refresh token.
+const ACCOUNT_ACCESS_TEXT = [
+  /\\?"code\\?":\s*190\b|Error validating access token|session has (?:expired|been invalidated)/i,
+  /EXPIRED_ACCESS_TOKEN|REVOKED_ACCESS_TOKEN|invalid_grant|Invalid Credentials|reconnect the account/,
+];
+
+export function isAccountAccessError(raw: string): boolean {
+  return ACCOUNT_ACCESS_TEXT.some((pattern) => pattern.test(raw));
+}
+
 // Known failures, first match wins. Add new cases here.
 const ERROR_RULES: ErrorRule[] = [
   // --- Our side: n8n couldn't read the uploaded file ---
@@ -50,14 +62,10 @@ const ERROR_RULES: ErrorRule[] = [
   },
 
   // --- Account access ---
-  {
-    text: /\\?"code\\?":\s*190\b|Error validating access token|session has (?:expired|been invalidated)/i,
+  ...ACCOUNT_ACCESS_TEXT.map((text) => ({
+    text,
     message: "This account's access has expired — reconnect it on the Dashboard.",
-  },
-  {
-    text: /EXPIRED_ACCESS_TOKEN|REVOKED_ACCESS_TOKEN|invalid_grant|Invalid Credentials/,
-    message: "This account's access has expired — reconnect it on the Dashboard.",
-  },
+  })),
   {
     status: (status) => status === 401,
     message: "The platform didn't accept this account's login — reconnect it on the Dashboard.",

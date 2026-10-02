@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { friendlyPlatformError } from "./platform-error";
+import { friendlyPlatformError, isAccountAccessError } from "./platform-error";
 
 // The shapes the video relay Code nodes produce once they reach
 // Build Error Result (websitePlan.md §15): n8n adds " [line N]" to a thrown
@@ -36,6 +36,33 @@ describe("video relay errors", () => {
     const raw = "read ECONNRESET [line 12] (node: YT Relay Video)";
     expect(friendlyPlatformError(raw, "YOUTUBE")).toBe(
       "The connection to the platform dropped while posting — try again.",
+    );
+  });
+});
+
+// Used by the video-status poller to stop retrying (websitePlan.md §6).
+describe("account access errors", () => {
+  test("revoked or expired tokens", () => {
+    expect(isAccountAccessError('Facebook Graph API error (400): {"error":{"code":190}}')).toBe(
+      true,
+    );
+    expect(
+      isAccountAccessError(
+        'LinkedIn video status fetch failed (401): {"code":"REVOKED_ACCESS_TOKEN"}',
+      ),
+    ).toBe(true);
+    expect(
+      isAccountAccessError("YouTube video status fetch failed (401): Invalid Credentials"),
+    ).toBe(true);
+    expect(isAccountAccessError("YouTube refresh token missing — reconnect the account")).toBe(
+      true,
+    );
+  });
+
+  test("errors a retry can fix", () => {
+    expect(isAccountAccessError("read ECONNRESET")).toBe(false);
+    expect(isAccountAccessError("YouTube video status fetch failed (503): backendError")).toBe(
+      false,
     );
   });
 });
