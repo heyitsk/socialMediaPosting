@@ -164,7 +164,7 @@ export async function prepareRetry(
 
     const updated = await tx.post.update({
       where: { id: postId },
-      data: { status: "PROCESSING", attempt: post.attempt + 1 },
+      data: { status: "PROCESSING", attempt: post.attempt + 1, dispatchedAt: null },
       select: { attempt: true },
     });
     await recomputeGroupStatus(tx, target.groupId);

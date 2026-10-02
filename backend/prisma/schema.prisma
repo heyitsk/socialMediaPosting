@@ -288,6 +288,10 @@ model Post {
   // Bumped by each manual retry. Publish/deadline job ids include it, and a
   // deadline job from an older attempt is ignored.
   attempt            Int              @default(1)
+  // When this attempt was handed to n8n — null until then, cleared by a
+  // retry. Tells the reconciler a never-sent target (safe to queue again)
+  // from one waiting on its callback (websitePlan.md §6).
+  dispatchedAt       DateTime?        @map("dispatched_at")
   createdAt          DateTime         @default(now()) @map("created_at")
 
   logs          PostLog[]

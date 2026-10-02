@@ -2,6 +2,7 @@ import { DelayedError, type Job, Worker } from "bullmq";
 import { prisma } from "../db/client";
 import { isPostablePlatform, reconnectReason } from "../lib/capabilities";
 import { logger } from "../lib/logger";
+import { postsDeadlineHits, postsDispatched } from "../lib/metrics";
 import { pausedFailureMessage } from "../lib/posting-limits";
 import { withRootSpan } from "../lib/tracing";
 import { mediaForDispatch } from "../service/media";
@@ -14,6 +15,7 @@ import {
 import { activeCooldown, bookedSlotAt, releaseSlot } from "../service/posting-limits";
 import { redisConnection } from "./connection";
 import {
+  callbackDeadlineMs,
   enqueueCallbackDeadline,
   enqueuePublish,
   hasPendingPublishJob,
@@ -21,7 +23,6 @@ import {
   type PublishJobData,
 } from "./publish-queue";
 import { linkToProducer, telemetry } from "./telemetry";
-import { postsDeadlineHits, postsDispatched } from "../lib/metrics";
 
 // Each job is one quick HTTP call to n8n (the workflows respond on receipt),
 // so a group's targets — up to this many — go out in parallel.
@@ -163,6 +164,14 @@ export async function publish(job: Job<PublishJobData>, token?: string): Promise
 
   if (post.status === "SCHEDULED" && !(await markTargetProcessing(postId, attempt))) return;
 
+  // Stamped before the call, not after: if the process dies mid-call, the
+  // reconciler then treats the target as sent and fails it at its deadline
+  // rather than sending it a second time.
+  await prisma.post.updateMany({
+    where: { id: postId, attempt },
+    data: { dispatchedAt: new Date() },
+  });
+
   try {
     // Uploaded media gets freshly signed S3 URLs on every attempt.
     const { mediaUrls, mediaSizes } = await mediaForDispatch(
@@ -244,11 +253,44 @@ async function reconcileDueSchedules(): Promise<void> {
   }
 }
 
+// A deadline job that's merely running late gets one interval to fire
+// before the reconciler steps in.
+const DEADLINE_GRACE_MS = RECONCILE_INTERVAL_MS;
+
+// The same for PROCESSING targets, whose publish job or callback-deadline job
+// can be lost the same way (websitePlan.md §6). One never handed to n8n is
+// queued again; one that was is failed once its deadline has passed, exactly
+// as its deadline job would have — never sent twice.
+export async function reconcileInFlight(): Promise<void> {
+  const inFlight = await prisma.post.findMany({
+    where: { status: "PROCESSING" },
+    select: { id: true, attempt: true, mediaType: true, dispatchedAt: true },
+  });
+  for (const post of inFlight) {
+    if (!post.dispatchedAt) {
+      if (!(await hasPendingPublishJob(post.id, post.attempt))) {
+        logger.warn({ postId: post.id }, "reconciler: re-queueing lost publish job");
+        await enqueuePublish(post.id, post.attempt);
+      }
+      continue;
+    }
+    const overdueAt =
+      post.dispatchedAt.getTime() + callbackDeadlineMs(post.mediaType) + DEADLINE_GRACE_MS;
+    if (Date.now() < overdueAt) continue;
+    logger.warn({ postId: post.id }, "reconciler: failing target past its callback deadline");
+    await enforceDeadline({ postId: post.id, attempt: post.attempt });
+  }
+}
+
 export function startScheduleReconciler(): void {
-  const run = () =>
+  const run = () => {
     withRootSpan("reconcile schedules", reconcileDueSchedules).catch((err) =>
       logger.error({ err }, "schedule reconciler failed"),
     );
+    withRootSpan("reconcile in-flight targets", reconcileInFlight).catch((err) =>
+      logger.error({ err }, "in-flight reconciler failed"),
+    );
+  };
   run();
   setInterval(run, RECONCILE_INTERVAL_MS);
 }
