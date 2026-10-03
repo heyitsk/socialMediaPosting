@@ -18,6 +18,36 @@ Until the reviews pass, production works for **you and the test users you add**,
 
 ---
 
+## T. Tester launch first (decided Oct 3): deploy publicly, publish nothing
+
+The first deploy is for a small group of remote, non-technical testers who use the real URL like normal users. **No app gets published or reviewed yet.** Every platform has a tester mode that allows this:
+
+| Platform | Mode we stay in | What each tester needs | Limits while in this mode |
+|---|---|---|---|
+| Meta: Facebook + IG via Page | App in **Development** mode | A **Facebook tester role**: App Roles → Roles → Add People → Tester, using their FB profile. They accept at `developers.facebook.com/requests` (this may ask them to register as a Meta developer, which is a one-click form). To post they need a **Facebook Page they admin**. For IG through the Page, an **Instagram professional (Business/Creator) account linked to that Page**. | Only role holders can connect. Posts made by a dev-mode app may only be visible to app role holders, not the public *(verify)*. Neither matters for testing. |
+| Meta: Instagram Login | Development | An **Instagram tester** invite (App Roles → Instagram Testers, by IG username). They accept in Instagram → Settings → *Apps and websites* → **Tester invites** (or instagram.com/accounts/manage_access). The account must be **professional**, not personal. | Role holders only |
+| Meta: Threads | Development | A **Threads tester** invite (App Roles → Threads Testers). They accept in Threads → Settings → Account → *Website permissions* → **Invites**. | Role holders only |
+| Google login project | **Publish it** (Testing → In production) | Nothing. With only `openid email profile`, publishing is instant and shows no "unverified app" warning. *If you leave it in Testing, add every tester's Gmail as a test user instead.* | None that matter |
+| Google YouTube project | **Testing** | Their Google account added under **Audience → Test users** (max 100). At consent they'll see "Google hasn't verified this app" → **Advanced → Go to smPosting (unsafe)**. Warn them in advance. | **Refresh tokens expire after 7 days**, so testers must reconnect YouTube weekly. 10k quota units/day ≈ **6 uploads/day in total**. Uploads are probably **private-only** (unaudited project). |
+| LinkedIn | As it is (self-serve products) | Nothing | Tokens last ~60 days |
+
+**Still required for the tester launch:**
+- Domain + HTTPS. Meta and Google reject non-HTTPS redirect URIs, and ngrok isn't an option because the testers need it running 24/7, not only while your laptop is on.
+- All of Phase 2 (AWS hygiene), Phase 3 (containers), Phase 4 (infra) and Phase 5 (go-live). **n8n must be deployed too.** Frontend, backend, Postgres and Redis alone can't post, because every post goes through the n8n poster workflows. S3 is already there.
+- Production redirect URIs added in the Meta, Google and LinkedIn dashboards, and the production origin added to S3 CORS.
+- Keep `POSTING_LIMITS_PROFILE=dev` **while Meta is in Development mode** (that's what the profile is for). Remove it when Meta goes Live.
+
+**Deferred until you publish:** Phase 1 (legal pages, Meta deletion callbacks), Meta Business Verification and App Review, Google brand verification for YouTube, the YouTube audit, the LinkedIn Company Page link, and the Google login project's logo. Phase 6 CI/CD and backups are still worth doing in week one, since testers' data and schedules live on the box.
+
+**Tester onboarding sheet** (send this to each tester; you do the dashboard side):
+1. Send me: Facebook profile link, Instagram username, Threads username, Gmail address.
+2. Accept the invites: Facebook (developers.facebook.com/requests), Instagram (Settings → Apps and websites → Tester invites), Threads (Settings → Account → Website permissions → Invites).
+3. Make sure your Instagram is a **Business or Creator** account, and for the Facebook route, linked to a Facebook Page you manage.
+4. Open `https://app.<domain>` → Sign in with Google → Connect each platform.
+5. YouTube: on the "Google hasn't verified this app" screen, click **Advanced → Go to smPosting**. Reconnect YouTube if it shows disconnected (expected weekly during testing).
+
+---
+
 ## Phase 1 — Pages and endpoints the reviews require (code)
 
 All three platforms reject apps that don't have these. None exist yet. The landing page is already on `main`, but there are no privacy, terms or data-deletion pages.
@@ -58,7 +88,7 @@ You said you have the root login and an IAM user that was made for S3. **Don't g
   - All secrets come from `/opt/smposting/.env`, which is generated at deploy time from SSM Parameter Store. **No literals in the file.** The dev `CALLBACK_SECRET` is committed in a public repo, so production gets a newly generated one.
   - Postgres: an init script creates an `n8n` database and user. n8n gets `DB_TYPE=postgresdb`, a fixed `N8N_ENCRYPTION_KEY`, `N8N_EDITOR_BASE_URL=WEBHOOK_URL=https://n8n.<domain>`, `N8N_PROXY_HOPS=1`, `N8N_SECURE_COOKIE=true`, and `N8N_OTEL_EXPORTER_OTLP_ENDPOINT` set to Grafana Cloud (or tracing off).
   - Redis: `--appendonly yes --appendfsync everysec`, with a `maxmemory` policy of `noeviction`, because BullMQ requires it.
-  - Backend env: `PUBLIC_BACKEND_URL=FRONTEND_URL=https://app.<domain>`, `N8N_BASE_URL=http://n8n:5678`, `REDIS_HOST=redis`, `DATABASE_URL=postgres://...@postgres:5432/smposting`, **no `AWS_PROFILE`** (the SDK picks up the instance role), `POSTING_LIMITS_PROFILE` unset (not `dev`), and OTLP set to Grafana Cloud.
+  - Backend env: `PUBLIC_BACKEND_URL=FRONTEND_URL=https://app.<domain>`, `N8N_BASE_URL=http://n8n:5678`, `REDIS_HOST=redis`, `DATABASE_URL=postgres://...@postgres:5432/smposting`, **no `AWS_PROFILE`** (the SDK picks up the instance role), `POSTING_LIMITS_PROFILE=dev` while Meta is in Development mode (unset once it's Live), and OTLP set to Grafana Cloud.
   - `restart: unless-stopped`, healthchecks with `depends_on: condition: service_healthy`, and json-file log rotation (`max-size: 10m`, `max-file: 3`).
 - [ ] Confirm that cookies are `Secure` in production and that the backend trusts `X-Forwarded-Proto` from Caddy for building OAuth redirect URLs.
 
@@ -172,6 +202,6 @@ Scopes: `openid profile w_member_social` (posting to the member's **personal pro
 - **Start the reviews now.** Infra is 2-4 days of work. Meta business verification, Google sensitive-scope verification, and the YouTube audit are 2-6 weeks and can't be rushed.
 - **Expect to launch in stages:** LinkedIn works for everyone right away. YouTube works for everyone once published, but probably uploads as private until the audit. Meta works only for testers until App Review. Show "coming soon" in the composer for anything not yet approved, rather than letting users hit errors.
 - **Production starts with a fresh database**, with no copy of dev data. Use new encryption keys and secrets everywhere. Dev tokens were encrypted with the dev key and point at dev and test accounts anyway.
-- **Don't keep `POSTING_LIMITS_PROFILE=dev` in production.** It halves the posting caps.
+- **Remove `POSTING_LIMITS_PROFILE=dev` once Meta goes Live.** It halves the posting caps. It's right during the tester launch (section T), because Meta is still in Development mode.
 - **Treat EBS snapshots and `pg_dump` as two separate safety nets.** Redis AOF makes schedules survive a restart, but losing the volume loses them. Snapshots cover that case.
 - **Use a 1-year Compute Savings Plan** once the instance size has been stable for a month. It saves about 30-40% on EC2.
