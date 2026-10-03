@@ -103,11 +103,11 @@ You said you have the root login and an IAM user that was made for S3. **Don't g
 - [ ] **CloudWatch alarms**: `StatusCheckFailed` → auto-recover, plus an SNS email. The disk alarm needs the CloudWatch agent, so a cron script that alerts at 80% is the simpler option.
 - [ ] **UserData**: install docker and the compose plugin, add a 2 GB swap file (a safety net for video runs), create `/opt/smposting`, and install a `deploy.sh` that pulls the SSM params into `.env` and runs `docker compose pull && up -d`.
 - [ ] **Update `infra/media-bucket.yaml`**: add `https://app.<domain>` to `AllowedOrigins`, keeping localhost and the ngrok origin for dev.
-- [ ] If DNS is in Route 53, put the hosted zone records (`A` for apex, `app`, `n8n` → EIP) in the template too.
+- [ ] DNS stays at Hostinger, so it isn't in the template. Point the records at the `ElasticIp` stack output (Phase 5).
 
 ## Phase 5 — First deploy and go-live (you + me)
 
-- [ ] **DNS**: `A` records for `<domain>`, `www`, `app`, `n8n` → the Elastic IP. If you use Cloudflare, set them to **DNS only (grey cloud)** at first, so Caddy's Let's Encrypt HTTP-01 challenge works without extra setup.
+- [ ] **DNS (Hostinger hPanel → Domains → `<domain>` → DNS / Nameservers → DNS records)**: DNS stays at Hostinger. Remove Hostinger's default parking `A`/`AAAA` records for `@` and the `www` CNAME. Add `A` records for `@`, `www` and `app` → the Elastic IP, with TTL 300. Skip `n8n` if the editor is reached over an SSM tunnel. Delete any leftover `AAAA` records, because Let's Encrypt would try IPv6 first and fail. If there's a `CAA` record, it must allow `letsencrypt.org`.
 - [ ] **SSM parameters** (`SecureString` under `/smposting/prod/`): `TOKEN_ENCRYPTION_KEY_V1` (a **new** key, since prod data starts empty), `N8N_CALLBACK_SECRET`, `N8N_ENCRYPTION_KEY`, Postgres passwords, all OAuth client IDs and secrets, Grafana Cloud OTLP headers, and n8n basic-auth credentials.
 - [ ] **OAuth redirect URIs**: add the `https://app.<domain>/api/...` URIs alongside the ngrok ones in each dashboard (paths are listed in `backend/.env.example`):
   - Meta: Facebook Login for Business, Instagram Login, Threads. Also set the App Domains, Privacy Policy URL, Terms URL, Data Deletion URL, and the Phase 1 callback URLs.
