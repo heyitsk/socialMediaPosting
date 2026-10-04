@@ -1,0 +1,52 @@
+# Production front door (deploymentPlan.md §4). Caddy gets and renews the
+# Let's Encrypt certificates for every site below on its own; that needs
+# ports 80/443 open and each hostname's DNS pointing at this server.
+# {$VAR} values come from the container's environment (docker-compose.prod.yml).
+
+{
+	# Let's Encrypt emails this address if a certificate is about to expire
+	# without renewing.
+	email {$ACME_EMAIL}
+}
+
+# No landing page yet: the bare domain and www go to the app. Temporary (302)
+# so browsers don't cache it once a real landing page exists.
+{$DOMAIN}, www.{$DOMAIN} {
+	redir https://app.{$DOMAIN}{uri} 302
+}
+
+# The SPA and the API on one origin, so the session cookie stays first-party
+# and no CORS is needed (websitePlan.md §9.2).
+app.{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	# Backend: every API route, including the OAuth callbacks and the n8n
+	# callback. Caddy sets X-Forwarded-For to the real client IP, which the
+	# rate limiter reads (middleware/rate-limit.ts).
+	@backend path /api/* /health
+	handle @backend {
+		reverse_proxy backend:4000
+	}
+
+	# Frontend: the built SPA. Unknown paths fall back to index.html so React
+	# Router can handle them (e.g. a refresh on /w/123/composer).
+	handle {
+		root * /srv
+		# Vite puts a content hash in every asset filename, so they can be
+		# cached forever; index.html must always be re-checked.
+		@hashed path /assets/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+		@entry not path /assets/*
+		header @entry Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}

@@ -1,0 +1,142 @@
+# Production stack on the EC2 box (deploymentPlan.md §4). Run from deploy/:
+#   docker compose -f docker-compose.prod.yml up -d --build
+# deploy.sh does exactly that after writing the two env files from SSM:
+#   .env         - compose-level values, used as ${VAR} below
+#   backend.env  - the backend's app secrets (OAuth clients, token key, ...)
+# Neither file is in git. backend/docker-compose.yml stays the dev stack.
+
+name: smposting
+
+x-logging: &logging
+  # Docker keeps container logs on disk forever by default; cap them.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # The only service reachable from the internet.
+  caddy:
+    build:
+      context: ..
+      dockerfile: infra/caddy/Dockerfile
+    image: smposting-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      DOMAIN: ${DOMAIN:?}
+      ACME_EMAIL: ${ACME_EMAIL:?}
+    volumes:
+      # Certificates. Must persist: Let's Encrypt rate-limits re-issuing.
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logging
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: smposting-backend
+    restart: unless-stopped
+    env_file: backend.env
+    environment:
+      PORT: 4000
+      # The password sits inside a URL, so generate it URL-safe:
+      # `openssl rand -hex 32`.
+      DATABASE_URL: postgresql://smposting:${POSTGRES_PASSWORD:?}@postgres:5432/smposting
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PUBLIC_BACKEND_URL: https://app.${DOMAIN}
+      FRONTEND_URL: https://app.${DOMAIN}
+      # Straight to n8n over the Docker network, not through Caddy.
+      N8N_BASE_URL: http://n8n:5678
+      N8N_CALLBACK_SECRET: ${N8N_CALLBACK_SECRET:?}
+      # No AWS_PROFILE: the SDK picks up the EC2 instance role.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *logging
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: smposting
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: smposting
+      # Read by postgres-init/10-n8n.sh on first start only.
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smposting -d smposting"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  redis:
+    image: redis:8.0
+    restart: unless-stopped
+    # appendonly: write every change to disk, so scheduled posts (delayed
+    # BullMQ jobs) survive a restart. noeviction: BullMQ requires that Redis
+    # never silently drops keys when memory is full.
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *logging
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.41.4
+    restart: unless-stopped
+    # Loopback only: the editor is reached over an SSM port-forward
+    # (deploymentImplementation.md), never from the internet.
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      GENERIC_TIMEZONE: Asia/Kolkata
+      TZ: Asia/Kolkata
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?}
+      # Encrypts the credentials saved in n8n. Losing it makes them unreadable.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?}
+      N8N_EDITOR_BASE_URL: http://localhost:5678
+      WEBHOOK_URL: http://localhost:5678
+      # The editor is only ever opened as http://localhost through the tunnel.
+      N8N_SECURE_COOKIE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      # Same as the dev stack (backend/docker-compose.yml).
+      N8N_DEFAULT_BINARY_DATA_MODE: filesystem
+      N8N_PAYLOAD_SIZE_MAX: 4000
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 336
+      CALLBACK_SECRET: ${N8N_CALLBACK_SECRET:?}
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      NODE_FUNCTION_ALLOW_BUILTIN: https
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_data:
+  redis_data:
+  n8n_data:
