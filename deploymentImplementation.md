@@ -205,3 +205,47 @@ Scopes: `openid profile w_member_social` (posting to the member's **personal pro
 - **Remove `POSTING_LIMITS_PROFILE=dev` once Meta goes Live.** It halves the posting caps. It's right during the tester launch (section T), because Meta is still in Development mode.
 - **Treat EBS snapshots and `pg_dump` as two separate safety nets.** Redis AOF makes schedules survive a restart, but losing the volume loses them. Snapshots cover that case.
 - **Use a 1-year Compute Savings Plan** once the instance size has been stable for a month. It saves about 30-40% on EC2.
+
+---
+
+## 10. Future Scaling
+
+> Not needed for the tester launch. Written Oct 4 so the path is clear before it's needed. The binding limit for a long time will be the platform API quotas (Meta, YouTube), not hardware. `deploymentPlan.md` §5-6 has the triggers for each step.
+
+**The rule:** stateless parts (backend API, workers, n8n workers, Caddy) scale **horizontally**, by running more copies. Stateful parts (Postgres, Redis) scale **vertically** first, by getting a bigger machine. Every stage below is about separating the two.
+
+### Stage 1: bigger box
+- On one EC2 instance everything shares the same CPU and RAM. Running more backend copies there doesn't scale Postgres; it just splits the same box.
+- When CPU or RAM is regularly above ~70%, change `InstanceType` in `infra/app-server.yaml` (`t4g.medium` → `t4g.large` → `t4g.xlarge`). Expect about 5 minutes of downtime and no code changes.
+
+### Stage 2: move the data off the box
+- **Postgres → Amazon RDS** (managed backups, patching, optional Multi-AZ standby). Restore a `pg_dump` into it and change `DATABASE_URL`.
+- **Redis → Amazon ElastiCache** with a replica for failover. Change `REDIS_HOST`. Keep `noeviction`.
+- After this the app server holds nothing that can't be rebuilt, so it can run as several copies.
+
+### Stage 3: many stateless copies behind a load balancer
+
+| Component | How it scales |
+|---|---|
+| Caddy | Replaced by an **Application Load Balancer** (HTTPS with an ACM certificate). The SPA moves to **S3 + CloudFront**. |
+| Backend | Split by role, using the same image with `ROLE=api` / `worker` / `render`. API scales on request load, workers on BullMQ queue length, render (ffmpeg) on render queue length. |
+| n8n | **Queue mode**: one main (editor + webhooks) + N workers on a Redis queue, scaled on queue length. |
+| Postgres (RDS) | Bigger instance class, then **read replicas** for read-only pages (history, dashboard). Add **RDS Proxy / PgBouncer** once copies × pool size nears `max_connections` (each backend pool is up to 10). Archive old posts and logs. Shard by workspace only as a last resort. |
+| Redis (ElastiCache) | More memory + a replica. Then separate instances for BullMQ, the n8n queue, and sessions/rate limits. Avoid Redis Cluster unless needed, because BullMQ requires hash-tagged queue prefixes there. |
+
+### Stage 4: automatic scaling
+- **ECS Fargate**: AWS-native, low ops. Scales on CPU and requests, and on queue length through CloudWatch metrics.
+- **Kubernetes (EKS) + KEDA**: the websitePlan.md end state. KEDA scales n8n and BullMQ workers directly on Redis queue length. Costs ~$73/month for the control plane plus ops time. k3s on EC2 is a cheaper way to start.
+
+### Code changes required before running more than one backend copy
+- [ ] **Make the per-process timers run once across all copies.** Today each process runs its own `setInterval`, so N copies run them N times:
+  - schedule reconciler (`backend/src/queue/publish-worker.ts`, `startScheduleReconciler`)
+  - render reconciler (`backend/src/queue/render-worker.ts`, `startRenderReconciler`)
+  - media cleaner (`backend/src/service/media.ts`, `startMediaCleaner`)
+
+  Move them to BullMQ job schedulers (`queue.upsertJobScheduler`), which fire once per interval no matter how many workers listen, or guard them with a Postgres advisory lock.
+- [ ] **Role switch in `backend/src/index.ts`**: start only the HTTP server, the queue workers, or the render worker depending on `ROLE`, defaulting to all of them (today's behaviour).
+- [ ] **n8n binary data before queue mode**: `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` isn't shared across n8n workers. Confirm that every workflow path streams from S3 (the relay) or switch modes (`deploymentPlan.md` §5).
+- [ ] **Pool sizing**: set `max` on the `PrismaPg` adapter in `backend/src/db/client.ts` explicitly, so copies × max stays under the database's connection limit (or the proxy's).
+
+Already compatible with multiple copies: sessions and rate limits live in Redis, and BullMQ workers already share jobs safely through Redis.
