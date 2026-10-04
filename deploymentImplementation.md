@@ -97,7 +97,7 @@ You said you have the root login and an IAM user that was made for S3. **Don't g
 - [ ] **EC2 `t4g.medium`**, Amazon Linux 2023 arm64 (AMI from the SSM public parameter, so it's never hardcoded), 30 GB gp3 encrypted root volume, IMDSv2 required.
 - [ ] **Elastic IP**: this is the DNS target for every hostname.
 - [ ] **Security group**: inbound 80/443 from `0.0.0.0/0` and `::/0` only. **No port 22.**
-- [ ] **Instance role** with `AmazonSSMManagedInstanceCore`, the existing `BackendMediaPolicyArn` (stack output of `infra/media-bucket.yaml`), `ssm:GetParametersByPath` on `/smposting/prod/*` plus `kms:Decrypt` for the SSM key, write access to the backups bucket, and `ecr:Get*` if you choose ECR.
+- [ ] **Instance role** with `AmazonSSMManagedInstanceCore`, the existing `arn:aws:iam::675474620265:policy/smposting-backend-media-ap-south-1` (passed in as a parameter: the media bucket and this policy were created by hand on Oct 4, not by `infra/media-bucket.yaml`, so don't deploy that template, because the bucket name is already taken), `ssm:GetParametersByPath` on `/smposting/prod/*` plus `kms:Decrypt` for the SSM key, write access to the backups bucket, and `ecr:Get*` if you choose ECR.
 - [ ] **Backups bucket** (`smposting-backups-<account>-ap-south-1`): private, encrypted, 30-day expiration.
 - [ ] **DLM policy**: daily EBS snapshots, keep 7.
 - [ ] **CloudWatch alarms**: `StatusCheckFailed` → auto-recover, plus an SNS email. The disk alarm needs the CloudWatch agent, so a cron script that alerts at 80% is the simpler option.
