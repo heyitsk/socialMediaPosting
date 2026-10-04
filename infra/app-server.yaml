@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  smPosting app server - one EC2 instance running the docker compose stack in
+  deploy/ (Caddy, backend, Postgres, Redis, n8n). See deploymentPlan.md
+  section 4 and deploymentImplementation.md Phase 4.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedValues: [t4g.medium, t4g.large, t4g.xlarge]
+    Description: arm64 (Graviton) only - the images are built on the box for arm64.
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    # Amazon Linux 2023 arm64, 2026-09-30. A fixed ID on purpose: a new ImageId
+    # replaces the instance (and with it the root volume holding Postgres), so
+    # it should only ever change deliberately. Latest:
+    #   aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Default: ami-0cf36b0c962e50fd7
+  RootVolumeSize:
+    Type: Number
+    Default: 30
+    MinValue: 20
+    Description: GiB. Holds the OS, Docker images and every container volume, Postgres included.
+  MediaPolicyArn:
+    Type: String
+    Default: arn:aws:iam::675474620265:policy/smposting-backend-media-ap-south-1
+    Description: >-
+      The media bucket policy. The bucket and this policy were created by
+      hand, not by media-bucket.yaml.
+  RepoUrl:
+    Type: String
+    Default: https://github.com/heyitsk/socialMediaPosting.git
+  RepoBranch:
+    Type: String
+    Default: production
+  AlarmEmail:
+    Type: String
+    Description: Gets instance health alarms. Confirm the subscription email AWS sends.
+
+Resources:
+  # Firewall: web traffic only. No SSH - shell access is through SSM Session
+  # Manager, which needs no open port.
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: smPosting app server - HTTP and HTTPS only
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0, Description: HTTP (Let's Encrypt + redirect) }
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIpv6: "::/0", Description: HTTP (Let's Encrypt + redirect) }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTPS }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0", Description: HTTPS }
+        - { IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: HTTP/3 }
+        - { IpProtocol: udp, FromPort: 443, ToPort: 443, CidrIpv6: "::/0", Description: HTTP/3 }
+      Tags:
+        - { Key: Name, Value: smposting-app }
+
+  # What the server itself may do in AWS. The SDK in the backend container
+  # picks these credentials up automatically; no keys on the box.
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Session Manager (shell, port forwarding, send-command).
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Ref MediaPolicyArn
+      Policies:
+        - PolicyName: smposting-app
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # deploy.sh reads the production config.
+              - Sid: ReadProdConfig
+                Effect: Allow
+                Action: [ssm:GetParametersByPath, ssm:GetParameter, ssm:GetParameters]
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/smposting/prod
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/smposting/prod/*
+              # SecureString values are encrypted with the aws/ssm key; only
+              # decrypt through SSM itself.
+              - Sid: DecryptProdConfig
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub ssm.${AWS::Region}.amazonaws.com
+              # Nightly database dumps. Write-only: the server can't read or
+              # delete old backups.
+              - Sid: WriteBackups
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${BackupsBucket.Arn}/*
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref AppRole]
+
+  AppServer:
+    Type: AWS::EC2::Instance
+    # UserData reports back with cfn-signal; the stack only finishes once the
+    # box is set up, and fails (instead of looking fine) if setup broke.
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref AppInstanceProfile
+      SecurityGroupIds: [!GetAtt AppSecurityGroup.GroupId]
+      # Default VPC / default subnet. The AMI already requires IMDSv2.
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp3
+            VolumeSize: !Ref RootVolumeSize
+            Encrypted: true
+            # Survives the instance being terminated or replaced: it holds
+            # the database.
+            DeleteOnTermination: false
+      PropagateTagsToVolumeOnCreation: true
+      Tags:
+        - { Key: Name, Value: smposting-app }
+        # Picked up by SnapshotPolicy.
+        - { Key: Backup, Value: daily }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # First-boot setup. Runs once per instance; log: /var/log/cloud-init-output.log
+          set -euxo pipefail
+          signal() { /opt/aws/bin/cfn-signal -e "$1" --stack ${AWS::StackName} --resource AppServer --region ${AWS::Region}; }
+          trap 'signal 1' ERR
+
+          dnf install -y docker git jq aws-cfn-bootstrap
+
+          # Amazon Linux's docker package has no compose or buildx plugin.
+          # Pinned versions, checked against their published SHA-256.
+          plugins=/usr/local/lib/docker/cli-plugins
+          mkdir -p "$plugins"
+          curl -fsSL -o "$plugins/docker-compose" https://github.com/docker/compose/releases/download/v2.39.2/docker-compose-linux-aarch64
+          echo "54488fffb60782f3c8787a48b95ed15f49f5a3a85f4105304bd46db5edd9db61  $plugins/docker-compose" | sha256sum -c -
+          curl -fsSL -o "$plugins/docker-buildx" https://github.com/docker/buildx/releases/download/v0.28.0/buildx-v0.28.0.linux-arm64
+          echo "4e850583cc68ffd8d739ddb8a782b83f2ef9d3bf437ae7c44da4fbfde2613a8e  $plugins/docker-buildx" | sha256sum -c -
+          chmod +x "$plugins/docker-compose" "$plugins/docker-buildx"
+
+          # live-restore: containers keep running while the Docker daemon
+          # itself restarts (e.g. a docker package update).
+          mkdir -p /etc/docker
+          echo '{"live-restore": true}' > /etc/docker/daemon.json
+          systemctl enable --now docker
+
+          # 2 GB swap: a cushion for memory spikes (a big video run, an
+          # image build) so the kernel doesn't kill a container outright.
+          fallocate -l 2G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+          # The code. deploy.sh checks out the exact commit on every deploy.
+          git clone --branch ${RepoBranch} ${RepoUrl} /opt/smposting
+
+          # Facts the scripts in deploy/ read.
+          mkdir -p /etc/smposting
+          cat > /etc/smposting/env <<EOF
+          AWS_REGION=${AWS::Region}
+          BACKUP_BUCKET=${BackupsBucket}
+          EOF
+
+          signal 0
+
+  # Fixed public address: the DNS records point here and it survives the
+  # instance being stopped, started or replaced.
+  AppElasticIp:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref AppServer
+      Tags:
+        - { Key: Name, Value: smposting-app }
+
+  BackupsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub smposting-backups-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-dumps
+            Status: Enabled
+            ExpirationInDays: 30
+
+  BackupsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt BackupsBucket.Arn
+              - !Sub ${BackupsBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # Daily snapshot of the whole disk, kept 7 days. Covers what pg_dump
+  # doesn't: Redis (scheduled posts), n8n files, Caddy's certificates.
+  SnapshotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: dlm.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole
+
+  SnapshotPolicy:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: smPosting app server daily snapshots
+      State: ENABLED
+      ExecutionRoleArn: !GetAtt SnapshotRole.Arn
+      PolicyDetails:
+        ResourceTypes: [VOLUME]
+        TargetTags:
+          - { Key: Backup, Value: daily }
+        Schedules:
+          - Name: daily
+            CopyTags: true
+            CreateRule:
+              Interval: 24
+              IntervalUnit: HOURS
+              Times: ["20:30"] # UTC = 02:00 IST
+            RetainRule:
+              Count: 7
+
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - { Protocol: email, Endpoint: !Ref AlarmEmail }
+
+  # AWS hardware/host problem: move the instance to healthy hardware (same
+  # ID, IP and disk).
+  SystemCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: smPosting app server - host failed; recovering the instance
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_System
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref AppServer }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Sub arn:aws:automate:${AWS::Region}:ec2:recover
+        - !Ref AlarmTopic
+
+  # The OS itself is stuck (out of memory, kernel issue): reboot it.
+  InstanceCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: smPosting app server - OS unresponsive; rebooting
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed_Instance
+      Dimensions:
+        - { Name: InstanceId, Value: !Ref AppServer }
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Sub arn:aws:automate:${AWS::Region}:ec2:reboot
+        - !Ref AlarmTopic
+
+Outputs:
+  PublicIp:
+    Description: Point the A records for @, www and app at this.
+    Value: !Ref AppElasticIp
+  InstanceId:
+    Value: !Ref AppServer
+  BackupsBucketName:
+    Value: !Ref BackupsBucket
+  ShellCommand:
+    Description: Open a shell on the server.
+    Value: !Sub aws ssm start-session --target ${AppServer} --profile smposting-admin
+  N8nEditorCommand:
+    Description: Then open http://localhost:5678 while this runs.
+    Value: !Sub >-
+      aws ssm start-session --target ${AppServer} --profile smposting-admin
+      --document-name AWS-StartPortForwardingSession
+      --parameters portNumber=5678,localPortNumber=5678
