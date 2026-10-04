@@ -30,7 +30,15 @@ Parameters:
       hand, not by media-bucket.yaml.
   RepoUrl:
     Type: String
-    Default: https://github.com/heyitsk/socialMediaPosting.git
+    # SSH, because the repo is private: the server authenticates with a
+    # read-only deploy key kept in SSM (DeployKeyParameter).
+    Default: git@github.com:heyitsk/socialMediaPosting.git
+  DeployKeyParameter:
+    Type: String
+    Default: /smposting/prod/github/DEPLOY_KEY
+    Description: >-
+      SecureString holding the private half of the repo's read-only deploy
+      key. Must be under /smposting/prod/ so the instance role can read it.
   RepoBranch:
     Type: String
     Default: production
@@ -164,6 +172,17 @@ Resources:
           swapon /swapfile
           echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
+          # GitHub access for a private repo: the deploy key from SSM, and
+          # GitHub's SSH host keys from its HTTPS API, so the first connection
+          # is verified rather than trusted blindly. root's ssh config also
+          # covers deploy.sh's git fetch.
+          install -d -m 700 /root/.ssh
+          aws ssm get-parameter --region ${AWS::Region} --name ${DeployKeyParameter} --with-decryption \
+            --query Parameter.Value --output text > /root/.ssh/smposting_deploy
+          chmod 600 /root/.ssh/smposting_deploy
+          curl -fsSL https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' > /root/.ssh/known_hosts
+          printf 'Host github.com\n  IdentityFile /root/.ssh/smposting_deploy\n  IdentitiesOnly yes\n' > /root/.ssh/config
+
           # The code. deploy.sh checks out the exact commit on every deploy.
           git clone --branch ${RepoBranch} ${RepoUrl} /opt/smposting
 
@@ -188,7 +207,9 @@ Resources:
 
   BackupsBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    # Kept when the stack is deleted, except when the stack's own creation
+    # failed - then it's still empty and would only block the retry.
+    DeletionPolicy: RetainExceptOnCreate
     UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub smposting-backups-${AWS::AccountId}-${AWS::Region}
