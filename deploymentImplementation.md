@@ -68,7 +68,7 @@ You said you have the root login and an IAM user that was made for S3. **Don't g
 
 - [ ] Turn on **MFA on the root user**, then stop using root. It's only for billing and account-level emergencies.
 - [ ] In **IAM Identity Center** (ap-south-1), create your everyday admin user with MFA and the `AdministratorAccess` permission set. Then run `aws configure sso` locally with a profile such as `smposting-admin`. That gives short-lived credentials for the CLI and for the AWS MCP tools in Claude Code.
-- [ ] Leave the existing S3 IAM user (`AWS_PROFILE=smposting`) **for local dev only**. Production uses the EC2 instance role instead, so no keys go on the server. Make sure it only has the `smposting-backend-media-ap-south-1` policy, and rotate its access key if it's ever been pasted anywhere.
+- [ ] Leave the existing S3 IAM user (`AWS_PROFILE=smposting`) **for local dev only**. Production uses the EC2 instance role instead, so no keys go on the server. Make sure it only has the `smposting-backend-media-ap-south-1` policy. It signs in with `aws login` (its console password), so **keep console access**. Add MFA to it, and delete any unused access keys.
 - [ ] **AWS Budgets**: alert at $30 (forecast) and $50 (actual), sent to your email.
 - [ ] Billing → Free Tier: check whether the account still has free-tier or credits.
 - [ ] `aws ssm` Session Manager works from a local shell once the plugin is installed (`session-manager-plugin`). That replaces SSH.
