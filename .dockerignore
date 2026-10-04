@@ -1,0 +1,29 @@
+# Everything the images don't need, and every secret. The build context is
+# the repo root (the bun workspace lockfile lives here), so this applies to
+# backend/Dockerfile and infra/caddy/Dockerfile alike.
+
+# secrets
+**/.env
+**/.env.*
+!**/.env.example
+cred.txt
+**/*.pem
+
+# installed or built locally; the images install and build their own
+**/node_modules
+frontend/dist
+backend/dist
+backend/src/generated
+backend/prisma/generated
+
+# not part of the app
+.git
+.claude
+.serena
+backend/postgres_data
+observability
+workflows
+*.md
+
+# production env files
+deploy/*.env

@@ -28,3 +28,5 @@ backend/postgres_data/
 .claude/.headroom_wrap_marker.json
 CLAUDE.md
 .claude/worktrees/
+# production env files, written on the server by deploy/deploy.sh
+deploy/backend.env
