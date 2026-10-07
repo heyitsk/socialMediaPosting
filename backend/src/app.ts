@@ -20,6 +20,7 @@ import { invitesRoute } from "./routes/invites";
 import { loginRoute } from "./routes/login";
 import { mediaRoute } from "./routes/media";
 import { membersRoute } from "./routes/members";
+import { metaCallbacksRoute } from "./routes/meta-callbacks";
 import { postGroupsRoute } from "./routes/post-groups";
 import { postingLimitsRoute } from "./routes/posting-limits";
 import { sessionRoute } from "./routes/session";
@@ -40,12 +41,19 @@ app.use(corsMiddleware);
 // Rejects cross-site form/text POSTs (the only kind that skip a CORS
 // preflight) whose Origin isn't the frontend — covers logout and anything
 // else that takes a session cookie. JSON requests are already preflighted.
-app.use("/api/*", csrf({ origin: env.FRONTEND_URL }));
+const csrfCheck = csrf({ origin: env.FRONTEND_URL });
+// Except Meta's deauthorize/data-deletion callbacks: server-to-server form
+// POSTs with no Origin, authenticated by the HMAC on the request instead
+// (routes/meta-callbacks.ts).
+app.use("/api/*", (c, next) =>
+  c.req.path.startsWith("/api/webhooks/meta/") ? next() : csrfCheck(c, next),
+);
 app.onError(errorHandler);
 
 // Access rules (websitePlan.md §9.5):
 // - public: /health, /api/login/* (rate-limited), /api/webhooks/* (n8n,
-//   guarded by N8N_CALLBACK_SECRET)
+//   guarded by N8N_CALLBACK_SECRET; /api/webhooks/meta/* guarded by the
+//   HMAC on Meta's signed request)
 // - session only: /api/me, /api/logout-all (requireAuth inside sessionRoute),
 //   /api/capabilities;
 //   /api/auth/* connect flows check the session + membership themselves,
@@ -75,6 +83,7 @@ app.route("/api/workspaces/:workspaceId/integrations", integrationsRoute);
 app.route("/api/workspaces/:workspaceId/post-groups", postGroupsRoute);
 app.route("/api/workspaces/:workspaceId/posting-limits", postingLimitsRoute);
 app.route("/api/workspaces/:workspaceId/media", mediaRoute);
+app.route("/api/webhooks/meta", metaCallbacksRoute);
 app.route("/api/webhooks", webhooksRoute);
 
 // The full API map is no business of the public internet — dev only.

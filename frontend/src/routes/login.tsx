@@ -1,5 +1,5 @@
 import { ArrowUpRight, Send } from "lucide-react";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
 import { API_URL } from "@/lib/api";
@@ -57,9 +57,7 @@ export function LoginPage() {
               </p>
             </div>
 
-            <p className="relative text-xs text-background/40">
-              Simple publishing. One workspace.
-            </p>
+            <p className="relative text-xs text-background/40">Simple publishing. One workspace.</p>
           </section>
 
           {/* Sign in */}
@@ -106,7 +104,15 @@ export function LoginPage() {
                 </Button>
 
                 <p className="mt-5 text-center text-xs leading-5 text-muted-foreground">
-                  Continue with your Google account to access smPosting.
+                  By continuing you agree to our{" "}
+                  <Link to="/terms" className="underline hover:text-foreground">
+                    Terms of Service
+                  </Link>{" "}
+                  and{" "}
+                  <Link to="/privacy" className="underline hover:text-foreground">
+                    Privacy Policy
+                  </Link>
+                  .
                 </p>
               </CardContent>
             </div>
