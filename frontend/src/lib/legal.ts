@@ -9,9 +9,9 @@ export const LEGAL_UPDATED = "6 October 2026";
 // `code` is the confirmation code Meta's deletion callback appends to the
 // redirect URL, so a request can be matched to it.
 export function deletionRequestHref(code?: string | null) {
-  const subject = `Delete my smPosting data${code ? ` (${code})` : ""}`;
+  const subject = `Delete my postUploaders data${code ? ` (${code})` : ""}`;
   const body =
-    "Please delete my smPosting account and all data associated with it.\n\n" +
+    "Please delete my postUploaders account and all data associated with it.\n\n" +
     "Google account email I sign in with: \n" +
     (code ? `Confirmation code: ${code}\n` : "");
   return `mailto:${CONTACT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;

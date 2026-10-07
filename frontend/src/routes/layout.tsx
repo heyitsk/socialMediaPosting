@@ -1,6 +1,7 @@
-import { Clock3, LayoutDashboard, Menu, PenSquare, Plus, Send, Settings, X } from "lucide-react";
+import { Clock3, LayoutDashboard, Menu, PenSquare, Plus, Settings, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
+import logo from "@/assets/postuploaders-c-badge-1024.png";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -34,12 +35,10 @@ function AppBrand({ compact = false }: { compact?: boolean }) {
 
   return (
     <div className="flex min-w-0 items-center gap-3">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm">
-        <Send className="size-4" aria-hidden="true" />
-      </div>
+      <img src={logo} alt="" className="size-9 shrink-0 rounded-lg shadow-sm" />
       {!compact && (
         <div className="min-w-0 leading-none">
-          <div className="text-[15px] font-semibold text-sidebar-foreground">smPosting</div>
+          <div className="text-[15px] font-semibold text-sidebar-foreground">postUploaders</div>
           <div className="mt-1 truncate text-[11px] font-medium text-muted-foreground">
             {workspaceName ?? "Workspace"}
           </div>
