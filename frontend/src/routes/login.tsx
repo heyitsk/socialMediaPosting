@@ -1,5 +1,6 @@
-import { ArrowUpRight, Send } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { Link, useSearchParams } from "react-router";
+import logo from "@/assets/postuploaders-c-badge-1024.png";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
 import { API_URL } from "@/lib/api";
@@ -36,10 +37,8 @@ export function LoginPage() {
             />
 
             <div className="relative flex items-center gap-3">
-              <div className="flex size-10 items-center justify-center rounded-xl bg-background text-foreground shadow-sm">
-                <Send className="size-5" aria-hidden="true" />
-              </div>
-              <span className="text-lg font-semibold tracking-tight">smPosting</span>
+              <img src={logo} alt="" className="size-10 rounded-xl shadow-sm" />
+              <span className="text-lg font-semibold tracking-tight">postUploaders</span>
             </div>
 
             <div className="relative max-w-lg">
@@ -65,13 +64,11 @@ export function LoginPage() {
             <div className="w-full max-w-sm">
               <CardContent className="p-0">
                 <div className="mb-8 text-center">
-                  <div className="mx-auto mb-5 flex size-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-md">
-                    <Send className="size-5" aria-hidden="true" />
-                  </div>
+                  <img src={logo} alt="" className="mx-auto mb-5 size-12 rounded-2xl shadow-md" />
 
                   <p className="text-sm font-medium text-muted-foreground">Welcome to</p>
 
-                  <h2 className="mt-1 text-3xl font-semibold tracking-tight">smPosting</h2>
+                  <h2 className="mt-1 text-3xl font-semibold tracking-tight">postUploaders</h2>
 
                   <p className="mt-3 text-sm leading-6 text-muted-foreground">
                     Sign in to access your social publishing workspace.

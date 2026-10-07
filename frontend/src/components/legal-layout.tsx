@@ -1,6 +1,6 @@
-import { Send } from "lucide-react";
 import { type ReactNode, useEffect } from "react";
 import { Link } from "react-router";
+import logo from "@/assets/postuploaders-c-badge-1024.png";
 import { LEGAL_UPDATED } from "@/lib/legal";
 
 const LEGAL_LINKS = [
@@ -12,7 +12,7 @@ const LEGAL_LINKS = [
 // Public pages (no login) that the Meta and Google app reviews link to.
 export function LegalLayout({ title, children }: { title: string; children: ReactNode }) {
   useEffect(() => {
-    document.title = `${title} · smPosting`;
+    document.title = `${title} · postUploaders`;
   }, [title]);
 
   return (
@@ -20,10 +20,8 @@ export function LegalLayout({ title, children }: { title: string; children: Reac
       <header className="border-b bg-background">
         <div className="mx-auto flex max-w-3xl items-center justify-between px-5 py-4">
           <Link to="/" className="flex items-center gap-2.5">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <Send className="size-4" aria-hidden="true" />
-            </span>
-            <span className="font-semibold tracking-tight">smPosting</span>
+            <img src={logo} alt="" className="size-8 rounded-lg" />
+            <span className="font-semibold tracking-tight">postUploaders</span>
           </Link>
           <Link to="/login" className="text-sm text-muted-foreground hover:text-foreground">
             Sign in

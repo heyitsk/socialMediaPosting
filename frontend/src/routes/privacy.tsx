@@ -6,10 +6,10 @@ export function PrivacyPage() {
     <LegalLayout title="Privacy Policy">
       <LegalSection title="Who we are">
         <p>
-          smPosting ("we", "us") is a social publishing tool at app.postuploaders.com. You connect
-          your own social media accounts, write a post once, and we publish or schedule it to the
-          accounts you choose. This policy explains what data we handle to do that, and what we do
-          not do with it.
+          postUploaders ("we", "us") is a social publishing tool at app.postuploaders.com. You
+          connect your own social media accounts, write a post once, and we publish or schedule it
+          to the accounts you choose. This policy explains what data we handle to do that, and what
+          we do not do with it.
         </p>
         <p>
           Questions about this policy: <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>.
@@ -29,7 +29,7 @@ export function PrivacyPage() {
           rest and are only decrypted at the moment a post is sent.
         </p>
         <p>
-          <strong>What you create in smPosting:</strong> captions, titles, images and videos you
+          <strong>What you create in postUploaders:</strong> captions, titles, images and videos you
           upload, the accounts and times you pick, and a log of each post's result (published,
           failed, and the reason).
         </p>
@@ -64,7 +64,7 @@ export function PrivacyPage() {
 
       <LegalSection id="google" title="Google user data">
         <p>
-          smPosting's use and transfer to any other app of information received from Google APIs
+          postUploaders's use and transfer to any other app of information received from Google APIs
           will adhere to the{" "}
           <a
             href="https://developers.google.com/terms/api-services-user-data-policy"
@@ -86,7 +86,7 @@ export function PrivacyPage() {
           </a>
           . We use the YouTube permissions only to upload the videos you choose and to read your
           channel's name and ID and the processing status of videos we uploaded. You can revoke
-          smPosting's access to your Google account at any time in your{" "}
+          postUploaders's access to your Google account at any time in your{" "}
           <a
             href="https://security.google.com/settings/security/permissions"
             target="_blank"
@@ -99,7 +99,7 @@ export function PrivacyPage() {
       </LegalSection>
 
       <LegalSection title="Who we share it with">
-        <p>We share data only with the services needed to run smPosting:</p>
+        <p>We share data only with the services needed to run postUploaders:</p>
         <ul>
           <li>
             <strong>The platforms you publish to</strong> (Meta for Facebook, Instagram and Threads;
@@ -110,8 +110,8 @@ export function PrivacyPage() {
             <strong>Google</strong>, for sign-in.
           </li>
           <li>
-            <strong>Amazon Web Services</strong>, where smPosting's servers, database and uploaded
-            media are hosted.
+            <strong>Amazon Web Services</strong>, where postUploaders's servers, database and
+            uploaded media are hosted.
           </li>
           <li>
             <strong>Grafana Labs</strong>, which receives the error and performance telemetry
@@ -132,8 +132,8 @@ export function PrivacyPage() {
           </li>
           <li>
             <strong>Connected account tokens:</strong> kept while the account is connected, so
-            scheduled posts can go out. Disconnecting an account, or removing smPosting in Facebook,
-            Instagram or Threads settings, deletes its tokens straight away.
+            scheduled posts can go out. Disconnecting an account, or removing postUploaders in
+            Facebook, Instagram or Threads settings, deletes its tokens straight away.
           </li>
           <li>
             <strong>Post text, history and logs, and your profile:</strong> kept until you ask us to
@@ -169,8 +169,8 @@ export function PrivacyPage() {
             are deleted straight away.
           </li>
           <li>
-            Revoke smPosting's access directly in Google, Facebook, Instagram, Threads or LinkedIn
-            settings.
+            Revoke postUploaders's access directly in Google, Facebook, Instagram, Threads or
+            LinkedIn settings.
           </li>
           <li>
             Ask us for a copy of the data we hold about you, to correct it, or to delete it, by
@@ -181,7 +181,7 @@ export function PrivacyPage() {
 
       <LegalSection title="Children">
         <p>
-          smPosting is for people aged 18 and over. We do not knowingly collect data from anyone
+          postUploaders is for people aged 18 and over. We do not knowingly collect data from anyone
           younger. If you believe we have, contact us and we will delete it.
         </p>
       </LegalSection>
