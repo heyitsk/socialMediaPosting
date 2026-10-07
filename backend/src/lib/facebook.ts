@@ -6,13 +6,16 @@ const REDIRECT_URI = `${env.PUBLIC_BACKEND_URL}/api/auth/facebook/callback`;
 
 // Scopes cover both Facebook Page posting and Instagram business posting —
 // Instagram rides on this same dialog, no separate consent screen
-// (websitePlan.md §2.1/§2.2).
+// (websitePlan.md §2.1/§2.2). business_management is what makes /me/accounts
+// list Pages that live in a Meta Business portfolio instead of carrying a
+// direct role on the person — without it the call comes back empty for them.
 const SCOPES = [
   "pages_show_list",
   "pages_read_engagement",
   "pages_manage_posts",
   "instagram_basic",
   "instagram_content_publish",
+  "business_management",
 ].join(",");
 
 export function buildAuthUrl(state: string): string {
@@ -56,6 +59,23 @@ export async function exchangeForLongLivedToken(shortLivedToken: string): Promis
     fb_exchange_token: shortLivedToken,
   });
   return data.access_token;
+}
+
+// The app-scoped id of the person connecting — what Meta's deauthorize and
+// data-deletion callbacks name them by (routes/meta-callbacks.ts).
+export async function fetchUserId(userToken: string): Promise<string> {
+  const data = await graphGet<{ id: string }>("/me", { fields: "id", access_token: userToken });
+  return data.id;
+}
+
+// Which permissions the person actually granted, and which they declined —
+// for diagnosing a connect that came back with no Pages.
+export async function fetchPermissions(userToken: string): Promise<Record<string, string>> {
+  const data = await graphGet<{ data: { permission: string; status: string }[] }>(
+    "/me/permissions",
+    { access_token: userToken },
+  );
+  return Object.fromEntries(data.data.map((p) => [p.permission, p.status]));
 }
 
 export interface FacebookPage {

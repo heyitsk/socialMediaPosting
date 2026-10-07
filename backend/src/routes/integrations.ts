@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { prisma } from "../db/client";
 import { reconnectReason } from "../lib/capabilities";
 import { requireRole, type WorkspaceEnv } from "../middleware/auth";
+import { disconnectedAccountData } from "../service/connected-accounts";
 import { workspaceParamsSchema } from "./workspace-params";
 
 const connectedAccountSchema = z
@@ -85,11 +86,11 @@ export const integrationsRoute = new OpenAPIHono<WorkspaceEnv>()
     const { id } = c.req.valid("param");
 
     // Soft-delete: posts.connected_account_id is RESTRICT, so a hard delete
-    // fails once the account has post history. Reconnecting via OAuth
-    // upserts the same row and clears disconnectedAt.
+    // fails once the account has post history. The tokens are wiped though.
+    // Reconnecting via OAuth upserts the same row and clears disconnectedAt.
     const result = await prisma.connectedAccount.updateMany({
       where: { id, workspaceId: c.var.workspaceId, disconnectedAt: null },
-      data: { disconnectedAt: new Date() },
+      data: disconnectedAccountData(),
     });
 
     if (result.count === 0) {

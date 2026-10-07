@@ -52,10 +52,10 @@ The first deploy is for a small group of remote, non-technical testers who use t
 
 All three platforms reject apps that don't have these. None exist yet. The landing page is already on `main`, but there are no privacy, terms or data-deletion pages.
 
-- [ ] **Privacy policy** page (`/privacy`): what data you store (OAuth tokens encrypted at rest, media in S3 deleted 15 days after posting, Google login email), why, how long, and how to delete it. For the YouTube audit it **must** link the [Google Privacy Policy](https://policies.google.com/privacy) and explain how to revoke access through [Google security settings](https://security.google.com/settings/security/permissions) *(verify the current YouTube API Services policy wording)*.
-- [ ] **Terms of service** page (`/terms`). For YouTube it must say that users agree to the [YouTube Terms of Service](https://www.youtube.com/t/terms).
-- [ ] **Data deletion** page (`/data-deletion`): instructions, plus a way to request deletion.
-- [ ] **Meta callback endpoints** (backend, public, verify Meta's `signed_request` HMAC with the app secret):
+- [x] **Privacy policy** page (`/privacy`): what data you store (OAuth tokens encrypted at rest, media in S3 deleted 15 days after posting, Google login email), why, how long, and how to delete it. For the YouTube audit it **must** link the [Google Privacy Policy](https://policies.google.com/privacy) and explain how to revoke access through [Google security settings](https://security.google.com/settings/security/permissions) *(verify the current YouTube API Services policy wording)*.
+- [x] **Terms of service** page (`/terms`). For YouTube it must say that users agree to the [YouTube Terms of Service](https://www.youtube.com/t/terms).
+- [x] **Data deletion** page (`/data-deletion`): instructions, plus a way to request deletion.
+- [x] **Meta callback endpoints** (built Oct 6, `backend/src/routes/meta-callbacks.ts`; set the dashboard fields to `https://app.postuploaders.com/api/webhooks/meta/{deauthorize,delete}?product=facebook|instagram|threads`; verified with the HMAC and each product's own app secret):
   - Facebook Login: *Data Deletion Request callback*. It returns `{ url, confirmation_code }`.
   - Instagram (Instagram Login product): *Deauthorize callback* + *Data deletion request URL*.
   - Threads: *Uninstall callback* + *Delete callback*.
@@ -135,7 +135,7 @@ The scopes below are the ones the code requests today.
 
 | Product | Scopes (from code) | File |
 |---|---|---|
-| Facebook Login for Business | `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `instagram_basic`, `instagram_content_publish` | `backend/src/lib/facebook.ts` |
+| Facebook Login for Business | `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`, `instagram_basic`, `instagram_content_publish`, `business_management` | `backend/src/lib/facebook.ts` |
 | Instagram API with Instagram Login | `instagram_business_basic`, `instagram_business_content_publish` | `backend/src/lib/instagram.ts` |
 | Threads API | `threads_basic`, `threads_content_publish` | `backend/src/lib/threads.ts` |
 

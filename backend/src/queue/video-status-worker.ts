@@ -96,6 +96,17 @@ export async function pollVideoStatus(job: Job<VideoStatusJobData>): Promise<voi
     where: { id: postId },
     include: { connectedAccount: true },
   });
+  // Disconnecting wipes the tokens (service/connected-accounts.ts), so there's
+  // nothing to poll with — and no point retrying.
+  if (post.connectedAccount.disconnectedAt) {
+    await markTargetFailed(
+      postId,
+      platform,
+      `The account was disconnected before ${label} finished processing the video — it may still be live there`,
+      { platformPostId },
+    );
+    return;
+  }
   let result: VideoCheckResult;
   try {
     result = await check(post.connectedAccount, mediaId);

@@ -8,6 +8,8 @@ import {
   exchangeForLongLivedToken,
   fetchInstagramBusinessAccount,
   fetchPages,
+  fetchPermissions,
+  fetchUserId,
 } from "../../lib/facebook";
 import { logger } from "../../lib/logger";
 
@@ -28,6 +30,20 @@ facebookAuthRoute.get("/callback", async (c) => {
     const shortLivedToken = await exchangeCodeForToken(ctx.code);
     const longLivedToken = await exchangeForLongLivedToken(shortLivedToken);
     const pages = await fetchPages(longLivedToken);
+    const metaUserId = await fetchUserId(longLivedToken);
+    logger.info(
+      { platform: "facebook", pages: pages.length, metaUserId },
+      "OAuth callback fetched pages",
+    );
+
+    // No Pages came back: none ticked in Facebook's dialog, none the person
+    // can manage, or ones /me/accounts won't list. Saying "connected" here
+    // would leave an empty dashboard and no clue why.
+    if (pages.length === 0) {
+      const permissions = await fetchPermissions(longLivedToken).catch(() => null);
+      logger.warn({ platform: "facebook", metaUserId, permissions }, "Facebook granted no Pages");
+      return c.redirect(connectRedirect("error=facebook_connect_no_pages", ctx.workspaceId));
+    }
 
     for (const page of pages) {
       const encryptedPageToken = encrypt(page.access_token, 1);
@@ -47,6 +63,7 @@ facebookAuthRoute.get("/callback", async (c) => {
           keyVersion: 1,
           lastRefreshedAt: new Date(),
           disconnectedAt: null,
+          metaUserId,
         },
         create: {
           workspaceId: ctx.workspaceId,
@@ -57,6 +74,7 @@ facebookAuthRoute.get("/callback", async (c) => {
           keyVersion: 1,
           refreshStrategy: "NONE",
           lastRefreshedAt: new Date(),
+          metaUserId,
         },
       });
 
@@ -77,6 +95,7 @@ facebookAuthRoute.get("/callback", async (c) => {
             keyVersion: 1,
             lastRefreshedAt: new Date(),
             disconnectedAt: null,
+            metaUserId,
           },
           create: {
             workspaceId: ctx.workspaceId,
@@ -88,6 +107,7 @@ facebookAuthRoute.get("/callback", async (c) => {
             keyVersion: 1,
             refreshStrategy: "NONE",
             lastRefreshedAt: new Date(),
+            metaUserId,
           },
         });
       }

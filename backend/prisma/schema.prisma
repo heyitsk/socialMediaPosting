@@ -218,8 +218,16 @@ model ConnectedAccount {
   // Soft-delete marker. "Disconnect" sets this instead of deleting the row —
   // posts.connected_account_id is RESTRICT, so a hard delete fails once the
   // account has post history. Reconnecting via OAuth upserts on the same
-  // composite key and clears this field.
+  // composite key and clears this field. Disconnecting also blanks the token
+  // columns (service/connected-accounts.ts): encryptedAccessToken is NOT NULL,
+  // so "no token" is the empty string.
   disconnectedAt DateTime? @map("disconnected_at")
+
+  // The Facebook user who connected this Page (and its Instagram account) —
+  // the app-scoped id Meta's deauthorize/data-deletion callbacks identify
+  // people by, which is not the Page id stored above. Only set on
+  // FACEBOOK_PAGE rows, and only for connections made after it was added.
+  metaUserId String? @map("meta_user_id")
 
   posts Post[]
 
@@ -229,6 +237,7 @@ model ConnectedAccount {
   // — connectionMethod must be part of the key or one flow's upsert clobbers
   // the other's token.
   @@unique([workspaceId, platform, platformAccountId, connectionMethod])
+  @@index([metaUserId])
   @@map("connected_accounts")
 }
 

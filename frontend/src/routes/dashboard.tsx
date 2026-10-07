@@ -27,6 +27,8 @@ const CONNECT_ERROR_MESSAGES: Record<string, string> = {
   facebook_connect_invalid_state: "Facebook connection expired — please try again.",
   facebook_connect_failed: "Failed to connect Facebook account.",
   facebook_connect_forbidden: FORBIDDEN_MESSAGE,
+  facebook_connect_no_pages:
+    "Facebook didn't share any Pages. Connect again and tick the Page (and its Instagram account) you want to post to.",
   instagram_connect_denied: "Instagram connection was cancelled.",
   instagram_connect_invalid_state: "Instagram connection expired — please try again.",
   instagram_connect_failed: "Failed to connect Instagram account.",
