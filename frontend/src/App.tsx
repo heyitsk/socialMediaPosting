@@ -4,11 +4,14 @@ import { rememberWorkspace, useMe, useWorkspaceId } from "@/lib/session";
 import { setTelemetryUser, trackView } from "@/lib/telemetry";
 import { ComposerPage } from "@/routes/composer";
 import { DashboardPage } from "@/routes/dashboard";
+import { DataDeletionPage } from "@/routes/data-deletion";
 import { HistoryPage } from "@/routes/history";
 import { AppLayout } from "@/routes/layout";
 import { LoginPage } from "@/routes/login";
 import { NewWorkspacePage } from "@/routes/new-workspace";
+import { PrivacyPage } from "@/routes/privacy";
 import { ProfilePage } from "@/routes/profile";
+import { TermsPage } from "@/routes/terms";
 import { WorkspaceSettingsPage } from "@/routes/workspace-settings";
 
 function RequireAuth() {
@@ -64,6 +67,10 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Public: the Meta and Google app reviews load these without signing in. */}
+      <Route path="/privacy" element={<PrivacyPage />} />
+      <Route path="/terms" element={<TermsPage />} />
+      <Route path="/data-deletion" element={<DataDeletionPage />} />
       <Route element={<RequireAuth />}>
         <Route index element={<WorkspaceRedirect />} />
         <Route element={<AppLayout />}>
