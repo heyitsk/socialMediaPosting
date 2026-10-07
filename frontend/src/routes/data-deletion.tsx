@@ -19,13 +19,13 @@ export function DataDeletionPage() {
           We received your deletion request from Meta and deleted the access tokens we held for your
           Facebook, Instagram or Threads connection. Your confirmation code is{" "}
           <code className="rounded bg-background px-1.5 py-0.5 font-mono">{code}</code>. To also
-          delete your smPosting profile, posts and history, email us and quote this code.
+          delete your postUploaders profile, posts and history, email us and quote this code.
         </div>
       )}
 
       <LegalSection title="Delete your data">
         <p>
-          You can ask us to delete everything smPosting holds about you. Email{" "}
+          You can ask us to delete everything postUploaders holds about you. Email{" "}
           <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a> from the Google account you sign
           in with, or use the button below.
         </p>
@@ -62,10 +62,10 @@ export function DataDeletionPage() {
 
       <LegalSection title="Disconnect without deleting your account">
         <p>
-          To stop smPosting publishing to a single account, sign in, open the Dashboard and click
-          Disconnect next to it under Connected accounts. We delete that account's access tokens
-          straight away. To cut off smPosting's access at the source, also remove it in the
-          platform's own settings, without signing in to smPosting:
+          To stop postUploaders publishing to a single account, sign in, open the Dashboard and
+          click Disconnect next to it under Connected accounts. We delete that account's access
+          tokens straight away. To cut off postUploaders's access at the source, also remove it in
+          the platform's own settings, without signing in to postUploaders:
         </p>
         <ul>
           <li>
@@ -87,7 +87,7 @@ export function DataDeletionPage() {
             >
               Business integrations
             </a>{" "}
-            (removing smPosting here also revokes its Instagram access if you connected through
+            (removing postUploaders here also revokes its Instagram access if you connected through
             Facebook)
           </li>
           <li>
