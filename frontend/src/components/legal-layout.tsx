@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import logo from "@/assets/postuploaders-c-badge-1024.png";
 import { LEGAL_UPDATED } from "@/lib/legal";
 
-const LEGAL_LINKS = [
+export const LEGAL_LINKS = [
   { to: "/privacy", label: "Privacy Policy" },
   { to: "/terms", label: "Terms of Service" },
   { to: "/data-deletion", label: "Data deletion" },

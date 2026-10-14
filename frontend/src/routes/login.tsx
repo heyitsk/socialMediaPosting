@@ -1,9 +1,7 @@
-import { ArrowUpRight } from "lucide-react";
 import { Link, useSearchParams } from "react-router";
 import logo from "@/assets/postuploaders-c-badge-1024.png";
-import { Button } from "@/components/ui/button";
+import { GoogleSignInButton } from "@/components/google-sign-in-button";
 import { CardContent } from "@/components/ui/card";
-import { API_URL } from "@/lib/api";
 
 const ERROR_MESSAGES: Record<string, string> = {
   login_denied: "Sign-in was cancelled.",
@@ -84,21 +82,7 @@ export function LoginPage() {
                   </div>
                 )}
 
-                <Button
-                  size="lg"
-                  className="h-12 w-full rounded-xl text-sm font-medium shadow-sm"
-                  onClick={() => {
-                    // Full-page navigation, not fetch/popup — the backend redirects to
-                    // Google and back, and no token ever reaches this page's JS.
-                    window.location.href = `${API_URL}/api/login/google?next=${encodeURIComponent(next)}`;
-                  }}
-                >
-                  <span className="flex size-6 items-center justify-center rounded-md bg-background text-sm font-semibold text-foreground">
-                    G
-                  </span>
-                  Continue with Google
-                  <ArrowUpRight className="ml-auto size-4" aria-hidden="true" />
-                </Button>
+                <GoogleSignInButton next={next} />
 
                 <p className="mt-5 text-center text-xs leading-5 text-muted-foreground">
                   By continuing you agree to our{" "}
