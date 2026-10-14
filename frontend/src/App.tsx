@@ -6,6 +6,7 @@ import { ComposerPage } from "@/routes/composer";
 import { DashboardPage } from "@/routes/dashboard";
 import { DataDeletionPage } from "@/routes/data-deletion";
 import { HistoryPage } from "@/routes/history";
+import { LandingPage } from "@/routes/landing";
 import { AppLayout } from "@/routes/layout";
 import { LoginPage } from "@/routes/login";
 import { NewWorkspacePage } from "@/routes/new-workspace";
@@ -36,6 +37,14 @@ function WorkspaceRedirect() {
   const workspaceId = useWorkspaceId();
   if (!workspaceId) return null;
   return <Navigate to={`/w/${workspaceId}${location.search}`} replace />;
+}
+
+// "/" is the public landing page for visitors and the workspace for signed-in
+// users. It sits outside RequireAuth so Google and Meta reviewers can load it.
+function Home() {
+  const { data: me, isPending } = useMe();
+  if (isPending) return null;
+  return me ? <WorkspaceRedirect /> : <LandingPage />;
 }
 
 // A workspace id in the URL that isn't one of yours (stale bookmark, removed
@@ -71,8 +80,8 @@ export function App() {
       <Route path="/privacy" element={<PrivacyPage />} />
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/data-deletion" element={<DataDeletionPage />} />
+      <Route index element={<Home />} />
       <Route element={<RequireAuth />}>
-        <Route index element={<WorkspaceRedirect />} />
         <Route element={<AppLayout />}>
           <Route path="w/:workspaceId" element={<RequireWorkspace />}>
             <Route index element={<DashboardPage />} />
