@@ -143,7 +143,9 @@ Pilot with 3-5 real businesses before onboarding more (blueprint rule, and I agr
 6. **Cost:** per-location AI and image generation, and rank-grid queries scale with usage, so caps and a usage ledger from day one.
 7. **Single EC2 box** (current production) running more workers. Fine for the pilot; revisit with the K8s direction in `websitePlan.md` later.
 
-## 7. Open questions for Kushagra
+## 7. Decisions and open questions
+
+Decided Oct 15: see `v2Implementation.md` §1 (managed service first, OAuth per owner, no video, human approval by default, staff login by Google sign-in + allowlist, **geotag rewrite and website alt text are in**, overriding the recommendation in §2). Still open: website platforms, post languages, price target, staff emails. Original questions below for reference.
 
 1. Do you have (or can a pilot client provide) a **verified GBP, 60+ days old, with a website**? The API access request needs one. Is it OK to file the request from your account/company?
 2. Who runs keyword research: "a client of our own company" — an in-house team member, or an outside client? Either way it's a manual entry screen, but it decides whether the admin screen is internal-only or needs its own login role.
