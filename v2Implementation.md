@@ -14,6 +14,8 @@ Convention: feature branches off `v2`, merged back into `v2`, then `v2` → `mai
 | 5 | **Video skipped** for V2. |
 | 6 | Human approval before posting by default; auto-publish is opt-in later. |
 | 7 | Keyword research done by **staff** (a member of our company), entered through a staff dashboard reached by **Google sign-in + email allowlist**, not a seeded password login (§3). |
+| 8 | **Exact business coordinates on every image** confirmed (no "near" threshold); **alt text default is the keyword-led sentence**. |
+| 9 | **Languages: Hindi and English**, set per location (§4.2). |
 
 Note for the record: the client's `V2 Blueprint.docx` lists falsifying EXIF GPS as something not to build, and independent tests found no ranking effect from geotags. Reports also say Google strips image metadata on upload, and the GBP API has no alt-text field, so embedded alt text and GPS may never be seen by Google. Decision 4 overrides that on Kushagra's call. We do not promise ranking gains from either in customer-facing copy, and both ship behind per-workspace switches (§5).
 
@@ -42,6 +44,8 @@ How V1 login works today: `routes/login.ts` runs Google OIDC, `verifyIdToken` al
 **Decision: start with A (most feasible), move to B when staff list changes more often than deploys.** Both use the same Google sign-in, so the switch is invisible to staff.
 
 Cost of checking on every request: negligible. V1 sessions are opaque tokens with the record in Redis (`lib/session.ts`), not JWTs, so there is no token refresh; each request already reads the session once. The allowlist is parsed into an in-memory `Set` at process start, and the check is only `Set.has(email)`. It runs only on `/api/staff/*` and `GET /api/session` (to tell the frontend whether to show the staff menu), not on every API route, and needs one primary-key lookup of the user's email. Checking per request, not once at login, is deliberate: removing someone from the list takes effect on their very next request instead of lingering for the 7-day session.
+
+Initial list (sample for now, more added later, comma-separated): `STAFF_EMAILS=click72crm@gmail.com`. Compared case-insensitively against Google's verified email.
 
 Rules, either way:
 - Check the **verified email from Google's id token** against the list, on the **backend**, per request. The frontend only hides or shows the menu.
@@ -93,6 +97,8 @@ Rotation of the 5 keywords × services × angles (tip, FAQ, offer, seasonal, eve
 - Fact-check pass rejects invented prices, services, credentials, offers and keyword stuffing. Business name never gets keywords.
 - Store prompt version, facts used, model, draft, human edits and final copy.
 - Cost cap per workspace per month and a `UsageLedger` row for each generation.
+- **Language:** each location has a post language (`en` or `hi`; mixed Hinglish allowed if staff ask). Drafts are written directly in that language, not translated afterwards, and sent to GBP with the matching `languageCode`. The fact-check pass runs on the output language. Keywords are never translated.
+- **Hindi text in poster images:** image generators often garble Devanagari, so posters with text are **rendered from templates with a real Devanagari font** (sharp/SVG), with the AI producing at most the background or illustration. This is a rendering choice to confirm in the first pilot.
 
 ### 4.3 Photo pipeline
 Reuse V1: `MediaAsset`, presigned S3 upload, `media-probe.ts`, `render.ts`.
@@ -108,7 +114,12 @@ Reuse V1: `MediaAsset`, presigned S3 upload, `media-probe.ts`, `render.ts`.
 Scope change (Oct 15): alt text is for **the image we generate or the owner uploads**, driven by the keyword(s) staff assigned, not a website deliverable.
 
 - **Which keyword:** each image belongs to a content plan item, which already carries one of the 5 keywords (`keywordId`). Staff can override per image.
-- **What text:** `altText` = the keyword plus a short truthful description and the business area, e.g. "Teeth whitening in Salt Lake City at Sharma Dental Clinic". `altKeywords` = the exact assigned keyword(s). A pure keyword list as alt text is easy to enable (`altTextMode: KEYWORD_ONLY | KEYWORD_SENTENCE`, default sentence), but it is the "keyword stuffing" form that Google's alt-text guidance discourages and is useless to screen-reader users. Kushagra's wording ("alt text would be the keywords") supports the keyword-only mode, so confirm which default he wants.
+- **What text:** `altText` = the keyword plus a short truthful description and the business area, e.g. "Teeth whitening in Salt Lake City at Sharma Dental Clinic". `altKeywords` = the exact assigned keyword(s). A pure keyword list as alt text is easy to enable (`altTextMode: KEYWORD_ONLY | KEYWORD_SENTENCE`, default sentence), but it is the "keyword stuffing" form that Google's alt-text guidance discourages and is useless to screen-reader users. Kushagra chose the keyword-led sentence as the default (Oct 15); keyword-only stays available as a setting.
+- **How the sentence is built:** two levels, both deterministic about the keyword.
+  1. **Template (V2.1 default, free, no hallucination):** fill `{keyword} at {business name}, {area}` from the approved keyword, the location's name, and its city/area, e.g. "Teeth whitening in Salt Lake City at Sharma Dental Clinic". Optionally add a fixed per-photo-category suffix taken from the GBP media category the image is filed under (exterior, interior, team at work, product), e.g. "... clinic exterior". Max about 125 characters; the keyword appears exactly once and is never altered.
+  2. **Vision-assisted (later, optional):** a vision model describes what is actually in the image ("dentist whitening a patient's teeth"), and an LLM writes the sentence around the keyword **only if the image matches the keyword**; otherwise it falls back to the template and flags the image for staff, so a keyword is never attached to an image that doesn't show it. Costs one vision call per image, so it's gated by the usage cap.
+  Staff can edit any generated alt text per image.
+- **Hindi and English:** the keyword is used verbatim in whatever script staff entered it (Devanagari, Latin or Hinglish); the sentence follows the post's language. EXIF `ImageDescription` is ASCII-only by spec, so Hindi text is written to **XMP and IPTC (UTF-8)** only, and EXIF carries just the English or transliterated form.
 - **Where it goes (GBP has no alt-text field):** written into the publish JPEG's metadata with exiftool, in the places image tools actually read: XMP `dc:description` and `dc:subject` (keywords), IPTC `AltTextAccessibility`, `ExtDescrAccessibility` and `Keywords`, and EXIF `ImageDescription` (also a candidate for `XPKeywords`). Same file also gets a descriptive filename.
 - **Spike (needs the approved API):** (a) does `MediaItem.description` accept text for location photos and show anywhere? If yes, put the alt text there too; (b) upload a test image with all of the above and inspect the copy Google serves. If Google strips it, the metadata is harmless but invisible there; it still helps wherever the owner reuses the file (their website, other platforms).
 - The alt text is also shown in the app with a copy button. That costs nothing and lets owners reuse it on their website if they want. No website integration is planned.
@@ -189,8 +200,6 @@ The client does this on their Business Profile: open the profile, open the setti
 Record the OAuth demo video for `business.manage` verification later (same shape as the YouTube one), and add a Business Profile section to the privacy policy before submitting for verification.
 
 ## 9. Open items
-- Alt text default: keyword-led sentence (recommended) or keyword-only?
-- Geotag: confirm "exact business coordinates on every image" (no near-threshold).
-- Language(s) of posts (English only, or Hindi/regional).
-- Price target per location (sets the AI cost cap).
-- Staff emails to put on the allowlist.
+- Price target per location (what you plan to charge per location per month; sets the AI, image and rank-scan caps). Caps ship as config, so this can be decided after the pilot starts.
+- Real staff emails to replace the sample on the allowlist.
+- Whether vision-assisted alt text (§4.4 level 2) is wanted after the pilot.
