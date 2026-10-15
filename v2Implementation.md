@@ -10,12 +10,12 @@ Convention: feature branches off `v2`, merged back into `v2`, then `v2` → `mai
 | 1 | Pilot client has a verified GBP, 60+ days, with a website; it is the profile used for the API access application. |
 | 2 | Customers connect through **OAuth themselves**. The Manager invite is only needed so our Google login can file the access request. |
 | 3 | **Managed service first**, built as one workspace per business so self-serve can follow. |
-| 4 | **Geotag: rewrite, not just flag.** GPS near the business: keep. GPS far from the business: overwrite with the business's coordinates. GPS absent: add the business's coordinates. **Alt text: generate for the owner's website.** See §5 for the safeguards this plan adds. |
+| 4 | **Geotag every image we publish**, real photos and AI-generated posters alike, with the **exact latitude and longitude of the business** (original GPS is recorded, then replaced). **Alt text is for the image itself**, not the owner's website: built from the keyword(s) staff assigned and embedded in the image file (§4.4). See §5 for the safeguards this plan adds. |
 | 5 | **Video skipped** for V2. |
 | 6 | Human approval before posting by default; auto-publish is opt-in later. |
 | 7 | Keyword research done by **staff** (a member of our company), entered through a staff dashboard reached by **Google sign-in + email allowlist**, not a seeded password login (§3). |
 
-Note for the record: the client's `V2 Blueprint.docx` lists falsifying EXIF GPS as something not to build, and independent tests found no ranking effect from geotags. Decision 4 overrides that on Kushagra's call. We do not promise ranking gains from it in any customer-facing copy, and it ships behind a per-workspace switch (§5).
+Note for the record: the client's `V2 Blueprint.docx` lists falsifying EXIF GPS as something not to build, and independent tests found no ranking effect from geotags. Reports also say Google strips image metadata on upload, and the GBP API has no alt-text field, so embedded alt text and GPS may never be seen by Google. Decision 4 overrides that on Kushagra's call. We do not promise ranking gains from either in customer-facing copy, and both ship behind per-workspace switches (§5).
 
 ## 2. Phase 0 — Google side (no code, start immediately)
 
@@ -41,6 +41,8 @@ How V1 login works today: `routes/login.ts` runs Google OIDC, `verifyIdToken` al
 
 **Decision: start with A (most feasible), move to B when staff list changes more often than deploys.** Both use the same Google sign-in, so the switch is invisible to staff.
 
+Cost of checking on every request: negligible. V1 sessions are opaque tokens with the record in Redis (`lib/session.ts`), not JWTs, so there is no token refresh; each request already reads the session once. The allowlist is parsed into an in-memory `Set` at process start, and the check is only `Set.has(email)`. It runs only on `/api/staff/*` and `GET /api/session` (to tell the frontend whether to show the staff menu), not on every API route, and needs one primary-key lookup of the user's email. Checking per request, not once at login, is deliberate: removing someone from the list takes effect on their very next request instead of lingering for the 7-day session.
+
 Rules, either way:
 - Check the **verified email from Google's id token** against the list, on the **backend**, per request. The frontend only hides or shows the menu.
 - One allowlisted email per person, not one shared Gmail: a shared account has no accountability, and with Google-only login its security is just that Google account's. Require 2-Step Verification on every staff Google account (ideally a Workspace-managed domain).
@@ -56,7 +58,9 @@ Rules, either way:
 - `BusinessFact`: gbpLocationId, field, value, source (`API_IMPORT` | `OWNER` | `STAFF`), approvedBy, approvedAt, expiresAt.
 - `KeywordPlan` (versioned) and `Keyword` (5 per plan): phrase, intent, mapped service, language, enteredByStaffId, source/date, lastUsedAt.
 - `AuditEvent`: actor (user or staff), action, object, before and after, timestamp, correlationId.
-- `MediaAsset` additions: `label`, `exifSummary` (json), `geotagAction` (`KEPT`/`REWRITTEN`/`ADDED`/`NONE`), `originalGps`, `licenceNote`.
+- `MediaAsset` additions: `label`, `exifSummary` (json), `originalGps` (what the upload had, if anything), `geotagLat`/`geotagLng` (what we wrote), `altText`, `altKeywords`, `keywordId` (which of the 5 keywords this image serves), `licenceNote`.
+- `GbpLocation` also stores the business's exact `latitude`/`longitude` (§5).
+- Workspace settings: `geotagEnabled` and `embedAltTextEnabled` (both default on).
 - Written as hand-written SQL migrations (`migrate diff` + `migrate deploy`).
 
 ### 3.3 Backend
@@ -94,15 +98,20 @@ Rotation of the 5 keywords × services × angles (tip, FAQ, offer, seasonal, eve
 Reuse V1: `MediaAsset`, presigned S3 upload, `media-probe.ts`, `render.ts`.
 1. Validate MIME and magic bytes, size, dimensions.
 2. Store the **original untouched** (EXIF intact) in private S3.
-3. Read EXIF GPS from the original, compute distance to the location's coordinates, decide the geotag action (§5).
-4. Make the publish copy (`render.ts` uses sharp, which drops EXIF), then write the final GPS on the publish copy as the **last** step.
+3. Read EXIF GPS from the original and record it in `originalGps` (diagnostics only).
+4. Make the publish copy as **JPEG** (`render.ts` uses sharp, which drops EXIF; JPEG is the format where EXIF GPS and IPTC/XMP are reliable, PNG is not).
 5. Descriptive filename and label from the keyword and service.
-6. Publish to GBP through `media.create` with a presigned `sourceUrl`.
+6. As the **last** step, write the business's exact GPS and the alt text/keyword metadata onto the publish copy (§4.4, §5). This applies to uploaded photos and AI-generated posters alike.
+7. Publish to GBP through `media.create` with a presigned `sourceUrl`.
 
-### 4.4 Alt text for the owner's website
-- Vision model writes one concise, accurate description per image; the keyword is used only where it truly describes the image.
-- Delivered in the app (copy button, plus a CSV/zip of image + alt text per month). Direct website integration (e.g. WordPress REST media `alt_text`) is a later option. **Open question: which website platforms do the pilot owners use?**
-- Clearly labelled "for your website", never as a GBP field.
+### 4.4 Alt text on the image itself
+Scope change (Oct 15): alt text is for **the image we generate or the owner uploads**, driven by the keyword(s) staff assigned, not a website deliverable.
+
+- **Which keyword:** each image belongs to a content plan item, which already carries one of the 5 keywords (`keywordId`). Staff can override per image.
+- **What text:** `altText` = the keyword plus a short truthful description and the business area, e.g. "Teeth whitening in Salt Lake City at Sharma Dental Clinic". `altKeywords` = the exact assigned keyword(s). A pure keyword list as alt text is easy to enable (`altTextMode: KEYWORD_ONLY | KEYWORD_SENTENCE`, default sentence), but it is the "keyword stuffing" form that Google's alt-text guidance discourages and is useless to screen-reader users. Kushagra's wording ("alt text would be the keywords") supports the keyword-only mode, so confirm which default he wants.
+- **Where it goes (GBP has no alt-text field):** written into the publish JPEG's metadata with exiftool, in the places image tools actually read: XMP `dc:description` and `dc:subject` (keywords), IPTC `AltTextAccessibility`, `ExtDescrAccessibility` and `Keywords`, and EXIF `ImageDescription` (also a candidate for `XPKeywords`). Same file also gets a descriptive filename.
+- **Spike (needs the approved API):** (a) does `MediaItem.description` accept text for location photos and show anywhere? If yes, put the alt text there too; (b) upload a test image with all of the above and inspect the copy Google serves. If Google strips it, the metadata is harmless but invisible there; it still helps wherever the owner reuses the file (their website, other platforms).
+- The alt text is also shown in the app with a copy button. That costs nothing and lets owners reuse it on their website if they want. No website integration is planned.
 
 ### 4.5 Publishing
 - `google-business-poster.json` n8n workflow and `buildGoogleBusinessPayload` in `service/n8n.ts`; post types STANDARD, EVENT, OFFER; CTA types BOOK, ORDER, SHOP, LEARN_MORE, SIGN_UP, CALL.
@@ -116,19 +125,20 @@ Pilot publishes a supported test post and photo with provider ID stored; no dupl
 
 ## 5. Geotag rewrite: how it's built and the safeguards
 
-Behaviour (Decision 4):
+Behaviour (Decision 4, revised Oct 15): **every image we publish gets the business's exact latitude and longitude**, whatever its original GPS was, including AI-generated posters.
+
 | Original GPS | Action |
 |---|---|
-| Within **N metres** of the business (N configurable, default 500 m) | Keep as-is, `KEPT` |
-| Further away | Overwrite with the business's coordinates, `REWRITTEN`; log the original |
-| Absent | Add the business's coordinates, `ADDED` |
+| Present (any distance) | Record it in `originalGps`, then overwrite with the business's coordinates |
+| Absent, or AI-generated poster | Write the business's coordinates |
+
+There is deliberately **no "near" threshold**. Earlier I proposed "keep the GPS if it's near the business", which needs a distance cutoff (e.g. 500 m), because a phone's GPS inside the shop never exactly matches the map pin. Since the requirement is now the exact business coordinates on every image, that cutoff isn't needed. If nearby photos should be left untouched instead, the threshold comes back as a setting.
 
 Implementation notes:
-- Business coordinates come from the connected location's `latlng` (confirm the field name in the Business Information API during the spike), not from a staff-typed address.
-- Use **exiftool** (CLI, spawned like `ffprobe` in `media-probe.ts`) to write GPS tags. sharp's EXIF writing for GPS is fiddlier, and I'm not confident of its format, so check it in the spike.
-- Applies to **real photos only**. AI-generated posters and templates are not geotagged (there is no camera capture to describe).
-- Safeguards I'm adding: a **per-workspace switch** (default on, since you want it), the original kept and recorded in `MediaAsset.originalGps`, an `AuditEvent` per rewrite, and a staff-visible "geotag action" column so a human can see what happened to each photo.
-- Reality check to carry into the pilot: reports say Google strips EXIF on upload, so it may not survive to the served image. The spike checklist includes uploading a geotagged test photo and inspecting the served copy.
+- Coordinates come from the connected location's `latlng` in the Business Information API (the pin Google has for the business), stored on `GbpLocation`. Confirm the field name in the spike. If it isn't returned, staff paste the coordinates from the Google Maps pin. Staff confirm the coordinates once per location on the staff dashboard, since a wrong pin would geotag every image wrongly.
+- Use **exiftool** (spawned like `ffprobe` in `media-probe.ts`) to write `GPSLatitude`, `GPSLongitude` and their reference tags. Output is JPEG, because PNG and WebP do not reliably carry EXIF GPS; AI-generated images are converted first.
+- Safeguards: per-workspace switch `geotagEnabled` (default on), original GPS kept in `originalGps`, applied coordinates in `geotagLat`/`geotagLng`, an `AuditEvent` per write, and a staff-visible column showing what happened to each image.
+- Reality check to carry into the pilot: reports say Google strips EXIF on upload, so the coordinates may not survive to the served image. The spike (§4.4) uploads a test image and inspects what Google serves.
 
 ## 6. Phase 3 (V2.2) and Phase 4 (V2.3)
 
@@ -179,7 +189,8 @@ The client does this on their Business Profile: open the profile, open the setti
 Record the OAuth demo video for `business.manage` verification later (same shape as the YouTube one), and add a Business Profile section to the privacy policy before submitting for verification.
 
 ## 9. Open items
-- Website platforms of the pilot owners (decides alt-text delivery).
+- Alt text default: keyword-led sentence (recommended) or keyword-only?
+- Geotag: confirm "exact business coordinates on every image" (no near-threshold).
 - Language(s) of posts (English only, or Hindi/regional).
 - Price target per location (sets the AI cost cap).
 - Staff emails to put on the allowlist.

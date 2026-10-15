@@ -145,7 +145,7 @@ Pilot with 3-5 real businesses before onboarding more (blueprint rule, and I agr
 
 ## 7. Decisions and open questions
 
-Decided Oct 15: see `v2Implementation.md` §1 (managed service first, OAuth per owner, no video, human approval by default, staff login by Google sign-in + allowlist, **geotag rewrite and website alt text are in**, overriding the recommendation in §2). Still open: website platforms, post languages, price target, staff emails. Original questions below for reference.
+Decided Oct 15: see `v2Implementation.md` §1 (managed service first, OAuth per owner, no video, human approval by default, staff login by Google sign-in + allowlist). **Geotag and alt text are in, overriding the recommendation in §2**: every image (uploaded or AI-generated) gets the business's exact coordinates written into its EXIF, and alt text built from the assigned keyword is embedded in the image metadata (not a website deliverable). Caveat unchanged: Google reportedly strips metadata and the GBP API has no alt-text field, so neither is promised to affect ranking. Still open: alt-text default style, post languages, price target, staff emails. Original questions below for reference.
 
 1. Do you have (or can a pilot client provide) a **verified GBP, 60+ days old, with a website**? The API access request needs one. Is it OK to file the request from your account/company?
 2. Who runs keyword research: "a client of our own company" — an in-house team member, or an outside client? Either way it's a manual entry screen, but it decides whether the admin screen is internal-only or needs its own login role.
