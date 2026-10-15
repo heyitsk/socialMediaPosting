@@ -15,7 +15,10 @@ Convention: feature branches off `v2`, merged back into `v2`, then `v2` → `mai
 | 6 | Human approval before posting by default; auto-publish is opt-in later. |
 | 7 | Keyword research done by **staff** (a member of our company), entered through a staff dashboard reached by **Google sign-in + email allowlist**, not a seeded password login (§3). |
 | 8 | **Exact business coordinates on every image** confirmed (no "near" threshold); **alt text default is the keyword-led sentence**. |
-| 9 | **Languages: Hindi and English**, set per location (§4.2). |
+| 9 | **Language: English only** for V2 (Hindi was added and then dropped on Oct 15; revisit later). |
+| 10 | **Alt text uses the template** sentence (§4.4 level 1); vision-assisted stays a later option. |
+| 11 | **Cost, pricing and Stripe subscriptions are deferred** to a later phase (V2.4, §6). For now we build and test; usage is only measured. |
+| 12 | **AI stack (proposed, §4.2):** hosted Claude API for text, template-rendered posters instead of generated images, no local model and no LoRA. |
 
 Note for the record: the client's `V2 Blueprint.docx` lists falsifying EXIF GPS as something not to build, and independent tests found no ranking effect from geotags. Reports also say Google strips image metadata on upload, and the GBP API has no alt-text field, so embedded alt text and GPS may never be seen by Google. Decision 4 overrides that on Kushagra's call. We do not promise ranking gains from either in customer-facing copy, and both ship behind per-workspace switches (§5).
 
@@ -96,9 +99,27 @@ Rotation of the 5 keywords × services × angles (tip, FAQ, offer, seasonal, eve
 - Claude API with structured output. Input: approved facts, one keyword, angle, tone, CTA destination, prohibited claims. No facts means no draft.
 - Fact-check pass rejects invented prices, services, credentials, offers and keyword stuffing. Business name never gets keywords.
 - Store prompt version, facts used, model, draft, human edits and final copy.
-- Cost cap per workspace per month and a `UsageLedger` row for each generation.
-- **Language:** each location has a post language (`en` or `hi`; mixed Hinglish allowed if staff ask). Drafts are written directly in that language, not translated afterwards, and sent to GBP with the matching `languageCode`. The fact-check pass runs on the output language. Keywords are never translated.
-- **Hindi text in poster images:** image generators often garble Devanagari, so posters with text are **rendered from templates with a real Devanagari font** (sharp/SVG), with the AI producing at most the background or illustration. This is a rendering choice to confirm in the first pilot.
+- Record a `UsageLedger` row (tokens, images, model) for each generation so real cost can be measured during the pilot. Caps and pricing come later (§6, V2.4).
+- **Language:** English only for V2. Posts go to GBP with `languageCode: "en"`. Keywords are used verbatim, never rewritten.
+
+#### AI stack (proposed Oct 15, to confirm)
+
+| Job | Choice | Why |
+|---|---|---|
+| Post drafts, profile description, review-reply drafts, fact-check pass | **Hosted Claude API** through the Anthropic TypeScript SDK, called from the backend. Start with `claude-haiku-5-5` (the cheapest tier) for post drafts, and `claude-sonnet-5-5` for the one-time profile description and the fact-check pass if Haiku misses claims in the pilot. | Best at following a strict brief and returning structured output (`output_config.format` with a JSON schema), so posts arrive as validated fields (body, CTA, post type), not free text. No GPU to run. The stable part of the prompt (instructions + approved facts + keyword) is cacheable with prompt caching. |
+| Images and posters | **Templates rendered on our server** (sharp/SVG, same family as `lib/render.ts`): the owner's photo or a plain/gradient/licensed background with the offer, business name, phone and CTA drawn on top. Claude writes the poster text and picks the template. | Needs no image model, so it's free, deterministic, and the text is never garbled. Avoids fake customer photos, which the blueprint forbids. |
+| Optional AI backgrounds or illustrations | **Later**, a hosted text-to-image API (an Amazon Bedrock image model is the obvious candidate since AWS is already in use; pick after the pilot), behind an `ImageGenerator` interface. | Claude reads images but does not generate them, so this would be a separate provider. Not needed for V2.1. |
+| Photo understanding (later alt-text level 2, photo category tagging) | Claude vision (image input) through the same client. | One provider for text and image understanding. |
+
+Not chosen, and why:
+- **Open-source model on Docker:** production is one EC2 box with no GPU. A CPU-served model is slow and weaker than hosted Haiku at following a strict, fact-grounded brief; a GPU instance bills around the clock whether or not anyone posts; and we'd own the model ops. Revisit only if usage grows so large that API spend clearly exceeds a dedicated GPU.
+- **A LoRA trained on keywords:** a LoRA adapts an image model's style or subject from a set of training images. Keywords aren't training data for it, it needs GPUs for training and serving, and it needs a curated image set per brand. Our problem (clean, on-message local posters) is solved by owner photos plus templates. Revisit only if clients want a consistent illustrated brand style at scale.
+
+Implementation notes:
+- A small `lib/ai/` module with a provider-neutral `LlmClient` interface (draft, factCheck, describeImage), so the model or provider can change without touching routes.
+- The Anthropic API key lives only in the backend environment or secret store, never in the frontend, Git or logs (same rule as the other platform keys in `lib/env.ts`).
+- Direct Anthropic API is the simplest; Claude on Amazon Bedrock is an option if billing should sit on AWS. Check current model IDs and prices on the day we build.
+- Every generation stores prompt version, facts used, model, output and human edits (blueprint §5), and runs the fact-check pass before a draft can reach approval.
 
 ### 4.3 Photo pipeline
 Reuse V1: `MediaAsset`, presigned S3 upload, `media-probe.ts`, `render.ts`.
@@ -116,10 +137,10 @@ Scope change (Oct 15): alt text is for **the image we generate or the owner uplo
 - **Which keyword:** each image belongs to a content plan item, which already carries one of the 5 keywords (`keywordId`). Staff can override per image.
 - **What text:** `altText` = the keyword plus a short truthful description and the business area, e.g. "Teeth whitening in Salt Lake City at Sharma Dental Clinic". `altKeywords` = the exact assigned keyword(s). A pure keyword list as alt text is easy to enable (`altTextMode: KEYWORD_ONLY | KEYWORD_SENTENCE`, default sentence), but it is the "keyword stuffing" form that Google's alt-text guidance discourages and is useless to screen-reader users. Kushagra chose the keyword-led sentence as the default (Oct 15); keyword-only stays available as a setting.
 - **How the sentence is built:** two levels, both deterministic about the keyword.
-  1. **Template (V2.1 default, free, no hallucination):** fill `{keyword} at {business name}, {area}` from the approved keyword, the location's name, and its city/area, e.g. "Teeth whitening in Salt Lake City at Sharma Dental Clinic". Optionally add a fixed per-photo-category suffix taken from the GBP media category the image is filed under (exterior, interior, team at work, product), e.g. "... clinic exterior". Max about 125 characters; the keyword appears exactly once and is never altered.
+  1. **Template (V2.1 default, confirmed Oct 15; free, no hallucination):** fill `{keyword} at {business name}, {area}` from the approved keyword, the location's name, and its city/area, e.g. "Teeth whitening in Salt Lake City at Sharma Dental Clinic". Optionally add a fixed per-photo-category suffix taken from the GBP media category the image is filed under (exterior, interior, team at work, product), e.g. "... clinic exterior". Max about 125 characters; the keyword appears exactly once and is never altered.
   2. **Vision-assisted (later, optional):** a vision model describes what is actually in the image ("dentist whitening a patient's teeth"), and an LLM writes the sentence around the keyword **only if the image matches the keyword**; otherwise it falls back to the template and flags the image for staff, so a keyword is never attached to an image that doesn't show it. Costs one vision call per image, so it's gated by the usage cap.
   Staff can edit any generated alt text per image.
-- **Hindi and English:** the keyword is used verbatim in whatever script staff entered it (Devanagari, Latin or Hinglish); the sentence follows the post's language. EXIF `ImageDescription` is ASCII-only by spec, so Hindi text is written to **XMP and IPTC (UTF-8)** only, and EXIF carries just the English or transliterated form.
+- **Language:** English only for now, so the sentence and the keyword are plain English text and fit every metadata field, including EXIF `ImageDescription`. If a non-English language is added later, EXIF `ImageDescription` is ASCII-only by spec, so that text would go into XMP and IPTC (UTF-8) only.
 - **Where it goes (GBP has no alt-text field):** written into the publish JPEG's metadata with exiftool, in the places image tools actually read: XMP `dc:description` and `dc:subject` (keywords), IPTC `AltTextAccessibility`, `ExtDescrAccessibility` and `Keywords`, and EXIF `ImageDescription` (also a candidate for `XPKeywords`). Same file also gets a descriptive filename.
 - **Spike (needs the approved API):** (a) does `MediaItem.description` accept text for location photos and show anywhere? If yes, put the alt text there too; (b) upload a test image with all of the above and inspect the copy Google serves. If Google strips it, the metadata is harmless but invisible there; it still helps wherever the owner reuses the file (their website, other platforms).
 - The alt text is also shown in the app with a copy button. That costs nothing and lets owners reuse it on their website if they want. No website integration is planned.
@@ -155,6 +176,13 @@ Implementation notes:
 
 - **V2.2:** review fetch and reply drafts with human approval, multi-location per workspace, Performance dashboard (daily metrics, monthly keyword impressions, per-photo `insights.viewCount` if it works), usage caps and plan limits.
 - **V2.3:** rank grid through a contracted provider, after real unit costs are known (`v2Plan.md` §9).
+- **V2.4 — Subscriptions, pricing and cost control (deferred; start when preparing for production):**
+  - Stripe subscriptions (Checkout and customer portal, webhooks for payment status, plan state on the workspace).
+  - Plans and a **price target per location** (what you charge per location per month).
+  - Per-plan caps on AI drafts, AI images, locations and (later) rank-grid scans, derived from the real costs recorded in `UsageLedger` during the pilot.
+  - A usage meter shown to customers before a credit-consuming action, spend alerts, and hard caps per workspace.
+  - Optional add-ons: AI images, rank-grid credits.
+  - Until then, V2.0–V2.3 are built and tested with no billing and no caps beyond a simple safety limit on AI calls so a bug can't run up a bill.
 
 ## 7. Testing and rollout
 
@@ -200,6 +228,7 @@ The client does this on their Business Profile: open the profile, open the setti
 Record the OAuth demo video for `business.manage` verification later (same shape as the YouTube one), and add a Business Profile section to the privacy policy before submitting for verification.
 
 ## 9. Open items
-- Price target per location (what you plan to charge per location per month; sets the AI, image and rank-scan caps). Caps ship as config, so this can be decided after the pilot starts.
+- Confirm the AI stack in §4.2 (hosted Claude for text, template posters, no local model, no LoRA).
+- Price target per location and Stripe plans: deferred to V2.4.
 - Real staff emails to replace the sample on the allowlist.
 - Whether vision-assisted alt text (§4.4 level 2) is wanted after the pilot.
