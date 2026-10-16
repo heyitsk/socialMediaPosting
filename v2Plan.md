@@ -6,7 +6,7 @@ Inputs: client's `V2 Blueprint.docx` (Click 72, Oct 14), the V1 codebase, Google
 ## 0. TL;DR
 
 - **Feasible: yes**, for the core product (connect GBP, audit, keyword-driven posts + photos, scheduling, review replies, performance reporting). It fits V1's architecture almost one-to-one.
-- **Gate: Google's GBP API is approval-gated.** A new Cloud project has quota 0 until Google approves "Basic API Access". Requirements include a verified GBP that is 60+ days old with a website. Also, `business.manage` is a sensitive OAuth scope, so it needs OAuth verification and a demo video, like the YouTube one. The access request should be filed now, because it is the only thing outside our control.
+- **Gate: Google's GBP API is approval-gated.** A new Cloud project has quota 0 until Google approves "Basic API Access". Requirements include a verified GBP that is 60+ days old with a website. Also, third-party guides say `business.manage` is a sensitive OAuth scope needing verification and a demo video like the YouTube one; Google's console showed it as non-sensitive on Oct 17, so check the Verification Center before assuming either. The access request should be filed now, because it is the only thing outside our control.
 - **Two parts of the original idea don't survive contact with the facts** (details in §2):
   1. **Geotagging photos with the business's location** — independent tests show no ranking effect, Google strips EXIF on upload, and writing coordinates into a photo taken elsewhere is falsified metadata. The client's own blueprint says do not build it.
   2. **Alt text on GBP photos/posts** — the GBP API has no alt-text field. Alt text only helps on the client's *website*.
