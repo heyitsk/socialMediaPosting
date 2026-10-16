@@ -215,6 +215,14 @@ Google's setup page lists seven APIs: Google My Business API, My Business Accoun
 ### 8.5 Get your login added as Manager on the client's profile
 The client does this on their Business Profile: open the profile, open the settings menu, People and access, Add, enter your email, choose **Manager**, send. You then accept the invite from the email or the Business Profile dashboard. Menu labels change, so follow the on-screen wording. Confirm you can now see the profile when signed in with your login.
 
+### 8.5b Organization account (Google lists it as a prerequisite; added Oct 16)
+Google's prerequisites page says "To create an Organization account, go to the GBP help center" (https://support.google.com/business/answer/7663063). I have not confirmed whether the access form rejects applications without one, so treat it as required until proven otherwise. What the help page says:
+- An organization account is a Business Profile account type for third parties that manage locations for owners. One organization per company. It can manage a location only after that location grants it permission.
+- Create it at `business.google.com/agencysignup`: enter the agency website, **sign in with an email on the agency's domain**, confirm it is the primary account, add agency details and any additional owners.
+- **A user can't be added to an organization if their account directly owns or manages any locations.** So the login used to create or join the organization must not already own or manage the client's profile directly.
+
+Practical order if we do it properly: (1) create the organization with a company-domain login; (2) the client adds that organization (or a member of it) as Owner or Manager of the location; (3) use an owner or manager email of that location on the form. Remove the old direct access afterwards if no longer needed. If the company has no domain email, the choice is between filing now with the direct owner login (faster, riskier) or setting up a domain email first (slower, safer).
+
 ### 8.6 File the form
 1. Open https://support.google.com/business/contact/api_default signed in with the same account.
 2. Choose "Application for Basic API Access" and fill in the requested fields, including the project number from 8.1 and the email that is Manager on the client's profile. (I haven't seen the form's other fields; it needs a login to open.)
