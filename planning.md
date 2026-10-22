@@ -417,7 +417,7 @@ services:
       - /your/local/n8n/data:/home/node/.n8n
 ```
 
-> **Replace** `/your/local/n8n/data` with the actual path on your host machine where n8n data should be stored (e.g., `/home/kushagra/n8n-data`).
+> **Replace** `/your/local/n8n/data` with the actual path on your host machine where n8n data should be stored (e.g., `~/n8n-data`).
 
 ### Workflow Architecture for YouTube Uploads
 

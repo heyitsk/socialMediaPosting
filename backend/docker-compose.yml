@@ -43,7 +43,7 @@ services:
       WEBHOOK_URL: http://localhost:5678
       # Must match backend's N8N_CALLBACK_SECRET — referenced by the
       # "Send Callback"/"Send Error Callback" nodes in each poster workflow.
-      CALLBACK_SECRET: 10eae92593ffa51821599943e5cc48f52a96a0666f39f6e46e1976321f12b1b2
+      CALLBACK_SECRET: ${N8N_CALLBACK_SECRET:?}
       # n8n blocks {{ $env.* }} access in node expressions by default (security
       # hardening) — required here since our callback nodes read $env.CALLBACK_SECRET.
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
