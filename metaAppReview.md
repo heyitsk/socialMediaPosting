@@ -8,9 +8,9 @@ Re-read it against the code before submitting, and against Meta's current form.
 Do **not** put the reviewer's password in this file. Enter it only in the
 dashboard's review notes.
 
-## What smPosting is (the opening sentence for every permission)
+## What postUploaders is (the opening sentence for every permission)
 
-smPosting is a web app (https://app.postuploaders.com) where a person connects
+postUploaders is a web app (https://app.postuploaders.com) where a person connects
 their own social accounts, writes a post once, and publishes or schedules it to
 the accounts they choose. It only ever acts on accounts the signed-in person
 connected, and only to publish what they wrote.
@@ -43,7 +43,7 @@ connected, and only to publish what they wrote.
 ## How the data is handled (if a form asks)
 
 - Access tokens are encrypted at rest (AES-256-GCM) and never sent to the browser.
-- Disconnecting an account in smPosting, or removing the app in Facebook,
+- Disconnecting an account in postUploaders, or removing the app in Facebook,
   Instagram or Threads settings, deletes our stored tokens. Meta's deauthorize
   callback does the same automatically.
 - Full policy: https://app.postuploaders.com/privacy
@@ -70,7 +70,7 @@ connected, and only to publish what they wrote.
 3. Click Connect. Show the full Meta permission dialog with every permission
    from the table above visible. (Remove the app in Facebook settings first, so
    the dialog actually appears.)
-4. Return to smPosting and show the connected account in the list.
+4. Return to postUploaders and show the connected account in the list.
 5. Compose and publish a post to it.
 6. Open the real Facebook Page, Instagram account or Threads profile and show
    the post live there.

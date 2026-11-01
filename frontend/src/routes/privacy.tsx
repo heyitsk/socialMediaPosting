@@ -1,5 +1,10 @@
 import { LegalLayout, LegalSection } from "@/components/legal-layout";
-import { CONTACT_EMAIL } from "@/lib/legal";
+import {
+  COMPANY_ADDRESS,
+  COMPANY_NAME,
+  COMPANY_WEBSITE,
+  CONTACT_EMAIL,
+} from "@/lib/legal";
 
 export function PrivacyPage() {
   return (
@@ -10,6 +15,14 @@ export function PrivacyPage() {
           connect your own social media accounts, write a post once, and we publish or schedule it
           to the accounts you choose. This policy explains what data we handle to do that, and what
           we do not do with it.
+        </p>
+        <p>
+          postUploaders is operated by {COMPANY_NAME}, whose registered address is {COMPANY_ADDRESS}.
+          Company website:{" "}
+          <a href={COMPANY_WEBSITE} target="_blank" rel="noreferrer">
+            {COMPANY_WEBSITE}
+          </a>
+          .
         </p>
         <p>
           Questions about this policy: <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>.
