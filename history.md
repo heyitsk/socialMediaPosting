@@ -14,8 +14,8 @@
 | **Active Platforms** | Facebook, Instagram, Reddit, YouTube, Pinterest |
 | **Excluded (V1)** | Quora (no API), X/Twitter (deferred to V2) |
 | **Credential Scope** | Single user (your own accounts) |
-| **n8n Setup (V1 workflows)** | Self-hosted Docker (container: `n8n`, project: InternApplier) — used for building/testing the standalone platform workflows in `workflows/` |
-| **n8n Setup (V2 SaaS backend)** | Separate, project-scoped Docker container (`smposting-n8n`, part of `backend/docker-compose.yml`, own Postgres/Redis) — migrated off the shared InternApplier container Sep 16 so the SaaS backend doesn't depend on an unrelated project's n8n instance. Sets its own `CALLBACK_SECRET` and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` (see Session 18). |
+| **n8n Setup (V1 workflows)** | Self-hosted Docker (container: `n8n`, project: legacy) — used for building/testing the standalone platform workflows in `workflows/` |
+| **n8n Setup (V2 SaaS backend)** | Separate, project-scoped Docker container (`smposting-n8n`, part of `backend/docker-compose.yml`, own Postgres/Redis) — migrated off the shared legacy container Sep 16 so the SaaS backend doesn't depend on an unrelated project's n8n instance. Sets its own `CALLBACK_SECRET` and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` (see Session 18). |
 | **n8n URL (local)** | http://localhost:5678 |
 | **n8n Public URL (temp)** | https://breach-payer-sharpie.ngrok-free.dev |
 | **OAuth Callback URL** | https://breach-payer-sharpie.ngrok-free.dev/rest/oauth2-credential/callback |
@@ -36,7 +36,7 @@
 | `docker-compose.yml` | n8n Docker configuration with all required env variables | 2026-08-11 |
 | `workflows/` | n8n workflow JSON exports (importable into n8n) | 2026-09-07 |
 | `websitePlan.md` | V2 SaaS product & technical spec (architecture, OAuth, DB schema, roadmap) | 2026-09-21 |
-| `trialBun/` *(external, `/home/kushagra/Desktop/trialBun`)* | BullMQ/ioredis-under-Bun spike test scaffold — not part of this repo | 2026-09-11 |
+| `trialBun/` *(external, outside this repo)* | BullMQ/ioredis-under-Bun spike test scaffold — not part of this repo | 2026-09-11 |
 
 ---
 
@@ -86,7 +86,7 @@
 
 **Phase 1 checklist:**
 - [x] `history.md` created
-- [x] Docker configured — 3 env vars added to existing InternApplier n8n container
+- [x] Docker configured — 3 env vars added to existing legacy n8n container
 - [x] n8n container restarted and verified (`filesystem` mode confirmed live)
 - [x] Cloudinary account created for media hosting
 - [x] Google Sheet content calendar set up with separate date/time columns & ISO formula
@@ -104,8 +104,8 @@
 
 **What we did:**
 - Answered Docker question: **no separate n8n instance needed** — use existing one
-- Inspected existing container (ID: `0b36cdb21231`, project: InternApplier)
-- Found existing n8n compose file at: `/home/kushagra/Desktop/InternApplier/docker-compose.yml`
+- Inspected existing container (ID: `0b36cdb21231`, project: legacy)
+- Found existing n8n compose file at: `the legacy project's docker-compose.yml`
 - Key findings from existing setup:
   - ✅ Volume mount already exists (`n8n_data` named volume — data is persistent)
   - ✅ Timezone already set correctly (`Asia/Kolkata`)
@@ -113,7 +113,7 @@
   - ❌ Missing: `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` (critical for YouTube)
   - ❌ Missing: `N8N_PAYLOAD_SIZE_MAX=4000`
   - ❌ Missing: `EXECUTIONS_DATA_PRUNE=true`
-- Added all 3 missing vars to `/home/kushagra/Desktop/InternApplier/docker-compose.yml`
+- Added all 3 missing vars to `the legacy project's docker-compose.yml`
 - Restarted container with `docker compose up -d --force-recreate n8n`
 - Verified all vars are live ✅
 
@@ -121,7 +121,7 @@
 n8n's tunnel gives your local instance a public URL automatically. You can find it in the n8n logs or editor — it looks like `https://[id].hooks.n8n.cloud`. Use this URL as the OAuth callback/redirect URI when setting up Meta, Pinterest, Reddit developer apps in `setup.md`.
 
 **Files modified this session:**
-- `/home/kushagra/Desktop/InternApplier/docker-compose.yml` — added 3 env vars
+- `the legacy project's docker-compose.yml` — added 3 env vars
 - `history.md` — updated Phase 1 checklist + added this session log
 
 ---
@@ -479,7 +479,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 **Files modified this session:**
 - `websitePlan.md` — §1 Backend Tech Stack table rows updated, new "BullMQ/ioredis-under-Bun Spike Test Results" subsection added, §8 Phase 1 roadmap item checked off, footer changelog entry added
 - `history.md` — this entry, Key Technical Decisions updated
-- `trialBun/` (outside this repo, at `/home/kushagra/Desktop/trialBun`) — spike-test scaffold, not part of `smPosting`'s tracked files
+- `trialBun/` (outside this repo) — spike-test scaffold, not part of `smPosting`'s tracked files
 
 ---
 
@@ -502,7 +502,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 - **Debugged two real deployment issues while wiring the above, both resolved:**
   1. **`ngrok` showing the same URL for both tunnels** — root cause: the free plan only grants one static domain. Resolved by keeping `PUBLIC_BACKEND_URL` on the ngrok domain (needed for Meta's OAuth callback, which rejects localhost) while pointing `N8N_BASE_URL` straight at `http://localhost:5678` — no tunnel needed since the backend and n8n run on the same machine.
   2. **n8n's callback nodes threw "access to env vars denied"** when reading `$env.CALLBACK_SECRET` — root cause: n8n's `N8N_BLOCK_ENV_ACCESS_IN_NODE` security hardening defaults to blocking `{{ $env.* }}` in node expressions. Fixed by explicitly setting `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` on the n8n container (see next item) and re-testing — resolved.
-  - In the course of this, **migrated the SaaS backend's n8n off the shared InternApplier container onto its own project-scoped container**: added an `n8n` service to `backend/docker-compose.yml` (alongside the already-present Postgres/Redis), with its own `CALLBACK_SECRET` (matching `N8N_CALLBACK_SECRET`) and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` — keeps the SaaS backend's infra self-contained rather than depending on an unrelated project's n8n instance.
+  - In the course of this, **migrated the SaaS backend's n8n off the shared legacy container onto its own project-scoped container**: added an `n8n` service to `backend/docker-compose.yml` (alongside the already-present Postgres/Redis), with its own `CALLBACK_SECRET` (matching `N8N_CALLBACK_SECRET`) and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` — keeps the SaaS backend's infra self-contained rather than depending on an unrelated project's n8n instance.
 - **Confirmed the full loop works end-to-end**: submitted a real post via the new Composer UI → `Post` created `PROCESSING` → `facebook-poster` workflow ran → Graph API accepted it → callback returned `204` → `Post.status` flipped to `PUBLISHED` with a matching `PostLog` row.
 - **Frontend Composer and History pages built out for real** (both were placeholders before):
   - `routes/composer.tsx`: queries `/api/integrations`, filters to `FACEBOOK` accounts, lets the user pick a Page, enter a caption, choose media type (`TEXT`/`IMAGE`/`VIDEO`), and (for non-text) a media URL (Cloudinary — no upload widget yet); submits via `POST /api/posts` with `sonner` success/error toasts.
@@ -512,7 +512,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 
 **Decisions made:**
 - Facebook-only, single-`ConnectedAccount`-to-one-`Post` dispatch for this pass — no multi-platform fan-out, no BullMQ queueing yet; both are deferred until a second platform is wired up and parallel dispatch is actually needed (per the `tidy-yawning-karp.md` plan).
-- The backend's own n8n instance is now a project-scoped Docker service in `backend/docker-compose.yml`, separate from the shared InternApplier container used for the original V1 workflow-building/testing — avoids coupling the SaaS backend's infra to an unrelated project.
+- The backend's own n8n instance is now a project-scoped Docker service in `backend/docker-compose.yml`, separate from the shared legacy container used for the original V1 workflow-building/testing — avoids coupling the SaaS backend's infra to an unrelated project.
 - `N8N_BASE_URL` points at `localhost:5678` directly rather than through ngrok, since n8n and the backend run on the same machine and ngrok's free plan only grants one static domain (already used for `PUBLIC_BACKEND_URL`/OAuth).
 - `n8n-callback` route auth is a simple shared-secret header (`x-callback-secret`) check, not HMAC-signed payloads — matches the "shared secret" convention already used for `TOKEN_ENCRYPTION_KEY_V1`/`N8N_CALLBACK_SECRET` elsewhere in the stack; revisit only if a real security need arises.
 - The actually-built webhook payload/callback schema is deliberately simpler than `websitePlan.md` §5/§6's aspirational one (no `error_type`/`usage`/`youtube_metadata` fields yet — just what `facebook-poster.json` actually sends/expects). `websitePlan.md` updated to flag this gap explicitly rather than silently diverge from what's documented.
@@ -736,7 +736,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | n8n binary mode | `N8N_DEFAULT_BINARY_DATA_MODE=filesystem` |
 | Max payload size | `N8N_PAYLOAD_SIZE_MAX=4000` (4GB) |
 | Data pruning | `EXECUTIONS_DATA_PRUNE=true`, 336h TTL |
-| Volume mount | `/home/kushagra/n8n-data:/home/node/.n8n` |
+| Volume mount | `~/n8n-data:/home/node/.n8n` |
 | YouTube video source | Google Drive (Download) → n8n binary (`data` field) → YouTube node |
 | YouTube Shorts | Same YouTube node — add `#Shorts` in title/description, source must be 9:16, ≤ 60s (V1 note; superseded by the "YouTube `SHORTS` (V2)" row below — YouTube's limit is now ≤3 min, vertical or square) |
 | Google Drive → YouTube auth | Single OAuth2 client in `SMPosting V1` project covers both APIs |
@@ -773,7 +773,7 @@ This goes into Meta Developer App, Pinterest Developer App, Reddit App, Google C
 | Post dispatch scope (V2, current) | Facebook-only, one `ConnectedAccount` ↔ one `Post` (no multi-platform join table yet); `POST /api/posts` creates the post as `PROCESSING` and dispatches immediately — no draft step, no BullMQ queue yet (single synchronous `fetch` to n8n is enough until a second platform needs parallel fan-out) |
 | n8n dispatch failure handling (V2) | If the `fetch` to n8n itself throws (tunnel/container down) before n8n can even attempt the post, the backend immediately flips `Post.status = FAILED` and writes a `PostLog` row — prevents a post from being stuck in `PROCESSING` forever with no callback ever coming |
 | n8n callback auth (V2) | Shared-secret header (`x-callback-secret`, checked against `N8N_CALLBACK_SECRET`) on `POST /api/webhooks/n8n-callback` — not HMAC-signed payloads; matches the shared-secret convention already used elsewhere in the stack |
-| n8n container topology (V2) | SaaS backend's n8n runs as its own Docker service (`smposting-n8n`) in `backend/docker-compose.yml`, separate from the shared InternApplier container used to build/test the standalone V1 workflows — avoids coupling backend infra to an unrelated project. Needs its own `CALLBACK_SECRET` + `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` set to match the backend's `N8N_CALLBACK_SECRET` and allow callback nodes to read it via `{{ $env.CALLBACK_SECRET }}` |
+| n8n container topology (V2) | SaaS backend's n8n runs as its own Docker service (`smposting-n8n`) in `backend/docker-compose.yml`, separate from the shared legacy container used to build/test the standalone V1 workflows — avoids coupling backend infra to an unrelated project. Needs its own `CALLBACK_SECRET` + `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` set to match the backend's `N8N_CALLBACK_SECRET` and allow callback nodes to read it via `{{ $env.CALLBACK_SECRET }}` |
 | `N8N_BASE_URL` vs. tunnel (V2) | Points directly at `http://localhost:5678`, not through ngrok — backend and n8n run on the same machine, and ngrok's free plan only grants one static domain (already used for `PUBLIC_BACKEND_URL`/Meta OAuth, which does require a public HTTPS URL since Meta rejects localhost redirects) |
 | Instagram dual connection methods (V2) | Facebook Login and standalone Instagram Login can both connect the *same* physical Instagram account but issue tokens valid on different hosts (`graph.facebook.com` vs `graph.instagram.com`). Modeled as `ConnectedAccount.connectionMethod` (`FACEBOOK_PAGE` \| `INSTAGRAM_LOGIN`), folded into the unique constraint (`userId, platform, platformAccountId, connectionMethod`) so connecting via one flow never overwrites the other's token. |
 | Instagram Graph host selection (V2) | Resolved once, backend-side, at payload-build time — `GRAPH_HOST[connectedAccount.connectionMethod]` in `service/n8n.ts` — and shipped to n8n as `token.graph_host` data. n8n's HTTP nodes just string-concatenate whatever host they're given; no host-selection logic lives in the workflow itself. |

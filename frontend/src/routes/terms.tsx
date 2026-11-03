@@ -1,5 +1,10 @@
 import { LegalLayout, LegalSection } from "@/components/legal-layout";
-import { CONTACT_EMAIL } from "@/lib/legal";
+import {
+  COMPANY_ADDRESS,
+  COMPANY_NAME,
+  COMPANY_WEBSITE,
+  CONTACT_EMAIL,
+} from "@/lib/legal";
 
 export function TermsPage() {
   return (
@@ -9,6 +14,14 @@ export function TermsPage() {
           These terms govern your use of postUploaders at app.postuploaders.com. By signing in or
           using the service you agree to them and to our <a href="/privacy">Privacy Policy</a>. If
           you do not agree, do not use postUploaders.
+        </p>
+        <p>
+          postUploaders is operated by {COMPANY_NAME}, whose registered address is {COMPANY_ADDRESS}.
+          Company website:{" "}
+          <a href={COMPANY_WEBSITE} target="_blank" rel="noreferrer">
+            {COMPANY_WEBSITE}
+          </a>
+          .
         </p>
       </LegalSection>
 
